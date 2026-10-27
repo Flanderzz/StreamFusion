@@ -151,8 +151,14 @@ with it, as the native decode does. A `null` element of a JSON key array is a nu
 Flink 2.2 even without the option, and the native decode reproduces what the merge does with it:
 the record's first value row keeps its pairs with the key rows ahead of the null, then the job
 fails, or the rest of the record drops when the value format skips errors. A record whose value
-yields no row never reaches the null. `KeyedDecodeParityTest` and `KeyedAvroDecodeParityTest` pin
-the composition against Flink's own record deserializer on both lines.
+yields no row never reaches the null. A `null` element of a strict JSON value array is likewise a
+null value row: it fails the record beside any key row, while a record whose key yields no row
+emits nothing. Under `value.json.ignore-parse-errors`, Flink also collects a null value row for an
+element it cannot convert, and the merge then drops the rest of the record; the native decode
+drops just that element, as
+[the ingest divergence note](https://github.com/datafusion-contrib/StreamFusion/blob/main/divergences/21-ingest-text-envelope.md)
+records. `KeyedDecodeParityTest` and `KeyedAvroDecodeParityTest` pin the composition against
+Flink's own record deserializer on both lines.
 
 ### Source admission and fallbacks
 

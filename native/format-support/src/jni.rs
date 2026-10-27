@@ -97,11 +97,16 @@ fn create_value_decoder(
         // the key fields under the names the key format reads, and the wrapper owns the per-record
         // composition. The key format is raw or the value's own, so this library decodes both; an
         // Avro key's schemas ride its option lines.
-        let value_options: String = format_options
+        let mut value_options: String = format_options
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with("keyed."))
             .map(|line| format!("{line}\n"))
             .collect();
+        // A strict JSON value reports the null rows Flink's merge fails on beside a key row (see
+        // KeyedDecoder); one that skips errors drops such an element alone (divergences/21).
+        if format == FORMAT_JSON && !skip_errors {
+            value_options.push_str("json.null-rows=true\n");
+        }
         let value_schema: SchemaRef = Arc::new(Schema::new(
             keyed
                 .value_positions

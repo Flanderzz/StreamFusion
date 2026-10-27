@@ -415,6 +415,85 @@ fn keyed_null_key_element_without_value_rows_emits_nothing() {
     assert_eq!(values(&out, 0), vec![3]);
 }
 
+// A strict JSON value's `null` element is a null value row: Flink's merge fails on it beside a key
+// row, but a record whose key yields no row never pairs it, so that record emits nothing.
+#[test]
+fn keyed_null_value_element_without_key_rows_emits_nothing() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![None, Some(b"[]".as_slice()), Some(br#"{"k":3}"#.as_slice())],
+        vec![
+            Some(br#"[{"v":"a"},null,{"v":"b"}]"#.as_slice()),
+            Some(br#"[null]"#.as_slice()),
+            Some(br#"{"v":"c"}"#.as_slice()),
+        ],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![3]);
+}
+
+#[test]
+#[should_panic(expected = "null value row")]
+fn keyed_null_value_element_fails_beside_a_key_row() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![Some(br#"{"k":1}"#.as_slice())],
+        vec![Some(br#"[{"v":"a"},null]"#.as_slice())],
+    );
+
+    new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+}
+
+#[test]
+#[should_panic(expected = "null value row")]
+fn keyed_null_value_element_fails_beside_a_null_key_row() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![Some(br#"[null]"#.as_slice())],
+        vec![Some(br#"[null]"#.as_slice())],
+    );
+
+    new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+}
+
 // The decimal-bearing decode path and the Jackson-faithful walk (here for a raw control character
 // inside a key string) report the same null key rows as the fast path.
 #[test]

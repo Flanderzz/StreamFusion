@@ -396,6 +396,7 @@ class KeyedDecodeParityTest {
       {"[null]", "{\"id\":12}"},
       {"[{\"k\":3},null]", null},
       {"[null]", "[]"},
+      {"[null]", "[null]"},
       {"{\"k\":4}", "{\"id\":13}"},
     };
     List<ConsumerRecord<byte[], byte[]>> records = new ArrayList<>();
@@ -572,6 +573,222 @@ class KeyedDecodeParityTest {
       assertThrows(RuntimeException.class, () -> nativeDecoder.decode(List.of(paired)));
     }
     assertEquals(List.of(), flinkTombstoneRows);
+  }
+
+  // A strict value's null element is a null value row, which Flink's merge fails on beside a key
+  // row; a record whose key yields no row never pairs it and emits nothing.
+  @Test
+  void aNullValueElementFailsLikeFlinkOnlyBesideAKeyRow() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.JsonRuntimeCompat.ACCEPTS_ARRAY_ROOTS);
+    StreamTableEnvironment tEnv =
+        StreamTableEnvironment.create(StreamExecutionEnvironment.getExecutionEnvironment());
+    tEnv.executeSql(
+        "CREATE TABLE t (k BIGINT, id BIGINT) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset',"
+            + " 'key.format' = 'json', 'key.fields' = 'k',"
+            + " 'value.format' = 'json', 'value.fields-include' = 'EXCEPT_KEY')");
+    ObjectIdentifier identifier = ObjectIdentifier.of("default_catalog", "default_database", "t");
+    ResolvedCatalogTable table =
+        (ResolvedCatalogTable)
+            ((TableEnvironmentImpl) tEnv)
+                .getCatalogManager()
+                .getTable(identifier)
+                .orElseThrow()
+                .getResolvedTable();
+    DynamicTableSource source =
+        FactoryUtil.createDynamicTableSource(
+            null,
+            identifier,
+            table,
+            Map.of(),
+            new Configuration(),
+            Thread.currentThread().getContextClassLoader(),
+            false);
+    DataStream<?> stream =
+        ((DataStreamScanProvider)
+                ((ScanTableSource) source)
+                    .getScanRuntimeProvider(ScanRuntimeProviderContext.INSTANCE))
+            .produceDataStream(
+                name -> Optional.empty(), StreamExecutionEnvironment.getExecutionEnvironment());
+    Source<?, ?, ?> kafkaSource =
+        ((SourceTransformation<?, ?, ?>) stream.getTransformation()).getSource();
+    Field schemaField = KafkaSource.class.getDeclaredField("deserializationSchema");
+    schemaField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    KafkaRecordDeserializationSchema<RowData> flink =
+        (KafkaRecordDeserializationSchema<RowData>) schemaField.get(kafkaSource);
+    flink.open(
+        new DeserializationSchema.InitializationContext() {
+          @Override
+          public MetricGroup getMetricGroup() {
+            return new UnregisteredMetricsGroup();
+          }
+
+          @Override
+          public UserCodeClassLoader getUserCodeClassLoader() {
+            return SimpleUserCodeClassLoader.create(
+                Thread.currentThread().getContextClassLoader());
+          }
+        });
+    RowType physical =
+        (RowType) table.getResolvedSchema().toPhysicalRowDataType().getLogicalType();
+    KeyedDecodeSpec spec = KeyedDecodeSpec.resolve(table.getOptions(), physical);
+    assertNotNull(spec);
+    ConsumerRecord<byte[], byte[]> keyless =
+        new ConsumerRecord<>(
+            "t", 0, 0L, 0L, TimestampType.CREATE_TIME, -1, -1,
+            null,
+            "[{\"id\":10},null,{\"id\":11}]".getBytes(StandardCharsets.UTF_8),
+            new RecordHeaders(), Optional.empty());
+    ConsumerRecord<byte[], byte[]> paired =
+        new ConsumerRecord<>(
+            "t", 0, 1L, 0L, TimestampType.CREATE_TIME, -1, -1,
+            "{\"k\":1}".getBytes(StandardCharsets.UTF_8),
+            "[{\"id\":10},null]".getBytes(StandardCharsets.UTF_8),
+            new RecordHeaders(), Optional.empty());
+    List<RowData> flinkKeylessRows = new ArrayList<>();
+    Collector<RowData> keylessRows =
+        new Collector<>() {
+          @Override
+          public void collect(RowData row) {
+            flinkKeylessRows.add(row);
+          }
+
+          @Override
+          public void close() {}
+        };
+    Collector<RowData> pairedRows =
+        new Collector<>() {
+          @Override
+          public void collect(RowData row) {}
+
+          @Override
+          public void close() {}
+        };
+
+    flink.deserialize(keyless, keylessRows);
+    assertThrows(Throwable.class, () -> flink.deserialize(paired, pairedRows));
+    try (NativeKafkaBatchDecoder nativeDecoder =
+            new NativeKafkaBatchDecoder(
+                physical,
+                new JsonFormatProvider()
+                    .createDecoder(
+                        new NativeFormatContext(
+                            spec.valueRowType(),
+                            spec.valueRowType(),
+                            spec.optionsWithMarkers(),
+                            false)),
+                true,
+                List.of(),
+                -1,
+                null)) {
+      assertNull(nativeDecoder.decode(List.of(keyless)).batch());
+      assertThrows(RuntimeException.class, () -> nativeDecoder.decode(List.of(paired)));
+    }
+    assertEquals(List.of(), flinkKeylessRows);
+  }
+
+  // A null key row still counts as a key row: a strict value's null row beside it fails the
+  // record in Flink's merge, and natively.
+  @Test
+  void aNullValueElementBesideANullKeyElementFailsLikeFlink() throws Exception {
+    org.junit.jupiter.api.Assumptions.assumeTrue(
+        tech.streamfusion.compat.JsonRuntimeCompat.ACCEPTS_ARRAY_ROOTS);
+    StreamTableEnvironment tEnv =
+        StreamTableEnvironment.create(StreamExecutionEnvironment.getExecutionEnvironment());
+    tEnv.executeSql(
+        "CREATE TABLE t (k BIGINT, id BIGINT) WITH ("
+            + " 'connector' = 'kafka', 'topic' = 't',"
+            + " 'properties.bootstrap.servers' = 'localhost:9092',"
+            + " 'scan.startup.mode' = 'earliest-offset',"
+            + " 'key.format' = 'json', 'key.fields' = 'k',"
+            + " 'value.format' = 'json', 'value.fields-include' = 'EXCEPT_KEY')");
+    ObjectIdentifier identifier = ObjectIdentifier.of("default_catalog", "default_database", "t");
+    ResolvedCatalogTable table =
+        (ResolvedCatalogTable)
+            ((TableEnvironmentImpl) tEnv)
+                .getCatalogManager()
+                .getTable(identifier)
+                .orElseThrow()
+                .getResolvedTable();
+    DynamicTableSource source =
+        FactoryUtil.createDynamicTableSource(
+            null,
+            identifier,
+            table,
+            Map.of(),
+            new Configuration(),
+            Thread.currentThread().getContextClassLoader(),
+            false);
+    DataStream<?> stream =
+        ((DataStreamScanProvider)
+                ((ScanTableSource) source)
+                    .getScanRuntimeProvider(ScanRuntimeProviderContext.INSTANCE))
+            .produceDataStream(
+                name -> Optional.empty(), StreamExecutionEnvironment.getExecutionEnvironment());
+    Source<?, ?, ?> kafkaSource =
+        ((SourceTransformation<?, ?, ?>) stream.getTransformation()).getSource();
+    Field schemaField = KafkaSource.class.getDeclaredField("deserializationSchema");
+    schemaField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    KafkaRecordDeserializationSchema<RowData> flink =
+        (KafkaRecordDeserializationSchema<RowData>) schemaField.get(kafkaSource);
+    flink.open(
+        new DeserializationSchema.InitializationContext() {
+          @Override
+          public MetricGroup getMetricGroup() {
+            return new UnregisteredMetricsGroup();
+          }
+
+          @Override
+          public UserCodeClassLoader getUserCodeClassLoader() {
+            return SimpleUserCodeClassLoader.create(
+                Thread.currentThread().getContextClassLoader());
+          }
+        });
+    RowType physical =
+        (RowType) table.getResolvedSchema().toPhysicalRowDataType().getLogicalType();
+    KeyedDecodeSpec spec = KeyedDecodeSpec.resolve(table.getOptions(), physical);
+    assertNotNull(spec);
+    ConsumerRecord<byte[], byte[]> nullPair =
+        new ConsumerRecord<>(
+            "t", 0, 0L, 0L, TimestampType.CREATE_TIME, -1, -1,
+            "[null]".getBytes(StandardCharsets.UTF_8),
+            "[null]".getBytes(StandardCharsets.UTF_8),
+            new RecordHeaders(), Optional.empty());
+    List<RowData> flinkRows = new ArrayList<>();
+    Collector<RowData> rows =
+        new Collector<>() {
+          @Override
+          public void collect(RowData row) {
+            flinkRows.add(row);
+          }
+
+          @Override
+          public void close() {}
+        };
+
+    assertThrows(Throwable.class, () -> flink.deserialize(nullPair, rows));
+    try (NativeKafkaBatchDecoder nativeDecoder =
+            new NativeKafkaBatchDecoder(
+                physical,
+                new JsonFormatProvider()
+                    .createDecoder(
+                        new NativeFormatContext(
+                            spec.valueRowType(),
+                            spec.valueRowType(),
+                            spec.optionsWithMarkers(),
+                            false)),
+                true,
+                List.of(),
+                -1,
+                null)) {
+      assertThrows(RuntimeException.class, () -> nativeDecoder.decode(List.of(nullPair)));
+    }
+    assertEquals(List.of(), flinkRows);
   }
 
   // Where Flink's collector path collects a skipped key object as a null row, the key stays on
