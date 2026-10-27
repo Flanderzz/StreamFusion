@@ -648,6 +648,18 @@ class KafkaDecodeRoutingTest {
     assertStaysOnFlink(charset, "SELECT k, id FROM t");
   }
 
+  @Test
+  void aKeyedTableWithoutValueColumnsStaysOnFlink() {
+    StreamTableEnvironment tEnv = env();
+    tEnv.executeSql(
+        keyedTable(
+            "k BIGINT, region STRING",
+            "'key.format' = 'json', 'key.fields' = 'k;region',"
+                + " 'value.fields-include' = 'EXCEPT_KEY'"));
+
+    assertStaysOnFlink(tEnv, "SELECT k, region FROM t");
+  }
+
   private static String keyedTable(String columns, String keyOptions) {
     return "CREATE TABLE t ("
         + columns

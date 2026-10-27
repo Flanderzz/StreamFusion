@@ -140,8 +140,10 @@ every library carries, or the value's own format. Natively decoded pairs:
 
 Staying on Flink: any other pair (a JSON key over an Avro value, or a bare Avro key over an Avro
 Confluent value), keys over Protobuf values, a repeated `key.fields` entry, `ALL` with a key
-prefix (Flink's own rejection), a key option the key format's native decode doesn't reproduce (as
-its format page lists), and `key.format` with a CDC value format. On Flink 2.2 a JSON key with
+prefix (Flink's own rejection), a table whose every physical column is a key field under
+`EXCEPT_KEY` (Flink then emits key-only rows, and a native value decode needs a column), a key
+option the key format's native decode doesn't reproduce (as its format page lists), and
+`key.format` with a CDC value format. On Flink 2.2 a JSON key with
 `key.json.ignore-parse-errors` stays on Flink too: for a key object it skips, Flink's JSON format
 collects a null key row, which the key/value merge then dereferences, failing or dropping the
 record depending on the value format's own skip mode. Flink 1.18 drops that null, and its record

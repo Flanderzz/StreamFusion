@@ -141,6 +141,43 @@ class KeyedDecodeSpecTest {
   }
 
   @Test
+  void aTableOfOnlyKeyFieldsStaysOnFlink() {
+    RowType keysOnly =
+        RowType.of(
+            new LogicalType[] {new BigIntType(), new VarCharType(VarCharType.MAX_LENGTH)},
+            new String[] {"id", "region"});
+
+    KeyedDecodeSpec spec =
+        KeyedDecodeSpec.resolve(
+            Map.of(
+                "format", "json",
+                "key.format", "json",
+                "key.fields", "id;region",
+                "value.fields-include", "EXCEPT_KEY"),
+            keysOnly);
+
+    assertNull(spec);
+  }
+
+  @Test
+  void aRepeatedKeyFieldStaysOnFlink() {
+    KeyedDecodeSpec spec =
+        KeyedDecodeSpec.resolve(
+            Map.of("format", "json", "key.format", "json", "key.fields", "k;k"), PHYSICAL);
+
+    assertNull(spec);
+  }
+
+  @Test
+  void aKeyOverProtobufValuesStaysOnFlink() {
+    KeyedDecodeSpec spec =
+        KeyedDecodeSpec.resolve(
+            Map.of("format", "protobuf", "key.format", "raw", "key.fields", "k"), PHYSICAL);
+
+    assertNull(spec);
+  }
+
+  @Test
   void unsupportedShapesResolveToNull() {
     // A key format the value's native library doesn't carry.
     assertNull(

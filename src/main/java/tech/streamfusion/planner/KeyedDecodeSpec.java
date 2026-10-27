@@ -31,8 +31,10 @@ import tech.streamfusion.format.NativeFormatProviders;
  * like Flink's key format factory reads them, and the key format's own provider gates them and
  * renders the lines its native key decoder is built from. Anything else resolves to null — the
  * planner's fallback gate: a key format another library decodes, an unresolvable or repeated field,
- * {@code ALL} with a non-empty prefix (Flink's own rejection), a key option the native decode can't
- * reproduce, or a value format outside JSON, CSV, raw, Avro and Avro Confluent.
+ * {@code ALL} with a non-empty prefix (Flink's own rejection), no value fields at all (Flink then
+ * emits key-only rows, while a native value decode needs at least one column), a key option the
+ * native decode can't reproduce, or a value format outside JSON, CSV, raw, Avro and Avro
+ * Confluent.
  */
 public final class KeyedDecodeSpec {
   private final Map<String, String> optionsWithMarkers;
@@ -97,6 +99,9 @@ public final class KeyedDecodeSpec {
               .filter(position -> !keyPositions.contains(position))
               .boxed()
               .collect(ListCollectors.toList());
+    }
+    if (valuePositions.isEmpty()) {
+      return null;
     }
     // The key context looks like a table of the key format: its options live under
     // key.<format>.* with the factory defaults otherwise, and its fields drop the prefix.
