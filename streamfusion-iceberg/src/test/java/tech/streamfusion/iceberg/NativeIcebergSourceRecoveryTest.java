@@ -23,10 +23,18 @@ class NativeIcebergSourceRecoveryTest {
       new java.util.concurrent.ConcurrentHashMap<>();
 
   @org.junit.jupiter.params.ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(
-      strings = {"none", "range", "dynamic", "dynamic-unaligned"})
-  void midFileSavepointRestoresWithNewParallelismAndCommitsEveryRowOnce(String distribution)
-      throws Exception {
+  @org.junit.jupiter.params.provider.CsvSource({
+    "none,60000",
+    "range,60000",
+    "dynamic,60000",
+    "dynamic-unaligned,60000",
+    "none,20",
+    "range,20",
+    "dynamic,20",
+    "dynamic-unaligned,20"
+  })
+  void midFileSavepointRestoresWithNewParallelismAndCommitsEveryRowOnce(
+      String distribution, long checkpointInterval) throws Exception {
     EMITTED.set(0);
     CHECKPOINTED.clear();
     NativeIcebergRangeSinkTest.clearRangeWitnesses();
@@ -48,7 +56,7 @@ class NativeIcebergSourceRecoveryTest {
                     .toString());
     if (distribution.equals("range")) output.replaceSortOrder().asc("id").commit();
     var first =
-        environment(input, output, 2, null, true, distribution)
+        environment(input, output, 2, null, true, distribution, checkpointInterval)
             .executeAsync("iceberg-source-recovery");
     String savepoint;
     try {
@@ -83,20 +91,19 @@ class NativeIcebergSourceRecoveryTest {
     }
     assertEquals(0L, tech.streamfusion.operator.NativeAllocator.SHARED.getAllocatedMemory());
     assertEquals(0L, tech.streamfusion.operator.TaskOffHeapMemory.reservedBytes());
-    int checkpointRows =
-        CHECKPOINTED.entrySet().stream()
-            .max(java.util.Map.Entry.comparingByKey())
-            .orElseThrow()
-            .getValue()
-            .values()
-            .stream()
-            .mapToInt(Integer::intValue)
-            .sum();
-    assertTrue(checkpointRows > 0 && checkpointRows < 2001);
+    var metadata = org.apache.flink.test.util.TestUtils.loadCheckpointMetadata(savepoint);
+    // A newer checkpoint may have only an idle task's snapshot when cancellation interrupts it.
+    var checkpointCounts = CHECKPOINTED.get(metadata.getCheckpointId());
+    assertNotNull(checkpointCounts, "missing progress for the restored savepoint");
+    assertEquals(2, checkpointCounts.size(), "both source tasks must snapshot the savepoint");
+    int checkpointRows = checkpointCounts.values().stream().mapToInt(Integer::intValue).sum();
+    assertTrue(
+        checkpointRows > 0 && checkpointRows < 2001,
+        "savepoint must retain partial progress: " + checkpointCounts);
     EMITTED.set(checkpointRows);
     NativeIcebergSourceSqlTest.append(input, 2001, 2004);
     var restored =
-        environment(input, output, 3, savepoint, false, distribution)
+        environment(input, output, 3, savepoint, false, distribution, checkpointInterval)
             .executeAsync("iceberg-source-recovery");
     boolean stopped = false;
     try {
@@ -152,7 +159,8 @@ class NativeIcebergSourceRecoveryTest {
       int parallelism,
       String restore,
       boolean slow,
-      String distribution) {
+      String distribution,
+      long checkpointInterval) {
     var config =
         Configuration.fromMap(
             Map.of(
@@ -170,7 +178,7 @@ class NativeIcebergSourceRecoveryTest {
     var env = StreamExecutionEnvironment.getExecutionEnvironment(config);
     env.setParallelism(parallelism);
     env.setMaxParallelism(16);
-    env.enableCheckpointing(60_000);
+    env.enableCheckpointing(checkpointInterval);
     if (distribution.endsWith("unaligned")) env.getCheckpointConfig().enableUnalignedCheckpoints();
     var stream =
         NativeIcebergSource.read(

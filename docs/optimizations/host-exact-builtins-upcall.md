@@ -1,6 +1,24 @@
-# Host-exact builtins over the same upcall, with a faster pure-Rust opt-in
+# Host-exact builtins and verified Rust replacements
 
-**Applies to:** REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
+**Applies to:** integral ABS, REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
+
+## Removing the callback for integral ABS
+
+The verified integer ABS subset now uses a typed Arrow unary kernel, following Comet's
+wrapping-ABS structure. Flink's minimum negative value remains negative for all four widths;
+DataFusion's checked integer ABS is unsuitable. The planner retains generated evaluation for
+unverified producers, so removing the ABS callback cannot expose a different arithmetic or
+cast implementation in its argument. Scalar literals and arrays dispatch directly without
+the generic scalar-to-array adapter's temporary argument allocations.
+
+The [release controls](../benchmarks/scalar-functions.md#integral-abs) compare stock generated
+RowData, the preceding production JVM callback, and the compiled Rust Calc. Default-size
+1,024-row batches improve over both controls. Sixteen-row diagnostics improve substantially
+over the old callback but remain slower than stock; the generic Calc still constructs input
+projections and output batches per call. This optimization replaces an existing native-Calc
+computation; the small-batch and complete-job results do not establish universal acceleration.
+
+## Existing host-exact paths
 
 Builtins whose Rust implementation can diverge from the JVM's — REGEXP_EXTRACT (regex dialects),
 UPPER/LOWER (locale case folding), DATE_FORMAT/EXTRACT over `TIMESTAMP_LTZ` (time-zone database
@@ -24,6 +42,24 @@ end-to-end speedup for isolated temporal projections. The exact canonical TRY_CA
 is measured separately.
 See [the temporal contract](../operators/temporal-functions.md) and
 [release measurements](../benchmarks/scalar-functions.md#temporal-coverage-diagnostic-2026-09-15).
+
+## Verified integer negation without an upcall
+
+Unary minus over verified integer producers now avoids the generated JVM evaluator. Arrow's
+wrapping numeric kernel produces a new values buffer while sharing validity. Input-reference
+chains reuse DataFusion's physical negative expression, avoiding scalar-function argument
+cloning/allocation and dispatch. Literal-rooted chains use direct wrapping scalar dispatch
+without broadcasting a literal to an array.
+This matches Flink for all four signed widths and removes the intrinsic JVM callback and its
+per-row result adaptation. It does not change the native operator boundary or JNI ownership.
+
+The matcher extracts only direct inputs/literals, lossless widening and nested admitted
+negation. Other producers stay in one generated expression so extracting their negation does
+not expose a different arithmetic overflow or division failure. DECIMAL remains generated.
+The [release controls](../benchmarks/scalar-functions.md#integral-unary-minus) compare stock,
+previous callback and candidate at equal prepared-input boundaries and separately measure the
+complete job. Small batches still pay generic Calc setup/materialization costs; native coverage
+does not imply a standalone speedup.
 
 ## Canonical timestamp TRY_CAST
 

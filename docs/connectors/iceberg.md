@@ -104,7 +104,11 @@ forward/shuffle interleaving, cache size one, immediate/deferred append updates,
 partitioned immediate v2/v3 upserts and branches, deferred-keyed rejection, mixed
 native/stock target policies, plus continuous
 source/dynamic-sink 2→3 savepoint restore with aligned and unaligned checkpoint
-configurations. Captured-channel fixtures cover 2→3 and 3→2 append/keyed recovery
+configurations, with both ordinary and frequent periodic checkpoints. Source progress is
+read from the exact restored savepoint ID; a newer checkpoint interrupted by cancellation
+may contain only an idle task's zero-row snapshot. Both source tasks must have recorded
+the chosen savepoint, and final readback still verifies every committed row exactly once.
+Captured-channel fixtures cover 2→3 and 3→2 append/keyed recovery
 for both sink APIs and 1↔2 for the normal sink. They keep the source live, inject a
 failure after a completed checkpoint with actual retained Arrow channel state, then
 verify changing values and exact committed readback after rescaling. A
