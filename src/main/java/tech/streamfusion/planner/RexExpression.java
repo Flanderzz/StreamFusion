@@ -1077,13 +1077,35 @@ final class RexExpression {
         && call.getType().getComponentType().getSqlTypeName() == SqlTypeName.BINARY;
   }
 
+  /**
+   * Whether a cast only changes nullability and Flink's own cast resolution runs it as the
+   * identity. Narrowing never is, and before 2.2 not even widening a map is: Flink rebuilds the
+   * entries into a fresh {@code HashMap}, which reorders a map not already in that order.
+   */
+  private static boolean identityNullabilityCast(RelDataType source, RelDataType target) {
+    if (!org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(source, target)) {
+      return false;
+    }
+    var rule =
+        org.apache.flink.table.planner.functions.casting.CastRuleProvider.resolve(
+            org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(source),
+            org.apache.flink.table.planner.calcite.FlinkTypeFactory.toLogicalType(target));
+    return rule != null && "IdentityCastRule".equals(rule.getClass().getSimpleName());
+  }
+
   private static boolean standaloneCollectionExpression(RexCall call) {
     if (directBinaryMultisetCase(call)) return true;
     if ((call.getKind() == SqlKind.CAST
             || call.getOperator()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
         && call.getOperands().size() == 1) {
-      var source = call.getOperands().get(0).getType().getSqlTypeName();
+      RelDataType sourceType = call.getOperands().get(0).getType();
+      // A cast Flink runs as the identity passes the value through unchanged (the cast encoder
+      // emits its operand), like the plain column reference it replaces.
+      if (call.getKind() == SqlKind.CAST && identityNullabilityCast(sourceType, call.getType())) {
+        return false;
+      }
+      var source = sourceType.getSqlTypeName();
       return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
               .contains(source)
           && (source == call.getType().getSqlTypeName() || isCharacter(call));

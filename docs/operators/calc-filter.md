@@ -2288,7 +2288,7 @@ Existing admitted collection subscripts and Boolean/integer ARRAY_DISTINCT retai
 
 | Functions | Execution inside NativeCalc |
 | --- | --- |
-| Collection CAST / TRY_CAST | Rust recursive child-buffer conversion for nullable signed-integer/DECIMAL ARRAY elements, including nested arrays, and the existing DECIMAL-to-floating ARRAY CAST; other verified ARRAY-to-ARRAY, MAP-to-MAP, ROW-to-ROW and ARRAY/MAP/ROW-to-character casts use the generated Flink program |
+| Collection CAST / TRY_CAST | Rust recursive child-buffer conversion for nullable signed-integer/DECIMAL ARRAY elements, including nested arrays, and the existing DECIMAL-to-floating ARRAY CAST; other verified ARRAY-to-ARRAY, MAP-to-MAP, ROW-to-ROW and ARRAY/MAP/ROW-to-character casts use the generated Flink program. A CAST that only changes nullability and that Flink itself runs as the identity, such as the one Flink 2.2 places over a `NOT NULL` connector metadata map, passes the column through like a column reference. Flink 1.18 rebuilds a map even for that cast, which reorders entries not already in `HashMap` order, so there it keeps the generated program |
 | SPLIT with dynamic or empty separator | Generated Flink program, preserving literal whole separators, NULLs and UTF-16 unit splitting for an empty separator; the existing non-empty literal separator retains its ordinary Rust path |
 | ARRAY_REVERSE, ARRAY_SLICE | Rust kernels for nullable primitive elements; generated Flink program for STRING/ROW/MAP-bearing or NOT NULL-element arrays and consumers requiring Java value semantics |
 | CARDINALITY on ARRAY/MAP | Rust outer-offset count, returning INT; NULL container produces NULL |
