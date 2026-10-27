@@ -31,6 +31,9 @@ pub struct FormatOptions {
     pub csv: CsvOptions,
     pub timestamp_mode: flink_text::TimestampMode,
     pub json_reject_array_roots: bool,
+    /// A JSON key decode reports the null rows Flink 2.x collects for null array elements, which
+    /// its key/value merge trips over ([`crate::NullRows`]); set by the keyed composition.
+    pub json_null_rows: bool,
     pub raw_little_endian: bool,
     /// An Avro key decoder's writer schema (a bare `avro` key, derived from the key's row type) and
     /// reader schema (an `avro-confluent` key, whose writer schemas come from the registry). A
@@ -62,6 +65,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
     let mut timestamp_mode = flink_text::TimestampMode::default();
     let mut raw_little_endian = false;
     let mut json_reject_array_roots = false;
+    let mut json_null_rows = false;
     let mut avro_writer_schema = String::new();
     let mut avro_reader_schema = String::new();
     let mut keyed_key_format = None;
@@ -86,6 +90,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
             "csv.allow-comments" => csv.comments = true,
             "csv.null-literal" => csv.null_literal = Some(value.to_string()),
             "json.reject-array-roots" => json_reject_array_roots = value == "true",
+            "json.null-rows" => json_null_rows = value == "true",
             "timestamp-format" => {
                 timestamp_mode = match value {
                     "ISO-8601" => flink_text::TimestampMode::Iso8601,
@@ -141,6 +146,7 @@ pub fn parse_format_options(encoded: &str) -> FormatOptions {
         csv,
         timestamp_mode,
         json_reject_array_roots,
+        json_null_rows,
         raw_little_endian,
         avro_writer_schema,
         avro_reader_schema,

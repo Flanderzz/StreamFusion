@@ -147,7 +147,11 @@ option the key format's native decode doesn't reproduce (as its format page list
 `key.json.ignore-parse-errors` stays on Flink too: for a key object it skips, Flink's JSON format
 collects a null key row, which the key/value merge then dereferences, failing or dropping the
 record depending on the value format's own skip mode. Flink 1.18 drops that null, and its record
-with it, as the native decode does. `KeyedDecodeParityTest` and `KeyedAvroDecodeParityTest` pin
+with it, as the native decode does. A `null` element of a JSON key array is a null key row on
+Flink 2.2 even without the option, and the native decode reproduces what the merge does with it:
+the record's first value row keeps its pairs with the key rows ahead of the null, then the job
+fails, or the rest of the record drops when the value format skips errors. A record whose value
+yields no row never reaches the null. `KeyedDecodeParityTest` and `KeyedAvroDecodeParityTest` pin
 the composition against Flink's own record deserializer on both lines.
 
 ### Source admission and fallbacks

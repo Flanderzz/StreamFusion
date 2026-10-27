@@ -27,7 +27,9 @@ As a [Kafka key format](../kafka.md#keyed-tables) over a JSON value, `json` deco
 same coercions and its own `key.json.*` options: a null or empty key yields no key row and a
 top-level array fans out (Flink 1.18 rejects it), so the record emits a row per key and value row
 pair. On Flink 2.2 a key with `key.json.ignore-parse-errors` stays on Flink, whose merge
-dereferences the null row its JSON format collects for a skipped key object.
+dereferences the null row its JSON format collects for a skipped key object. A `null` element of
+a key array is such a null key row on 2.2 even without that option, and the native decode trips
+over it as Flink's merge does (see [keyed tables](../kafka.md#keyed-tables)).
 
 On the SIMD scalar decode path, numeric and boolean trimming follows Java `String.trim()`
 (characters at or below U+0020), and integer strings accept Java's BMP decimal digits with

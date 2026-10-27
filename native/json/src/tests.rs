@@ -312,6 +312,154 @@ fn keyed_bad_value_fails_even_when_its_key_yields_no_row() {
     .decode(&records);
 }
 
+// Flink 2.x collects a null key row for a `null` key array element, and its key/value merge trips
+// over it inside the value deserializer's catch: under the value's ignore-parse-errors the record's
+// first value row keeps the pairs with the key rows ahead of it and the rest of the record drops.
+#[test]
+fn keyed_null_key_element_keeps_the_pairs_ahead_of_it_when_values_skip_errors() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![
+            Some(br#"[{"k":1},null,{"k":2}]"#.as_slice()),
+            Some(br#"[null]"#.as_slice()),
+            Some(br#"{"k":3}"#.as_slice()),
+        ],
+        vec![
+            Some(br#"[{"v":"a"},{"v":"b"}]"#.as_slice()),
+            Some(br#"{"v":"x"}"#.as_slice()),
+            Some(br#"{"v":"c"}"#.as_slice()),
+        ],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        true,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![1, 3]);
+    let v = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        (0..2).map(|i| v.value(i)).collect::<Vec<_>>(),
+        vec!["a", "c"]
+    );
+}
+
+#[test]
+#[should_panic(expected = "null key row")]
+fn keyed_null_key_element_fails_a_strict_value() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![Some(br#"[{"k":1},null]"#.as_slice())],
+        vec![Some(br#"{"v":"a"}"#.as_slice())],
+    );
+
+    new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+}
+
+// A record whose value yields no row never reaches its null key row, even with a strict value.
+#[test]
+fn keyed_null_key_element_without_value_rows_emits_nothing() {
+    let physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Int64, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let records = keyed_records(
+        vec![
+            Some(br#"[{"k":1},null]"#.as_slice()),
+            Some(br#"[null]"#.as_slice()),
+            Some(br#"{"k":3}"#.as_slice()),
+        ],
+        vec![
+            None,
+            Some(b"[]".as_slice()),
+            Some(br#"{"v":"c"}"#.as_slice()),
+        ],
+    );
+
+    let out = new_decoder(
+        FORMAT_JSON,
+        physical,
+        "",
+        "",
+        0,
+        false,
+        "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n",
+    )
+    .decode(&records);
+
+    assert_eq!(values(&out, 0), vec![3]);
+}
+
+// The decimal-bearing decode path and the Jackson-faithful walk (here for a raw control character
+// inside a key string) report the same null key rows as the fast path.
+#[test]
+fn keyed_null_key_element_is_reported_on_every_decode_path() {
+    use arrow::array::Decimal128Array;
+    let decimal_physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Decimal128(10, 2), true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let string_physical: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Utf8, true),
+        Field::new("v", DataType::Utf8, true),
+    ]));
+    let value = Some(br#"[{"v":"a"},{"v":"b"}]"#.as_slice());
+    let decimal_records = keyed_records(
+        vec![Some(br#"[{"k":1.50},null,{"k":2}]"#.as_slice())],
+        vec![value],
+    );
+    let walked_records = keyed_records(
+        vec![Some(b"[{\"k\":\"a\x01b\"},null,{\"k\":\"c\"}]".as_slice())],
+        vec![value],
+    );
+    let options = "keyed.key-format=0\nkeyed.key-positions=0\nkeyed.value-positions=1\n";
+
+    let decimal = new_decoder(FORMAT_JSON, decimal_physical, "", "", 0, true, options)
+        .decode(&decimal_records);
+    let walked =
+        new_decoder(FORMAT_JSON, string_physical, "", "", 0, true, options).decode(&walked_records);
+
+    let keys = decimal
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(decimal.num_rows(), 1);
+    assert_eq!(keys.value(0), 150);
+    let keys = walked
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(walked.num_rows(), 1);
+    assert_eq!(keys.value(0), "a\u{1}b");
+}
+
 // Under value.fields-include = ALL the value decodes the key field too, and its copy wins.
 #[test]
 fn keyed_value_copy_of_a_key_field_wins_under_all() {

@@ -134,6 +134,12 @@ fn create_value_decoder(
                 .collect::<Vec<_>>(),
         ));
         let key_options = parse_format_options(&keyed.key_options);
+        // A JSON key reports the null rows Flink's merge trips over (see KeyedDecoder).
+        let key_option_lines = if keyed.key_format == FORMAT_JSON {
+            format!("{}json.null-rows=true\n", keyed.key_options)
+        } else {
+            keyed.key_options.clone()
+        };
         let key = Box::new(if keyed.key_format == FORMAT_RAW {
             MessageDecoder {
                 decoder: Box::new(RawDecoder::new(key_schema, key_options.raw_little_endian)),
@@ -148,7 +154,7 @@ fn create_value_decoder(
                 &key_options.avro_reader_schema,
                 0,
                 keyed.key_skip_errors,
-                &keyed.key_options,
+                &key_option_lines,
             )
         });
         return MessageDecoder {
@@ -157,6 +163,7 @@ fn create_value_decoder(
                 key,
                 key_positions: keyed.key_positions,
                 value_positions: keyed.value_positions,
+                value_skips_errors: skip_errors,
                 output: output_schema,
             }),
             skip_errors: false,

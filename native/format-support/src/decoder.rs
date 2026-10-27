@@ -68,10 +68,28 @@ impl SourceRecorder {
     }
 }
 
+/// The messages whose decode collected a null row, each with the rows it produced first, in
+/// message order. Flink 2.x's JSON format collects a null for a `null` top-level array element
+/// (and, when skipping errors, for any element it cannot convert); only a decoder built to report
+/// them does, for a composition whose Flink counterpart trips over them.
+pub type NullRows = Vec<(u32, u32)>;
+
+/// Records `message`'s first null row, after the `rows` it produced before it.
+pub fn record_null_row(null_rows: &mut NullRows, message: usize, rows: usize) {
+    if null_rows.last().map(|&(last, _)| last as usize) != Some(message) {
+        null_rows.push((message as u32, rows as u32));
+    }
+}
+
 /// A decoder is constructed and called only inside its owning native library.
 pub trait Decoder {
     /// Decodes one batch of messages, reporting the message each output row came from.
     fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources);
+    /// [`Decoder::decode_traced`], plus the messages whose decode collected a null row.
+    fn decode_traced_null_rows(&self, body: &RecordBatch) -> (RecordBatch, Sources, NullRows) {
+        let (batch, sources) = self.decode_traced(body);
+        (batch, sources, NullRows::new())
+    }
     fn decode(&self, body: &RecordBatch) -> RecordBatch {
         self.decode_traced(body).0
     }
@@ -121,6 +139,16 @@ impl MessageDecoder {
     }
     pub fn decode(&self, body: &RecordBatch) -> RecordBatch {
         self.decode_traced(body).0
+    }
+
+    /// The decode with its null rows; a skip-mode retry wrapper never reports any (only the JSON
+    /// decoder collects them, and it skips errors itself).
+    pub fn decode_traced_null_rows(&self, body: &RecordBatch) -> (RecordBatch, Sources, NullRows) {
+        if self.skip_errors {
+            let (batch, sources) = self.decode_traced(body);
+            return (batch, sources, NullRows::new());
+        }
+        self.decoder.decode_traced_null_rows(body)
     }
 
     pub fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {

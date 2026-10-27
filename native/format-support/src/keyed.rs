@@ -9,18 +9,24 @@ use crate::*;
 /// and fails, as Flink's is. The key fields fill their physical positions first and the value
 /// fields after them, so under `value.fields-include = ALL` the value's copy of a key field wins,
 /// exactly `emitRow`'s field order.
+///
+/// On Flink 2.x a JSON key's `null` array element is a null key row, and the merge trips over it
+/// inside the value deserializer's catch: the record's first value row pairs with the key rows
+/// ahead of it, then the job fails, or the rest of the record drops when the value format skips
+/// errors. A record without value rows never reaches it.
 pub struct KeyedDecoder {
     pub value: Box<MessageDecoder>,
     pub key: Box<MessageDecoder>,
     pub key_positions: Vec<usize>,
     pub value_positions: Vec<usize>,
+    pub value_skips_errors: bool,
     pub output: SchemaRef,
 }
 
 impl KeyedDecoder {
     pub fn decode_traced(&self, records: &RecordBatch) -> (RecordBatch, Sources) {
         let messages = records.num_rows();
-        let (keys, key_sources) = self.key.decode_traced(
+        let (keys, key_sources, null_keys) = self.key.decode_traced_null_rows(
             &records
                 .project(&[0])
                 .expect("keyed decode expects a two-column [key, body] batch"),
@@ -31,18 +37,22 @@ impl KeyedDecoder {
                 .expect("keyed decode expects a two-column [key, body] batch"),
         );
         let (key_rows, value_rows, sources) = match (&key_sources, &value_sources) {
-            (Sources::Identity, Sources::Identity) => (None, None, Sources::Identity),
+            (Sources::Identity, Sources::Identity) if null_keys.is_empty() => {
+                (None, None, Sources::Identity)
+            }
             // One key row per record: each value row takes its record's.
-            (Sources::Identity, Sources::Rows(rows)) => {
+            (Sources::Identity, Sources::Rows(rows)) if null_keys.is_empty() => {
                 (Some(rows.clone()), None, Sources::Rows(rows.clone()))
             }
             _ => {
                 let (key_rows, value_rows, sources) = pair_rows(
                     &key_sources,
                     keys.num_rows(),
+                    &null_keys,
                     &value_sources,
                     values.num_rows(),
                     messages,
+                    self.value_skips_errors,
                 );
                 (Some(key_rows), Some(value_rows), sources)
             }
@@ -67,17 +77,21 @@ impl KeyedDecoder {
 }
 
 /// Flink's per-record pairing: for each record in order, each of its value rows with each of its
-/// key rows, value-major. Returns the key and value rows to gather and each output row's record.
+/// key rows, value-major, until a null key row (see [`KeyedDecoder`]). Returns the key and value
+/// rows to gather and each output row's record.
 fn pair_rows(
     keys: &Sources,
     key_count: usize,
+    null_keys: &NullRows,
     values: &Sources,
     value_count: usize,
     messages: usize,
+    value_skips_errors: bool,
 ) -> (Vec<u32>, Vec<u32>, Sources) {
     let mut key_rows = Vec::with_capacity(value_count);
     let mut value_rows = Vec::with_capacity(value_count);
     let mut sources = SourceRecorder::with_capacity(value_count);
+    let mut null_keys = null_keys.iter().peekable();
     let (mut key_start, mut value_start) = (0, 0);
     for message in 0..messages {
         let mut key_end = key_start;
@@ -88,10 +102,29 @@ fn pair_rows(
         while value_end < value_count && values.message(value_end) == message {
             value_end += 1;
         }
-        for value in value_start..value_end {
-            for key in key_start..key_end {
-                value_rows.push(value as u32);
-                key_rows.push(key as u32);
+        let null_key = null_keys
+            .next_if(|&&(record, _)| record as usize == message)
+            .map(|&(_, rows)| rows as usize);
+        match null_key {
+            None => {
+                for value in value_start..value_end {
+                    for key in key_start..key_end {
+                        value_rows.push(value as u32);
+                        key_rows.push(key as u32);
+                    }
+                }
+            }
+            Some(_) if value_start == value_end => {}
+            Some(keys_before) => {
+                for key in key_start..key_start + keys_before {
+                    value_rows.push(value_start as u32);
+                    key_rows.push(key as u32);
+                }
+                assert!(
+                    value_skips_errors,
+                    "Flink's key/value merge read a null key row: a JSON key array held a null \
+                     element"
+                );
             }
         }
         sources.message_done(message, value_rows.len());
