@@ -52,10 +52,14 @@ public class ConfluentSchemaRegistry implements Serializable {
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
-  /** Registry-format options with no native translation: any of them present → fall back. */
+  /**
+   * Registry-format options with no native translation: any of them present → fall back. Flink
+   * also reads an explicit reader schema under its fallback key, {@code schema-registry.schema}.
+   */
   private static final Set<String> UNSUPPORTED_OPTIONS =
       Set.of(
           "schema",
+          "schema-registry.schema",
           "properties",
           "ssl.keystore.location",
           "ssl.keystore.password",
@@ -111,9 +115,6 @@ public class ConfluentSchemaRegistry implements Serializable {
    * ({@code schema-registry.url}, {@code schema-registry.schema}) are honored both ways.
    */
   public static ConfluentSchemaRegistry fromFormatOptions(Map<String, String> options) {
-    if (options.containsKey("schema-registry.schema")) {
-      return null;
-    }
     return from(options.getOrDefault("url", options.get("schema-registry.url")), options::get);
   }
 

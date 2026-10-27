@@ -178,6 +178,46 @@ class KeyedDecodeSpecTest {
   }
 
   @Test
+  void anExplicitConfluentKeyReaderSchemaStaysOnFlinkUnderEitherSpelling() {
+    String schema =
+        "{\"type\":\"record\",\"name\":\"Key\",\"fields\":[{\"name\":\"k\",\"type\":\"long\"}]}";
+
+    KeyedDecodeSpec implicit =
+        KeyedDecodeSpec.resolve(
+            Map.of(
+                "format", "avro-confluent",
+                "avro-confluent.url", "http://registry",
+                "key.format", "avro-confluent",
+                "key.avro-confluent.url", "http://registry",
+                "key.fields", "k"),
+            PHYSICAL);
+    KeyedDecodeSpec current =
+        KeyedDecodeSpec.resolve(
+            Map.of(
+                "format", "avro-confluent",
+                "avro-confluent.url", "http://registry",
+                "key.format", "avro-confluent",
+                "key.avro-confluent.url", "http://registry",
+                "key.fields", "k",
+                "key.avro-confluent.schema", schema),
+            PHYSICAL);
+    KeyedDecodeSpec fallback =
+        KeyedDecodeSpec.resolve(
+            Map.of(
+                "format", "avro-confluent",
+                "avro-confluent.url", "http://registry",
+                "key.format", "avro-confluent",
+                "key.avro-confluent.url", "http://registry",
+                "key.fields", "k",
+                "key.avro-confluent.schema-registry.schema", schema),
+            PHYSICAL);
+
+    assertNotNull(implicit);
+    assertNull(current);
+    assertNull(fallback);
+  }
+
+  @Test
   void unsupportedShapesResolveToNull() {
     // A key format the value's native library doesn't carry.
     assertNull(

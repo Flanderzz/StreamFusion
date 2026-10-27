@@ -44,7 +44,7 @@ mirrors exactly.
 | A row type Flink's own avro-confluent factory rejects at job submission (RAW and other unmapped types, TIMESTAMP_LTZ under the always-active legacy mapping, TIMESTAMP/TIME precision beyond the mapping's limit, a non-string map key) | Declined at plan time, reproducing Flink's own submission failure — the same derivation as bare [Avro](avro.md#decode-fallback-conditions). |
 | `TIME(0)` column | Same second-vs-millisecond gap as bare Avro. |
 | `BINARY(n)` column | Same fixed-size boundary gap as bare Avro (decode only — encode is fine, below). |
-| An explicit reader `schema` option | Not translated to the native registry client. |
+| An explicit reader `schema` option (or its fallback key `schema-registry.schema`), for a value or a key | Not translated to the native registry client. |
 | Any `ssl.*` registry option | Not translated. |
 | Pass-through client `properties` | Not translated. |
 | A credentials source beyond `USER_INFO`/`STATIC_TOKEN` (`URL`, `SASL_INHERIT`, OAuth/`CUSTOM` bearer) | Needs the registry URL's userinfo, the Kafka JAAS login, or a token flow — not a header the format options alone supply. |
