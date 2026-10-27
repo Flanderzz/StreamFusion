@@ -45,7 +45,7 @@ impl ScalarUDFImpl for ScalarArrayDistinct {
                         | DataType::Int64
                         | DataType::Boolean
                         | DataType::Utf8
-                ) =>
+                ) || crate::flink_key::represented_string(field.data_type()) =>
             {
                 Ok(array.clone())
             }
@@ -63,6 +63,37 @@ fn distinct(args: &[ArrayRef]) -> Result<ArrayRef> {
         return exec_err!("ARRAY_DISTINCT requires one argument");
     };
     let array = as_list_array(input)?;
+    if crate::flink_key::represented_string(&array.value_type()) {
+        let values = super::collection_string::Strings::new(array.values())?;
+        let mut selected = Vec::new();
+        let mut offsets = vec![0];
+        for row in 0..array.len() {
+            let base = selected.len();
+            if array.is_valid(row) {
+                for index in
+                    array.value_offsets()[row] as usize..array.value_offsets()[row + 1] as usize
+                {
+                    if !selected[base..]
+                        .iter()
+                        .any(|&i| values.equal(index, &values, i as usize))
+                    {
+                        selected.push(index as u32);
+                    }
+                }
+            }
+            offsets.push(selected.len() as i32);
+        }
+        let DataType::List(field) = array.data_type() else {
+            unreachable!()
+        };
+        let result = ListArray::try_new(
+            field.clone(),
+            OffsetBuffer::new(offsets.into()),
+            arrow::compute::take(array.values().as_ref(), &UInt32Array::from(selected), None)?,
+            array.nulls().cloned(),
+        )?;
+        return super::array_copy::generic_elements(&result, |_| true);
+    }
     match array.value_type() {
         DataType::Int8 => distinct_primitive::<Int8Type>(array),
         DataType::Int16 => distinct_primitive::<Int16Type>(array),

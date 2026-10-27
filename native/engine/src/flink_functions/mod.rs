@@ -37,6 +37,7 @@ mod abs;
 pub(crate) mod array_cast;
 mod array_concat;
 mod array_constructor;
+mod array_copy;
 mod array_distinct;
 mod array_edit;
 #[cfg(test)]
@@ -48,11 +49,14 @@ mod array_search;
 mod array_set;
 mod array_slice;
 mod array_sort;
+mod array_timsort;
 mod ascii;
 mod binary_strings;
 mod cardinality;
 mod charset;
 mod chr;
+pub(crate) mod collection_cast;
+mod collection_string;
 mod element;
 mod hash_code;
 mod if_null;
@@ -75,6 +79,7 @@ mod map_union;
 mod negate;
 pub(crate) mod numeric;
 pub(crate) mod numeric_cast;
+mod row_constructor;
 mod scalar;
 pub(crate) mod sha2_runtime;
 mod sign;
@@ -219,9 +224,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         166 => datafusion::functions::string::uuid().as_ref().clone(),
         167 => cardinality::function(),
         168 => type_of::function(),
-        169 => datafusion::functions_nested::reverse::array_reverse_udf()
-            .as_ref()
-            .clone(),
+        169 => array_copy::reverse(),
         170 => array_slice::function(arity),
         171 => array_constructor::function(arity, false),
         172 => array_constructor::function(arity, true),
@@ -280,6 +283,16 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         217 => array_sort::function(arity),
         218 => abs::function(),
         219 => negate::function(),
+        220 => array_set::union(),
+        221 => row_constructor::function(true),
+        222 => row_constructor::function(false),
+        223 => collection_string::split(),
+        224 => array_timsort::function(arity),
+        225 => map_constructor::binary_function(arity),
+        226 => collection_string::literal(),
+        227 => collection_string::map_input(),
+        228 => collection_string::extremum(true),
+        229 => collection_string::extremum(false),
         _ => return None,
     })
 }

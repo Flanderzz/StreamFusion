@@ -8,11 +8,20 @@ use datafusion::logical_expr::{
 pub(super) fn function(arity: usize) -> ScalarUDF {
     ScalarUDF::new_from_impl(MapConstructor {
         signature: Signature::any(arity, Volatility::Immutable),
+        binary: false,
+    })
+}
+
+pub(super) fn binary_function(arity: usize) -> ScalarUDF {
+    ScalarUDF::new_from_impl(MapConstructor {
+        signature: Signature::any(arity, Volatility::Immutable),
+        binary: true,
     })
 }
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct MapConstructor {
     signature: Signature,
+    binary: bool,
 }
 impl ScalarUDFImpl for MapConstructor {
     fn name(&self) -> &str {
@@ -37,7 +46,22 @@ impl ScalarUDFImpl for MapConstructor {
         ))
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        datafusion::functions::utils::make_scalar_function(construct, vec![])(&args.args)
+        datafusion::functions::utils::make_scalar_function(
+            |arrays| {
+                let result = construct(arrays)?;
+                if !self.binary {
+                    return Ok(result);
+                }
+                let (entries, offsets, nulls) = super::map_projection::parts(&result)?;
+                super::map_arrays::build(
+                    super::collection_string::binary_map_elements(entries.column(0))?,
+                    super::collection_string::binary_map_elements(entries.column(1))?,
+                    offsets.clone(),
+                    nulls.cloned(),
+                )
+            },
+            vec![],
+        )(&args.args)
     }
 }
 fn construct(args: &[ArrayRef]) -> Result<ArrayRef> {

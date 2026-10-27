@@ -14,6 +14,15 @@ pub(super) fn function(intersect: bool) -> ScalarUDF {
     ScalarUDF::new_from_impl(ArraySet {
         signature: Signature::any(2, Volatility::Immutable),
         intersect,
+        union: false,
+    })
+}
+
+pub(super) fn union() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ArraySet {
+        signature: Signature::any(2, Volatility::Immutable),
+        intersect: false,
+        union: true,
     })
 }
 
@@ -21,11 +30,14 @@ pub(super) fn function(intersect: bool) -> ScalarUDF {
 struct ArraySet {
     signature: Signature,
     intersect: bool,
+    union: bool,
 }
 
 impl ScalarUDFImpl for ArraySet {
     fn name(&self) -> &str {
-        if self.intersect {
+        if self.union {
+            "flink_represented_array_union"
+        } else if self.intersect {
             "flink_array_intersect"
         } else {
             "flink_array_except"
@@ -44,7 +56,13 @@ impl ScalarUDFImpl for ArraySet {
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         datafusion::functions::utils::make_scalar_function(
-            |arrays| set(arrays, self.intersect),
+            |arrays| {
+                if self.union {
+                    strings_set(arrays, false, true)
+                } else {
+                    set(arrays, self.intersect)
+                }
+            },
             vec![],
         )(&args.args)
     }
@@ -53,6 +71,9 @@ impl ScalarUDFImpl for ArraySet {
 fn set(args: &[ArrayRef], intersect: bool) -> Result<ArrayRef> {
     let left = as_list_array(&args[0])?;
     let right = as_list_array(&args[1])?;
+    if crate::flink_key::represented_string(&left.value_type()) {
+        return strings_set(args, intersect, false);
+    }
     macro_rules! primitive {
         ($ty:ty) => {{
             let l = left
@@ -101,6 +122,76 @@ fn set(args: &[ArrayRef], intersect: bool) -> Result<ArrayRef> {
         }
         _ => exec_err!("ARRAY_EXCEPT requires matching basic arrays"),
     }
+}
+
+fn strings_set(args: &[ArrayRef], intersect: bool, union: bool) -> Result<ArrayRef> {
+    use arrow::array::{make_array, MutableArrayData};
+    let left = as_list_array(&args[0])?;
+    let right = as_list_array(&args[1])?;
+    let arrays = [left, right];
+    let strings = [
+        super::collection_string::Strings::new(left.values())?,
+        super::collection_string::Strings::new(right.values())?,
+    ];
+    let data = [left.values().to_data(), right.values().to_data()];
+    let mut output = MutableArrayData::new(
+        data.iter().collect(),
+        false,
+        data.iter().map(|d| d.len()).sum(),
+    );
+    let mut offsets = vec![0];
+    let mut excluded = Vec::<(usize, usize)>::new();
+    let mut selected = Vec::<(usize, usize)>::new();
+    for row in 0..left.len() {
+        excluded.clear();
+        selected.clear();
+        if left.is_valid(row) && right.is_valid(row) {
+            if !union {
+                for index in
+                    right.value_offsets()[row] as usize..right.value_offsets()[row + 1] as usize
+                {
+                    if !excluded
+                        .iter()
+                        .any(|&(side, i)| strings[1].equal(index, &strings[side], i))
+                    {
+                        excluded.push((1, index));
+                    }
+                }
+            }
+            for side in 0..if union { 2 } else { 1 } {
+                for index in arrays[side].value_offsets()[row] as usize
+                    ..arrays[side].value_offsets()[row + 1] as usize
+                {
+                    let present = excluded
+                        .iter()
+                        .any(|&(s, i)| strings[side].equal(index, &strings[s], i));
+                    let duplicate = selected
+                        .iter()
+                        .any(|&(s, i)| strings[side].equal(index, &strings[s], i));
+                    if !duplicate && (union || if intersect { present } else { !present }) {
+                        selected.push((side, index));
+                        if !union && !intersect {
+                            excluded.push((side, index));
+                        }
+                        output.extend(side, index, index + 1);
+                    }
+                }
+            }
+        }
+        offsets.push(i32::try_from(output.len()).map_err(|_| {
+            datafusion::common::DataFusionError::Execution("ARRAY exceeds Arrow offsets".into())
+        })?);
+    }
+    let DataType::List(field) = left.data_type() else {
+        unreachable!()
+    };
+    let result = ListArray::try_new(
+        field.clone(),
+        OffsetBuffer::new(offsets.into()),
+        make_array(output.freeze()),
+        NullBuffer::union(left.nulls(), right.nulls()),
+    )?;
+    super::array_copy::generic_elements(&result, |_| true)
 }
 
 fn select<K: Eq + Hash + Copy>(

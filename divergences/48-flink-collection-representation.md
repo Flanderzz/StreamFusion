@@ -139,3 +139,23 @@ across batch release. Flink 1.18 keeps its existing guard; no schema marker or u
 normalization is introduced. Representation-sensitive downstream consumers retain their
 existing admission gates. The release comparisons and two-pass investigation are recorded in
 [the benchmark ledger](../docs/benchmarks/scalar-functions.md#not-null-fixed-binary-map-leaves).
+
+
+## Represented Arrow kernel contracts
+
+Shared STRING views compare cached UTF-16 only when both values have caches and encoded bytes
+otherwise. That equality is potentially nontransitive, so stable set selection compares retained
+candidates directly. Arrow gathers retain the complete element and its validity. Explicit copy
+categories distinguish generic arrays from binary arrays without retaining borrowed Java objects.
+
+The engine provides binary ROW/MAP constructors, generic OBJECT fields, UTF-16 empty-separator
+splitting, general index sorting and recursive container casts. Casts select visible children,
+reuse the existing exact scalar rules and carry parsing failures to the outer container. Map
+casts reuse Java HashMap iteration order, first-key identity and last-value replacement. Their
+independent JDK 17 fixture includes NULL keys in collision trees.
+
+A separate MAP input snapshot operation mirrors MapDataSerializer.copy by clearing nested string
+caches and marking binary row/array categories, while sharing owned Arrow value/offset buffers.
+Computed maps can retain their own caches. The nullable-key map-list carrier follows the existing
+Comet-style owned-view boundary; no additional JNI ownership protocol is introduced. The Calc
+coverage page defines which SQL contexts the planner wires to these engine capabilities.

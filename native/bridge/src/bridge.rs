@@ -19,6 +19,12 @@ pub struct FlinkException {
 }
 
 impl FlinkException {
+    pub fn illegal_argument(message: String) -> Self {
+        Self {
+            class: "java/lang/IllegalArgumentException",
+            message,
+        }
+    }
     pub fn table(message: String) -> Self {
         Self {
             class: "org/apache/flink/table/api/TableException",

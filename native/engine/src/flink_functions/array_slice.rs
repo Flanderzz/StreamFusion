@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::Arc;
 
 use arrow::array::{make_array, Array, ArrayRef, Int32Array, ListArray, MutableArrayData};
@@ -52,6 +53,7 @@ fn slice(args: &[ArrayRef]) -> Result<ArrayRef> {
     };
     let mut offsets = Vec::with_capacity(array.len() + 1);
     let mut ranges = Vec::with_capacity(array.len());
+    let mut copied = Vec::with_capacity(array.len());
     let mut valid = Vec::with_capacity(array.len());
     offsets.push(0);
     let mut unchanged = true;
@@ -81,6 +83,7 @@ fn slice(args: &[ArrayRef]) -> Result<ArrayRef> {
         }
         unchanged &= parent_valid != array.is_null(row);
         offsets.push(offsets.last().unwrap() + (range.end - range.start));
+        copied.push(range.start != first || range.end != first + length);
         ranges.push(range);
     }
     if unchanged {
@@ -92,12 +95,13 @@ fn slice(args: &[ArrayRef]) -> Result<ArrayRef> {
     for range in ranges {
         values.extend(0, range.start as usize, range.end as usize);
     }
-    Ok(Arc::new(ListArray::new(
+    let result = ListArray::new(
         field.clone(),
         OffsetBuffer::new(offsets.into()),
         make_array(values.freeze()),
         Some(NullBuffer::from(valid)),
-    )))
+    );
+    super::array_copy::generic_elements(&result, |row| copied[row])
 }
 
 #[cfg(test)]
