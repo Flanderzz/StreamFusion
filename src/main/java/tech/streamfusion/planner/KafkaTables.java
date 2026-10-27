@@ -8,10 +8,13 @@ import tech.streamfusion.format.NativeFormatProviders;
 import tech.streamfusion.kafka.KeyedKafkaBytesDeserialization;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import org.apache.calcite.rel.RelNode;
@@ -19,6 +22,8 @@ import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.KafkaSourceBuilder;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
+import org.apache.flink.table.catalog.Column;
+import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalTableSourceScan;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.TimeUtils;
@@ -111,11 +116,15 @@ final class KafkaTables {
     if (!decodeCommon(options)) {
       return false;
     }
-    // A metadata column is filled by the connector, not the message body; a value decode would
-    // emit it as a (missing, so silently NULL) value field. The scan must produce exactly the
-    // physical columns. Computed columns are fine — the planner projects them above the scan.
-    if (!FilesystemTables.scanProducesPhysicalColumnsOnly(scan)) {
+    // The value decode fills the physical columns and the native decode fills the connector's
+    // metadata columns from each row's record; a value format's own metadata stays on Flink.
+    // Computed columns are fine — the planner projects them above the scan.
+    Map<String, String> metadata = connectorMetadata(scan);
+    if (metadata == null) {
       return false;
+    }
+    if (!metadata.isEmpty() && options.containsKey("key.format")) {
+      return false; // the keyed composition doesn't carry metadata yet
     }
     // A keyed table: the raw-key composition must resolve (see KeyedDecodeSpec), and the value
     // format's gate then runs against the VALUE row type — the physical schema minus the key
@@ -132,6 +141,9 @@ final class KafkaTables {
     if (provider == null) {
       // The format artifact isn't installed, or its exact options or column types are outside the
       // native decoder's Flink-faithful set (each provider owns that predicate).
+      return false;
+    }
+    if (!metadata.isEmpty() && !provider.composesKafkaMetadata()) {
       return false;
     }
     // Flink's ignore-parse-errors drops malformed data; the JSON decode honors the per-message skip
@@ -191,7 +203,53 @@ final class KafkaTables {
     if (NativeFormatOptions.encode(options) == null) {
       return false; // an unreproducible format option
     }
-    return FilesystemTables.allPhysicalColumns(scan); // metadata/computed columns aren't decoded natively
+    // Connector metadata decodes natively; a computed column or a value format's metadata doesn't.
+    Map<String, String> metadata = connectorMetadata(scan);
+    return FilesystemTables.noComputedColumns(scan)
+        && metadata != null
+        && (metadata.isEmpty() || provider.composesKafkaMetadata());
+  }
+
+  /** The metadata keys Flink's Kafka connector reads itself, as `KafkaDynamicSource` lists them. */
+  private static final Set<String> CONNECTOR_METADATA_KEYS =
+      Set.of(
+          "topic", "partition", "headers", "leader-epoch", "offset", "timestamp", "timestamp-type");
+
+  /**
+   * The scan's metadata columns in output order, each column's name mapped to the metadata key it
+   * reads; empty when it reads none. Null when the native decode can't fill them: a key a value
+   * format reads from the message, or a scan that isn't its physical columns followed by metadata
+   * columns. The scan names each metadata field after its column, on both Flink lines, so the key
+   * is the declared column's.
+   */
+  static Map<String, String> connectorMetadata(StreamPhysicalTableSourceScan scan) {
+    RowType physical = FilesystemTables.physicalRowType(scan);
+    ResolvedSchema schema = FilesystemTables.resolvedSchema(scan);
+    if (physical == null || schema == null) {
+      return null;
+    }
+    List<String> names = scan.getRowType().getFieldNames();
+    int physicalCount = physical.getFieldCount();
+    if (physicalCount == 0) {
+      return null; // the value decode needs a column to count its rows by
+    }
+    if (names.size() < physicalCount
+        || !names.subList(0, physicalCount).equals(physical.getFieldNames())) {
+      return null;
+    }
+    Map<String, String> metadata = new LinkedHashMap<>();
+    for (String name : names.subList(physicalCount, names.size())) {
+      Column column = schema.getColumn(name).orElse(null);
+      if (!(column instanceof Column.MetadataColumn)) {
+        return null;
+      }
+      String key = ((Column.MetadataColumn) column).getMetadataKey().orElse(name);
+      if (!CONNECTOR_METADATA_KEYS.contains(key)) {
+        return null;
+      }
+      metadata.put(name, key);
+    }
+    return metadata;
   }
 
   /**
@@ -404,6 +462,7 @@ final class KafkaTables {
         scan.getTraitSet(),
         scan.getRowType(),
         options,
+        connectorMetadata(scan),
         ScanWatermarkSpec.of(scan),
         ctx.repeatedSource(KafkaPlannerExtension.class.getName() + '|' + decodeSharingKey(scan)),
         NativePlanDetails.from(scan));
@@ -411,7 +470,11 @@ final class KafkaTables {
 
   static String decodeSharingKey(StreamPhysicalTableSourceScan scan) {
     return StreamPhysicalNativeKafkaDecode.sharingKey(
-        decodeOptions(scan), scan.getRowType(), scan.getRowType(), ScanWatermarkSpec.of(scan));
+        decodeOptions(scan),
+        connectorMetadata(scan),
+        scan.getRowType(),
+        scan.getRowType(),
+        ScanWatermarkSpec.of(scan));
   }
 
   private static Map<String, String> decodeOptions(StreamPhysicalTableSourceScan scan) {

@@ -1,11 +1,13 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Properties;
 import java.util.function.Supplier;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -155,7 +157,8 @@ class NativeCdcDecodeSqlHarnessTest {
   @Test
   void nestedAndWideMaxwellAndCanalRouteNativelyWithParity() throws Exception {
     try (KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       StringBuilder manyKeys = new StringBuilder("{");
@@ -183,7 +186,7 @@ class NativeCdcDecodeSqlHarnessTest {
                   + "\"type\":\"update\"}",
               "{\"data\":" + second + ",\"type\":\"delete\"}"));
       NativeParity.assertKindedParity(
-          environment(brokers, "cdc-maxwell-nested", "maxwell-json", NESTED_COLUMNS),
+          environment(metrics, brokers, "cdc-maxwell-nested", "maxwell-json", NESTED_COLUMNS),
           "SELECT * FROM cdc");
 
       produce(
@@ -196,7 +199,7 @@ class NativeCdcDecodeSqlHarnessTest {
                   + "\"type\":\"UPDATE\"}",
               "{\"data\":[" + second + "],\"type\":\"DELETE\"}"));
       NativeParity.assertKindedParity(
-          environment(brokers, "cdc-canal-nested", "canal-json", NESTED_COLUMNS),
+          environment(metrics, brokers, "cdc-canal-nested", "canal-json", NESTED_COLUMNS),
           "SELECT * FROM cdc");
 
       StringBuilder wideColumns = new StringBuilder();
@@ -214,8 +217,12 @@ class NativeCdcDecodeSqlHarnessTest {
               "{\"data\":" + wideRow + ",\"old\":{\"c2\":-2,\"c130\":-130,\"c139\":null},"
                   + "\"type\":\"update\"}"));
       NativeParity.assertKindedParity(
-          environment(brokers, "cdc-maxwell-wide", "maxwell-json", wideColumns.toString()),
+          environment(
+              metrics, brokers, "cdc-maxwell-wide", "maxwell-json", wideColumns.toString()),
           "SELECT * FROM cdc");
+
+      // Every message of the three topics went through the native source's decode.
+      assertEquals(9, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 
@@ -228,7 +235,8 @@ class NativeCdcDecodeSqlHarnessTest {
   @Test
   void canalIncludeFiltersSplitOneTopicWithParity() throws Exception {
     try (KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       produce(
@@ -258,9 +266,8 @@ class NativeCdcDecodeSqlHarnessTest {
                   + "\"table\":\"users\",\"type\":\"DELETE\"}"));
       Supplier<TableEnvironment> environment =
           () -> {
-            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-            env.setParallelism(1);
-            StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+            StreamTableEnvironment tEnv =
+                StreamTableEnvironment.create(metrics.environment(new Configuration(), 1, 0));
             tEnv.executeSql(
                 cdcTable(
                     "orders",
@@ -299,6 +306,8 @@ class NativeCdcDecodeSqlHarnessTest {
               List.of("-U", 1L, "a", 1.5),
               List.of("+U", 1L, "a2", 1.5),
               List.of("-D", 7L, "u", 0.5)));
+      // Each filtered scan decoded the whole topic natively.
+      assertEquals(16, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 
@@ -319,6 +328,20 @@ class NativeCdcDecodeSqlHarnessTest {
   private static Supplier<TableEnvironment> environment(
       String brokers, String topic, String format, String columns) {
     return environment(brokers, topic, format, columns, "");
+  }
+
+  private static Supplier<TableEnvironment> environment(
+      RecoveryExecutionMetrics metrics,
+      String brokers,
+      String topic,
+      String format,
+      String columns) {
+    return () -> {
+      StreamTableEnvironment tEnv =
+          StreamTableEnvironment.create(metrics.environment(new Configuration(), 1, 0));
+      tEnv.executeSql(cdcTable("cdc", brokers, topic, format, columns, ""));
+      return tEnv;
+    };
   }
 
   private static Supplier<TableEnvironment> environment(
