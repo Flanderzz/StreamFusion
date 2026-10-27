@@ -69,9 +69,9 @@ impl SourceRecorder {
 }
 
 /// The messages whose decode collected a null row, each with the rows it produced first, in
-/// message order. Flink 2.x's JSON format collects a null for a `null` top-level array element
-/// (and, when skipping errors, for any element it cannot convert); only a decoder built to report
-/// them does, for a composition whose Flink counterpart trips over them.
+/// message order. Flink 2.x's JSON format collects a null for a `null` top-level array element;
+/// only a decoder built to report them does, for a composition whose Flink counterpart trips over
+/// them.
 pub type NullRows = Vec<(u32, u32)>;
 
 /// Records `message`'s first null row, after the `rows` it produced before it.

@@ -1364,11 +1364,9 @@ fn decode_json_bodies_simd(
                                 Some(object) => {
                                     append_checked(root, &object, schema.fields(), scan_binary)
                                 }
-                                // Flink collects a null row for a `null` element, and in skip
-                                // mode for any element it cannot convert.
+                                // Flink collects a null row for a `null` element.
                                 None if collect_null_rows
-                                    && (env.lenient
-                                        || element.value_type() == simd_json::ValueType::Null) =>
+                                    && element.value_type() == simd_json::ValueType::Null =>
                                 {
                                     record_null_row(&mut null_rows, row, root.objects - start)
                                 }
@@ -1707,7 +1705,6 @@ impl JsonDecoder {
         let mut null_rows = NullRows::new();
         if self.env.lenient {
             for row in 0..bodies.num_rows() {
-                let start = sources.len();
                 let Some(bytes) = binary_body(column, row) else {
                     continue;
                 };
@@ -1722,9 +1719,6 @@ impl JsonDecoder {
                 };
                 for element in elements {
                     if !starts_with_object(element) {
-                        if self.null_rows {
-                            record_null_row(&mut null_rows, row, sources.len() - start);
-                        }
                         continue; // a non-object array element drops alone, like the simd path
                     }
                     let mut decoder = build(1);

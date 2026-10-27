@@ -137,8 +137,7 @@ pub(crate) fn rewrite_message(
 /// `processArray`: one row per element, converted from wherever the cursor stands — a failing
 /// element fails the whole message in strict mode; in skip mode its null row drops alone and the
 /// walk continues from the element's own tokens (a container element drifts into its subtree).
-/// With `null_rows`, the first null row (a `null` element, or any non-object in skip mode) is
-/// reported by how many rows came before it.
+/// With `null_rows`, the first `null` element is reported by how many rows came before it.
 fn fan_out(
     cursor: &mut Cursor,
     fields: &Fields,
@@ -153,7 +152,7 @@ fn fan_out(
             None => return Err(WalkSpins),
             Some(Token::EndArray) => return Ok((rows, first_null)),
             Some(Token::StartObject) => rows.push(row_object(cursor, fields, env)?),
-            Some(other) if null_rows && (env.lenient || matches!(other, Token::Null)) => {
+            Some(Token::Null) if null_rows => {
                 first_null.get_or_insert(rows.len());
             }
             Some(other) => {
