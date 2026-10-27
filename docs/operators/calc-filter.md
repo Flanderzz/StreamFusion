@@ -1028,6 +1028,18 @@ operators because zero divisors produce IEEE infinity/NaN instead of an exceptio
 
 ## SIGN
 
+INT/BIGINT SIGN returns `-1`, `0` or `1` in the input's resolved integer width, including
+at INT_MIN and BIGINT_MIN. Direct inputs, typed literals, recursive lossless integer widening
+and nested admitted SIGN calls use Arrow unary kernels without JVM computation. Input values
+remain owned by the input; result values are allocated and sliced validity is shared. Explicit
+TINYINT/SMALLINT-to-INT/BIGINT widening is covered. Direct TINYINT/SMALLINT SIGN retains
+released Flink's generated-code compilation failure (the numeric result cannot be assigned to `byte/short`).
+Arithmetic, narrowing casts and other unverified producers retain the complete generated SIGN
+program so overflow, NULLs, lazy branches and selected failures do not change. DECIMAL SIGN
+also retains generated execution; decimal representation guards remain in force.
+This replaces computation inside an already-admitted native Calc without adding a switch.
+See the [release measurements and limits](../benchmarks/scalar-functions.md#integral-sign).
+
 FLOAT/DOUBLE SIGN returns the input for signed zero and NaN, and `-1` or `1` for
 nonzero values, including infinities. NULL remains NULL. The result keeps the input's
 floating width; dividing by `SIGN(-0.0)` therefore retains negative infinity.
@@ -1352,7 +1364,7 @@ returns NULL. No JVM callback or configuration switch is required for these conv
 
 ### Exact unary and integral functions
 
-Integer and DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
+Integer and DECIMAL unary minus and ABS, and DECIMAL SIGN, execute Flink's generated expression code through
 the existing batch JVM bridge. Integral FLOOR/CEIL and INT/BIGINT TRUNCATE use the same path,
 including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE retains the host compilation
 failure described under exact floating math below. This retains resolved widths, decimal precision/scale, NULL handling,

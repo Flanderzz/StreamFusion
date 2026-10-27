@@ -2565,6 +2565,7 @@ final class RexExpression {
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
+      if (nativeIntegralSign(call)) return emitBuiltinCall(call, 65);
       return emitFloatUnary(call, 65);
     }
     if ("REPEAT".equals(functionName)) {
@@ -4000,8 +4001,9 @@ final class RexExpression {
     if (call.getKind() == SqlKind.MINUS_PREFIX) return exact;
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
-      case "SIGN":
         return exact;
+      case "SIGN":
+        return exact && !nativeIntegralSign(call);
       case "FLOOR":
       case "CEIL":
       case "CEILING":
@@ -4083,6 +4085,31 @@ final class RexExpression {
       default:
         return false;
     }
+  }
+
+  private static boolean nativeIntegralSign(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.SIGN
+        && call.getOperands().size() == 1
+        && java.util.Set.of(SqlTypeName.INTEGER, SqlTypeName.BIGINT)
+            .contains(call.getOperands().get(0).getType().getSqlTypeName())
+        && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()
+        && nativeIntegralSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralSignOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeIntegralSign(call)) return true;
+    return call.getKind() == SqlKind.CAST
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getType())
+        && wideningTargetCode(
+                call.getOperands().get(0).getType().getSqlTypeName(),
+                call.getType().getSqlTypeName())
+            >= 0
+        && nativeIntegralSignOperand(call.getOperands().get(0));
   }
 
   private static boolean containsMetadataDependentDecimalRounding(RexNode node) {
