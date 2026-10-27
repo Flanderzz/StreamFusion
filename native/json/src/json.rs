@@ -1502,8 +1502,10 @@ pub(crate) struct JsonDecoder {
     pub(crate) schema: SchemaRef,
     /// DECIMAL columns need the raw number literal for exactness (see
     /// `json_needs_raw_number_literals`); those schemas decode via arrow-json, all others via the
-    /// simd-json tape walk. The arrow-json path keeps its own (lenient) temporal/coercion
-    /// envelope — an accept-where-Flink-rejects residual documented in divergences/21.
+    /// simd-json tape walk. On the arrow-json path DECIMAL, DATE, TIME, TIMESTAMP, VARBINARY and
+    /// BOOLEAN leaves convert from their text through the simd path's Flink-exact parsers; what
+    /// arrow-json still reads differently from Flink, in both directions, is documented in
+    /// divergences/21.
     raw_literals: bool,
     /// The table's `timestamp-format.standard` and skip mode.
     env: JsonEnv,
@@ -1610,10 +1612,10 @@ impl JsonDecoder {
     /// literal) and converted here with Flink's exact semantics — `new BigDecimal(String)` then a
     /// HALF_UP rescale that goes NULL on precision overflow. arrow-json's own decimal parse
     /// truncates extra fraction digits and errors on overflow, which silently diverged from Flink
-    /// on valid data. TIME and VARBINARY leaves sharing such a schema also ride as text and
-    /// convert through the same Flink-exact parsers the simd path uses — arrow-json's own
-    /// time/binary handling has a different envelope. Documents feed one at a time to keep the
-    /// decoder's record boundaries aligned with the input rows.
+    /// on valid data. DATE, TIME, TIMESTAMP, VARBINARY and BOOLEAN leaves sharing such a schema
+    /// also ride as text and convert through the same Flink-exact parsers the simd path uses —
+    /// arrow-json's own handling of those types has a different envelope. Documents feed one at
+    /// a time to keep the decoder's record boundaries aligned with the input rows.
     fn decode_raw_literals(&self, bodies: &RecordBatch) -> RecordBatch {
         let column = bodies.column(0);
         let text_schema = Arc::new(Schema::new(
@@ -1633,9 +1635,10 @@ impl JsonDecoder {
         // In skip mode each message decodes through its own decoder so a bad one drops alone
         // (arrow-json's decoder state is unusable after an error), and each fanned-out array
         // element through its own so a bad element drops alone — the same per-element granularity
-        // as the simd path. Flink's skip on this path is otherwise approximated at message/element
-        // granularity for non-decimal errors — divergences/21; the decimal cells themselves skip
-        // per FIELD in restore_exact_leaves, like the host.
+        // as the simd path. A value arrow-json itself rejects still drops its whole message or
+        // element, where Flink converts each field on its own (divergences/21); a bad text-restored
+        // leaf (DECIMAL, DATE, TIME, TIMESTAMP, VARBINARY) nulls per FIELD in restore_exact_leaves,
+        // like the host.
         let mut batches = Vec::new();
         if self.env.lenient {
             for row in 0..bodies.num_rows() {
