@@ -456,7 +456,7 @@ fixtures require `native` for `changelog=false` and `full_fallback` for `changel
 exact witness is independently checked against the existing execution contract. No upstream test
 configuration is changed to force a preferred route.
 
-The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 115 and 95
+The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 116 and 96
 verified runtime variants respectively. Run them with:
 
 ```sh
@@ -464,7 +464,7 @@ FLINK_VERSION=2.2.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 FLINK_VERSION=1.18.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 ```
 
-The option selects the scope's upstream methods (25 on 2.2 and 24 on 1.18), enables fresh SQL inventory collection/reporting,
+The option selects the scope's upstream methods (26 on 2.2 and 25 on 1.18), enables fresh SQL inventory collection/reporting,
 and applies the appropriate scope automatically. Add `FLINK_SUITE_REUSE_BUILD=true` after a
 compatible suite build. A custom `FLINK_SUITE_TEST` selection must still satisfy every required
 variant; omitted variants fail. The audit option requires the runtime suite and cannot be combined

@@ -515,6 +515,11 @@ maintainer authorized correctness-verified slower groundwork after two profiling
 [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505). Complete-job evidence must
 retain both transposes and must not describe a slower case as accelerated.
 
+The [remaining-signature comparisons](../benchmarks/native-collections.md) retain matched
+stock/previous/candidate jobs at two STRING array widths, runtime sorts, SPLIT, constructors
+and container casts. They report the complete-job limits of this coverage work separately
+from the earlier primitive-kernel gains above.
+
 
 `DynamicCollectionBenchmark` retains its original complete-job timer, sources, sink and
 transpose assertions. `collection.numericStrings=true` fills STRING arrays with signed ASCII

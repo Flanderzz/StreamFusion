@@ -3265,6 +3265,11 @@ This preserves the declared native type as well as Flink's unchanged contents.
 
 ### Native container cast bounds
 
+The [remaining collection measurements](../benchmarks/native-collections.md) compare stock
+Flink, the previous evaluator and these native kernels with both row/Arrow transposes. Slower
+cases ship under the maintainer's explicit two-pass agreement for #505; native execution does
+not imply a complete-job speedup.
+
 MAP casts admit nullable STRING keys whose character type is unchanged, or signed-integer keys
 cast to another signed-integer type, with nullable numeric or numeric-to-BOOLEAN values. STRING
 values cast to signed integers and nested nullable numeric ARRAY values use the same child

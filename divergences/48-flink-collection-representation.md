@@ -95,7 +95,8 @@ POSITION returns INT zero when absent and NULL for a NULL needle. Matching BOOLE
 DECIMAL types have exact native equality; decimal precision and scale are checked before dispatch.
 Scalar needles are not expanded to the batch length. Potentially failing arguments retain the
 complete generated Calc to preserve Flink's evaluation schedule. The existing representation
-checks keep strings, nested values and NOT NULL-element arrays on their verified generated route.
+checks keep unverified nested values and NOT NULL-element arrays on their verified generated route.
+Nullable represented STRING searches use the native views described below.
 CONTAINS also retains generated evaluation for non-NULL literals or nonnullable needles: Flink
 constructs its array element getter from that needle type. For DECIMAL, a stock binary array's
 unchecked read of a NULL cell can throw where the Arrow-backed JVM view returns NULL; that
@@ -105,9 +106,11 @@ ARRAY_MIN and ARRAY_MAX instead reuse released DataFusion 54 directly for nullab
 DECIMAL arrays. Flink's NULL skipping, nullable empty result, exact ordering and declared result
 type agree with those released kernels, including their short-list scan and long-list Arrow
 reduction. No duplicated reduction implementation or private dependency is needed. The planner
-retains generated evaluation for floating/string/temporal/nested elements, NOT NULL elements,
+retains generated evaluation for floating/temporal/nested elements, NOT NULL elements,
 fallible operands and representation-sensitive consumers; neither Spark floating ordering nor
 DataFusion's broader type support establishes parity for these excluded signatures.
+Represented STRING extrema use the native comparator described below rather than ordinary
+DataFusion UTF-8 ordering.
 
 MAP projections reuse DataFusion/Comet's shared Arrow view pattern, with the
 verified map-list carrier retained for NULL keys. MAP_UNION cannot use ordinary

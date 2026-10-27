@@ -1,0 +1,1898 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "d98dc2f21f8d3029bf04bac6e8e27f8e1c0bb911",
+  "candidate_revision": "a8f8027c6a516e696f1a9769247af5eeef8b8deb",
+  "fixture_sha256": "7f3211aff97d9485b6f3e872c2a90cb7edb3d82c9cae4475b204a61dc8243ec7",
+  "fixture": "src/test/java/tech/streamfusion/DynamicCollectionBenchmark.java",
+  "baseline_overlay": "Only the identical benchmark fixture was overlaid; all production sources are unchanged main.",
+  "flink": "2.2.1",
+  "jdk": "OpenJDK 17.0.20.1+1-1-22.04-Ubuntu",
+  "cpu": "12th Gen Intel Core i7-12650H, 16 logical CPUs",
+  "os": "Linux 6.18.54.1-microsoft-standard-WSL2 x86_64",
+  "heap": "-Xmx8g",
+  "native_build": "cargo build -p streamfusion --release --features mimalloc",
+  "parallelism": 1,
+  "batch_rows": 1024,
+  "rows": 200000,
+  "warmups_per_engine": 2,
+  "measured_trials_per_engine": 5,
+  "method": "Complete jobs: planning/startup, source generation, both row/Arrow transposes, JNI, production serializers and blackhole sink. Fresh JVM per cohort, alternating stock/native order by trial and alternating cohort order by profile. No local task builds or tests overlapped. CPU unpinned; host background load uncontrolled.",
+  "controls": "Both cohorts retain their paired stock measurements. Short jobs are startup sensitive and not sustained kernel throughput.",
+  "cases": [
+    {
+      "name": "string-distinct8",
+      "expression": "ARRAY_DISTINCT(arr)",
+      "function": "ARRAY_DISTINCT",
+      "properties": {
+        "map": false,
+        "width": 8,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-distinct64",
+      "expression": "ARRAY_DISTINCT(arr)",
+      "function": "ARRAY_DISTINCT",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-remove64",
+      "expression": "ARRAY_REMOVE(arr,arr[2])",
+      "function": "ARRAY_REMOVE",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-reverse64",
+      "expression": "ARRAY_REVERSE(arr)",
+      "function": "ARRAY_REVERSE",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-position64",
+      "expression": "ARRAY_POSITION(arr,arr[2])",
+      "function": "ARRAY_POSITION",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-sort8",
+      "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+      "function": "ARRAY_SORT",
+      "properties": {
+        "map": false,
+        "width": 8,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "integer-sort64",
+      "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+      "function": "ARRAY_SORT",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "INT",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "split-dynamic",
+      "expression": "SPLIT(arr[2],arr[3])",
+      "function": "SPLIT",
+      "properties": {
+        "map": false,
+        "width": 8,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "split-empty",
+      "expression": "SPLIT(arr[2],'')",
+      "function": "SPLIT",
+      "properties": {
+        "map": false,
+        "width": 8,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "string-row8",
+      "expression": "ROW(idx,arr[2])",
+      "function": "ROW",
+      "properties": {
+        "map": false,
+        "width": 8,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "map-cast",
+      "expression": "CAST(m AS MAP<STRING,BIGINT>)",
+      "function": "CAST",
+      "properties": {
+        "map": true,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16,
+        "integerMap": true
+      }
+    },
+    {
+      "name": "map-union",
+      "expression": "MAP_UNION(m,m)",
+      "function": "MAP_UNION",
+      "properties": {
+        "map": true,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "parse-array64",
+      "expression": "CAST(arr AS ARRAY<INT>)",
+      "function": "CAST",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16,
+        "numericStrings": true
+      }
+    },
+    {
+      "name": "format-array64",
+      "expression": "CAST(arr AS STRING)",
+      "function": "CAST",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "INT",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "boolean-array64",
+      "expression": "CAST(arr AS ARRAY<BOOLEAN>)",
+      "function": "CAST",
+      "properties": {
+        "map": false,
+        "width": 64,
+        "type": "INT",
+        "bytes": 16
+      }
+    },
+    {
+      "name": "multiset-cast",
+      "expression": "CAST(m AS MULTISET<BIGINT>)",
+      "function": "CAST",
+      "properties": {
+        "map": true,
+        "width": 64,
+        "type": "STRING",
+        "bytes": 16,
+        "multiset": true
+      }
+    }
+  ],
+  "cohorts": [
+    {
+      "case": {
+        "name": "string-distinct8",
+        "expression": "ARRAY_DISTINCT(arr)",
+        "function": "ARRAY_DISTINCT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_DISTINCT(arr)",
+        "-Dcollection.generatedFunction=ARRAY_DISTINCT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 13.373006820678711,
+      "completed_at": "2026-10-27T08:18:23Z"
+    },
+    {
+      "case": {
+        "name": "string-distinct8",
+        "expression": "ARRAY_DISTINCT(arr)",
+        "function": "ARRAY_DISTINCT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_DISTINCT(arr)",
+        "-Dcollection.rustFunction=ARRAY_DISTINCT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.993706703186035,
+      "completed_at": "2026-10-27T08:18:35Z"
+    },
+    {
+      "case": {
+        "name": "string-distinct64",
+        "expression": "ARRAY_DISTINCT(arr)",
+        "function": "ARRAY_DISTINCT",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_DISTINCT(arr)",
+        "-Dcollection.generatedFunction=ARRAY_DISTINCT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 54.63006591796875,
+      "completed_at": "2026-10-27T08:20:20Z"
+    },
+    {
+      "case": {
+        "name": "string-distinct64",
+        "expression": "ARRAY_DISTINCT(arr)",
+        "function": "ARRAY_DISTINCT",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_DISTINCT(arr)",
+        "-Dcollection.rustFunction=ARRAY_DISTINCT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 49.836870193481445,
+      "completed_at": "2026-10-27T08:19:25Z"
+    },
+    {
+      "case": {
+        "name": "string-remove64",
+        "expression": "ARRAY_REMOVE(arr,arr[2])",
+        "function": "ARRAY_REMOVE",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_REMOVE(arr,arr[2])",
+        "-Dcollection.generatedFunction=ARRAY_REMOVE",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 31.122962474822998,
+      "completed_at": "2026-10-27T08:20:51Z"
+    },
+    {
+      "case": {
+        "name": "string-remove64",
+        "expression": "ARRAY_REMOVE(arr,arr[2])",
+        "function": "ARRAY_REMOVE",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_REMOVE(arr,arr[2])",
+        "-Dcollection.rustFunction=ARRAY_REMOVE",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 24.076428413391113,
+      "completed_at": "2026-10-27T08:21:15Z"
+    },
+    {
+      "case": {
+        "name": "string-reverse64",
+        "expression": "ARRAY_REVERSE(arr)",
+        "function": "ARRAY_REVERSE",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_REVERSE(arr)",
+        "-Dcollection.generatedFunction=ARRAY_REVERSE",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 30.59844708442688,
+      "completed_at": "2026-10-27T08:22:09Z"
+    },
+    {
+      "case": {
+        "name": "string-reverse64",
+        "expression": "ARRAY_REVERSE(arr)",
+        "function": "ARRAY_REVERSE",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_REVERSE(arr)",
+        "-Dcollection.rustFunction=ARRAY_REVERSE",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 23.274078845977783,
+      "completed_at": "2026-10-27T08:21:39Z"
+    },
+    {
+      "case": {
+        "name": "string-position64",
+        "expression": "ARRAY_POSITION(arr,arr[2])",
+        "function": "ARRAY_POSITION",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_POSITION(arr,arr[2])",
+        "-Dcollection.generatedFunction=ARRAY_POSITION",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 22.165360689163208,
+      "completed_at": "2026-10-27T08:22:32Z"
+    },
+    {
+      "case": {
+        "name": "string-position64",
+        "expression": "ARRAY_POSITION(arr,arr[2])",
+        "function": "ARRAY_POSITION",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_POSITION(arr,arr[2])",
+        "-Dcollection.rustFunction=ARRAY_POSITION",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 18.42063045501709,
+      "completed_at": "2026-10-27T08:22:50Z"
+    },
+    {
+      "case": {
+        "name": "string-sort8",
+        "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+        "function": "ARRAY_SORT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_SORT(arr,idx>0,idx>0)",
+        "-Dcollection.generatedFunction=ARRAY_SORT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 13.1077561378479,
+      "completed_at": "2026-10-27T08:23:15Z"
+    },
+    {
+      "case": {
+        "name": "string-sort8",
+        "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+        "function": "ARRAY_SORT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_SORT(arr,idx>0,idx>0)",
+        "-Dcollection.rustFunction=ARRAY_SORT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.882200717926025,
+      "completed_at": "2026-10-27T08:23:02Z"
+    },
+    {
+      "case": {
+        "name": "integer-sort64",
+        "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+        "function": "ARRAY_SORT",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_SORT(arr,idx>0,idx>0)",
+        "-Dcollection.generatedFunction=ARRAY_SORT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 16.79813027381897,
+      "completed_at": "2026-10-27T08:23:32Z"
+    },
+    {
+      "case": {
+        "name": "integer-sort64",
+        "expression": "ARRAY_SORT(arr,idx>0,idx>0)",
+        "function": "ARRAY_SORT",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ARRAY_SORT(arr,idx>0,idx>0)",
+        "-Dcollection.rustFunction=ARRAY_SORT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 15.979004383087158,
+      "completed_at": "2026-10-27T08:23:48Z"
+    },
+    {
+      "case": {
+        "name": "split-dynamic",
+        "expression": "SPLIT(arr[2],arr[3])",
+        "function": "SPLIT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=SPLIT(arr[2],arr[3])",
+        "-Dcollection.generatedFunction=SPLIT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 12.239330291748047,
+      "completed_at": "2026-10-27T08:24:12Z"
+    },
+    {
+      "case": {
+        "name": "split-dynamic",
+        "expression": "SPLIT(arr[2],arr[3])",
+        "function": "SPLIT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=SPLIT(arr[2],arr[3])",
+        "-Dcollection.rustFunction=SPLIT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.207315444946289,
+      "completed_at": "2026-10-27T08:24:00Z"
+    },
+    {
+      "case": {
+        "name": "split-empty",
+        "expression": "SPLIT(arr[2],'')",
+        "function": "SPLIT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=SPLIT(arr[2],'')",
+        "-Dcollection.generatedFunction=SPLIT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 15.870896339416504,
+      "completed_at": "2026-10-27T08:24:28Z"
+    },
+    {
+      "case": {
+        "name": "split-empty",
+        "expression": "SPLIT(arr[2],'')",
+        "function": "SPLIT",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=SPLIT(arr[2],'')",
+        "-Dcollection.rustFunction=SPLIT",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 13.577430725097656,
+      "completed_at": "2026-10-27T08:24:42Z"
+    },
+    {
+      "case": {
+        "name": "string-row8",
+        "expression": "ROW(idx,arr[2])",
+        "function": "ROW",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ROW(idx,arr[2])",
+        "-Dcollection.generatedFunction=ROW",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.982524394989014,
+      "completed_at": "2026-10-27T08:25:05Z"
+    },
+    {
+      "case": {
+        "name": "string-row8",
+        "expression": "ROW(idx,arr[2])",
+        "function": "ROW",
+        "properties": {
+          "map": false,
+          "width": 8,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=ROW(idx,arr[2])",
+        "-Dcollection.rustFunction=ROW",
+        "-Dcollection.map=false",
+        "-Dcollection.width=8",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.136257648468018,
+      "completed_at": "2026-10-27T08:24:53Z"
+    },
+    {
+      "case": {
+        "name": "map-cast",
+        "expression": "CAST(m AS MAP<STRING,BIGINT>)",
+        "function": "CAST",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "integerMap": true
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(m AS MAP<STRING,BIGINT>)",
+        "-Dcollection.generatedFunction=CAST",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.integerMap=true"
+      ],
+      "elapsed_wall_seconds": 12.305179834365845,
+      "completed_at": "2026-10-27T08:25:17Z"
+    },
+    {
+      "case": {
+        "name": "map-cast",
+        "expression": "CAST(m AS MAP<STRING,BIGINT>)",
+        "function": "CAST",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "integerMap": true
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(m AS MAP<STRING,BIGINT>)",
+        "-Dcollection.rustFunction=CAST",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.integerMap=true"
+      ],
+      "elapsed_wall_seconds": 11.46705174446106,
+      "completed_at": "2026-10-27T08:25:29Z"
+    },
+    {
+      "case": {
+        "name": "map-union",
+        "expression": "MAP_UNION(m,m)",
+        "function": "MAP_UNION",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=MAP_UNION(m,m)",
+        "-Dcollection.generatedFunction=MAP_UNION",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 12.39979076385498,
+      "completed_at": "2026-10-27T08:25:53Z"
+    },
+    {
+      "case": {
+        "name": "map-union",
+        "expression": "MAP_UNION(m,m)",
+        "function": "MAP_UNION",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=MAP_UNION(m,m)",
+        "-Dcollection.rustFunction=MAP_UNION",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.403831005096436,
+      "completed_at": "2026-10-27T08:25:40Z"
+    },
+    {
+      "case": {
+        "name": "parse-array64",
+        "expression": "CAST(arr AS ARRAY<INT>)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "numericStrings": true
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS ARRAY<INT>)",
+        "-Dcollection.generatedFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.numericStrings=true"
+      ],
+      "elapsed_wall_seconds": 25.247443914413452,
+      "completed_at": "2026-10-27T08:26:18Z"
+    },
+    {
+      "case": {
+        "name": "parse-array64",
+        "expression": "CAST(arr AS ARRAY<INT>)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "numericStrings": true
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS ARRAY<INT>)",
+        "-Dcollection.rustFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.numericStrings=true"
+      ],
+      "elapsed_wall_seconds": 20.725778102874756,
+      "completed_at": "2026-10-27T08:26:39Z"
+    },
+    {
+      "case": {
+        "name": "format-array64",
+        "expression": "CAST(arr AS STRING)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS STRING)",
+        "-Dcollection.generatedFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 14.028846502304077,
+      "completed_at": "2026-10-27T08:27:08Z"
+    },
+    {
+      "case": {
+        "name": "format-array64",
+        "expression": "CAST(arr AS STRING)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS STRING)",
+        "-Dcollection.rustFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 15.273595571517944,
+      "completed_at": "2026-10-27T08:26:54Z"
+    },
+    {
+      "case": {
+        "name": "boolean-array64",
+        "expression": "CAST(arr AS ARRAY<BOOLEAN>)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS ARRAY<BOOLEAN>)",
+        "-Dcollection.generatedFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.702857255935669,
+      "completed_at": "2026-10-27T08:27:20Z"
+    },
+    {
+      "case": {
+        "name": "boolean-array64",
+        "expression": "CAST(arr AS ARRAY<BOOLEAN>)",
+        "function": "CAST",
+        "properties": {
+          "map": false,
+          "width": 64,
+          "type": "INT",
+          "bytes": 16
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(arr AS ARRAY<BOOLEAN>)",
+        "-Dcollection.rustFunction=CAST",
+        "-Dcollection.map=false",
+        "-Dcollection.width=64",
+        "-Dcollection.type=INT",
+        "-Dcollection.bytes=16"
+      ],
+      "elapsed_wall_seconds": 11.374285697937012,
+      "completed_at": "2026-10-27T08:27:32Z"
+    },
+    {
+      "case": {
+        "name": "multiset-cast",
+        "expression": "CAST(m AS MULTISET<BIGINT>)",
+        "function": "CAST",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "multiset": true
+        }
+      },
+      "cohort": "previous",
+      "library_sha256": "7dc0ed3bb037209fb9e28878651487228758c1c4bdd83a47b689881473420944",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(m AS MULTISET<BIGINT>)",
+        "-Dcollection.generatedFunction=CAST",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.multiset=true"
+      ],
+      "elapsed_wall_seconds": 11.420763492584229,
+      "completed_at": "2026-10-27T08:27:55Z"
+    },
+    {
+      "case": {
+        "name": "multiset-cast",
+        "expression": "CAST(m AS MULTISET<BIGINT>)",
+        "function": "CAST",
+        "properties": {
+          "map": true,
+          "width": 64,
+          "type": "STRING",
+          "bytes": 16,
+          "multiset": true
+        }
+      },
+      "cohort": "candidate",
+      "library_sha256": "befbed8f39f752361d7678477245f6f68807dbaa6b72b81ed4e44ac8e3f23dec",
+      "command": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-pl",
+        "streamfusion-runtime",
+        "-Pbench",
+        "surefire:test@default-test",
+        "-Dtest=DynamicCollectionBenchmark",
+        "-Dnative.build.skip=true",
+        "-Dnative.test.resource.skip=true",
+        "-Dmaven.javadoc.skip=true",
+        "-Dcollection.rows=200000",
+        "-Dcollection.warmup=2",
+        "-Dcollection.runs=5",
+        "-Dcollection.expression=CAST(m AS MULTISET<BIGINT>)",
+        "-Dcollection.rustFunction=CAST",
+        "-Dcollection.map=true",
+        "-Dcollection.width=64",
+        "-Dcollection.type=STRING",
+        "-Dcollection.bytes=16",
+        "-Dcollection.multiset=true"
+      ],
+      "elapsed_wall_seconds": 11.222836971282959,
+      "completed_at": "2026-10-27T08:27:43Z"
+    }
+  ],
+  "summary": [
+    {
+      "case": "string-distinct8",
+      "samples": {
+        "previous_flink": {
+          "median": 0.229326399,
+          "minimum": 0.227536052,
+          "maximum": 0.316589228
+        },
+        "previous_native": {
+          "median": 0.426122336,
+          "minimum": 0.418795728,
+          "maximum": 0.454482407
+        },
+        "candidate_flink": {
+          "median": 0.23851888,
+          "minimum": 0.234055484,
+          "maximum": 0.329411307
+        },
+        "candidate_native": {
+          "median": 0.301775329,
+          "minimum": 0.292446161,
+          "maximum": 0.314004622
+        }
+      },
+      "versus_previous_percent": -29.18105823018862,
+      "versus_stock_percent": 26.52052072355866
+    },
+    {
+      "case": "string-distinct64",
+      "samples": {
+        "previous_flink": {
+          "median": 2.520152675,
+          "minimum": 2.502111175,
+          "maximum": 2.536224026
+        },
+        "previous_native": {
+          "median": 4.080350883,
+          "minimum": 4.067082873,
+          "maximum": 4.19950686
+        },
+        "candidate_flink": {
+          "median": 2.364996928,
+          "minimum": 2.344276613,
+          "maximum": 2.478872796
+        },
+        "candidate_native": {
+          "median": 3.570612847,
+          "minimum": 3.555539386,
+          "maximum": 3.619406071
+        }
+      },
+      "versus_previous_percent": -12.492504949114203,
+      "versus_stock_percent": 50.97748351071007
+    },
+    {
+      "case": "string-remove64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.878462355,
+          "minimum": 0.868775808,
+          "maximum": 0.881278254
+        },
+        "previous_native": {
+          "median": 2.40159319,
+          "minimum": 2.16427252,
+          "maximum": 2.445801421
+        },
+        "candidate_flink": {
+          "median": 0.859245912,
+          "minimum": 0.856173758,
+          "maximum": 0.898917494
+        },
+        "candidate_native": {
+          "median": 1.396625142,
+          "minimum": 1.379232349,
+          "maximum": 1.411176385
+        }
+      },
+      "versus_previous_percent": -41.84589014428376,
+      "versus_stock_percent": 62.54079565524893
+    },
+    {
+      "case": "string-reverse64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.811519073,
+          "minimum": 0.807845109,
+          "maximum": 0.818084236
+        },
+        "previous_native": {
+          "median": 2.384984695,
+          "minimum": 2.322840015,
+          "maximum": 2.4191136
+        },
+        "candidate_flink": {
+          "median": 0.809306818,
+          "minimum": 0.803851385,
+          "maximum": 0.818652418
+        },
+        "candidate_native": {
+          "median": 1.356750406,
+          "minimum": 1.353093724,
+          "maximum": 1.372173642
+        }
+      },
+      "versus_previous_percent": -43.112825468257356,
+      "versus_stock_percent": 67.6435161330866
+    },
+    {
+      "case": "string-position64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.615273073,
+          "minimum": 0.596604418,
+          "maximum": 0.622351264
+        },
+        "previous_native": {
+          "median": 1.344694853,
+          "minimum": 1.322094341,
+          "maximum": 1.584591827
+        },
+        "candidate_flink": {
+          "median": 0.581489569,
+          "minimum": 0.569507336,
+          "maximum": 0.5938546
+        },
+        "candidate_native": {
+          "median": 0.876053921,
+          "minimum": 0.859232837,
+          "maximum": 0.886096754
+        }
+      },
+      "versus_previous_percent": -34.85109881654318,
+      "versus_stock_percent": 50.65685916027154
+    },
+    {
+      "case": "string-sort8",
+      "samples": {
+        "previous_flink": {
+          "median": 0.231135825,
+          "minimum": 0.22239737,
+          "maximum": 0.233166749
+        },
+        "previous_native": {
+          "median": 0.432627206,
+          "minimum": 0.41442835,
+          "maximum": 0.515824939
+        },
+        "candidate_flink": {
+          "median": 0.241705543,
+          "minimum": 0.235658215,
+          "maximum": 0.25447779
+        },
+        "candidate_native": {
+          "median": 0.293143684,
+          "minimum": 0.283589594,
+          "maximum": 0.41033351
+        }
+      },
+      "versus_previous_percent": -32.24104264954617,
+      "versus_stock_percent": 21.281324524692447
+    },
+    {
+      "case": "integer-sort64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.595361472,
+          "minimum": 0.591496569,
+          "maximum": 0.615203111
+        },
+        "previous_native": {
+          "median": 0.661770681,
+          "minimum": 0.656917913,
+          "maximum": 0.683927649
+        },
+        "candidate_flink": {
+          "median": 0.599844843,
+          "minimum": 0.593052437,
+          "maximum": 0.619150587
+        },
+        "candidate_native": {
+          "median": 0.541310118,
+          "minimum": 0.537687578,
+          "maximum": 0.557979252
+        }
+      },
+      "versus_previous_percent": -18.20276516601981,
+      "versus_stock_percent": -9.758310950420224
+    },
+    {
+      "case": "split-dynamic",
+      "samples": {
+        "previous_flink": {
+          "median": 0.198587301,
+          "minimum": 0.193737517,
+          "maximum": 0.203572729
+        },
+        "previous_native": {
+          "median": 0.349020453,
+          "minimum": 0.334516736,
+          "maximum": 0.43594887
+        },
+        "candidate_flink": {
+          "median": 0.195581596,
+          "minimum": 0.19039634,
+          "maximum": 0.205285849
+        },
+        "candidate_native": {
+          "median": 0.248367845,
+          "minimum": 0.229054475,
+          "maximum": 0.33966956
+        }
+      },
+      "versus_previous_percent": -28.83859875111674,
+      "versus_stock_percent": 26.989374296751322
+    },
+    {
+      "case": "split-empty",
+      "samples": {
+        "previous_flink": {
+          "median": 0.308967179,
+          "minimum": 0.306933952,
+          "maximum": 0.315424525
+        },
+        "previous_native": {
+          "median": 0.773053435,
+          "minimum": 0.747911811,
+          "maximum": 0.84626016
+        },
+        "candidate_flink": {
+          "median": 0.327101402,
+          "minimum": 0.320820155,
+          "maximum": 0.384399129
+        },
+        "candidate_native": {
+          "median": 0.411654538,
+          "minimum": 0.407171514,
+          "maximum": 0.431426318
+        }
+      },
+      "versus_previous_percent": -46.7495364017107,
+      "versus_stock_percent": 25.849212349141816
+    },
+    {
+      "case": "string-row8",
+      "samples": {
+        "previous_flink": {
+          "median": 0.190304651,
+          "minimum": 0.178863592,
+          "maximum": 0.19457887
+        },
+        "previous_native": {
+          "median": 0.361013455,
+          "minimum": 0.33203846,
+          "maximum": 0.434238783
+        },
+        "candidate_flink": {
+          "median": 0.193001098,
+          "minimum": 0.190249752,
+          "maximum": 0.261065889
+        },
+        "candidate_native": {
+          "median": 0.249139812,
+          "minimum": 0.242465278,
+          "maximum": 0.322086981
+        }
+      },
+      "versus_previous_percent": -30.988773811768322,
+      "versus_stock_percent": 29.08725109947301
+    },
+    {
+      "case": "map-cast",
+      "samples": {
+        "previous_flink": {
+          "median": 0.230017004,
+          "minimum": 0.218478397,
+          "maximum": 0.298221022
+        },
+        "previous_native": {
+          "median": 0.339640649,
+          "minimum": 0.328036642,
+          "maximum": 0.403783708
+        },
+        "candidate_flink": {
+          "median": 0.223911384,
+          "minimum": 0.209975495,
+          "maximum": 0.294332772
+        },
+        "candidate_native": {
+          "median": 0.263391446,
+          "minimum": 0.256744926,
+          "maximum": 0.288210244
+        }
+      },
+      "versus_previous_percent": -22.449963873434964,
+      "versus_stock_percent": 17.632003024910947
+    },
+    {
+      "case": "map-union",
+      "samples": {
+        "previous_flink": {
+          "median": 0.239269828,
+          "minimum": 0.236118767,
+          "maximum": 0.303330748
+        },
+        "previous_native": {
+          "median": 0.343873768,
+          "minimum": 0.33884102,
+          "maximum": 0.444024114
+        },
+        "candidate_flink": {
+          "median": 0.245747123,
+          "minimum": 0.228643257,
+          "maximum": 0.306308857
+        },
+        "candidate_native": {
+          "median": 0.234637824,
+          "minimum": 0.23305055,
+          "maximum": 0.305145385
+        }
+      },
+      "versus_previous_percent": -31.766291635249132,
+      "versus_stock_percent": -4.520622200732749
+    },
+    {
+      "case": "parse-array64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.849205354,
+          "minimum": 0.832512765,
+          "maximum": 0.862799067
+        },
+        "previous_native": {
+          "median": 1.645454474,
+          "minimum": 1.639822578,
+          "maximum": 1.647971715
+        },
+        "candidate_flink": {
+          "median": 0.818645624,
+          "minimum": 0.810030627,
+          "maximum": 0.840142962
+        },
+        "candidate_native": {
+          "median": 1.00694561,
+          "minimum": 0.994910212,
+          "maximum": 1.019247928
+        }
+      },
+      "versus_previous_percent": -38.80440778454499,
+      "versus_stock_percent": 23.001403840643995
+    },
+    {
+      "case": "format-array64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.377201502,
+          "minimum": 0.356421127,
+          "maximum": 0.442494329
+        },
+        "previous_native": {
+          "median": 0.459225692,
+          "minimum": 0.442467649,
+          "maximum": 0.475290017
+        },
+        "candidate_flink": {
+          "median": 0.375680191,
+          "minimum": 0.355106826,
+          "maximum": 0.407635164
+        },
+        "candidate_native": {
+          "median": 0.696282508,
+          "minimum": 0.678353601,
+          "maximum": 0.740676591
+        }
+      },
+      "versus_previous_percent": 51.620982913124976,
+      "versus_stock_percent": 85.33915939155814
+    },
+    {
+      "case": "boolean-array64",
+      "samples": {
+        "previous_flink": {
+          "median": 0.228586407,
+          "minimum": 0.209911007,
+          "maximum": 0.23756267
+        },
+        "previous_native": {
+          "median": 0.344583356,
+          "minimum": 0.337823809,
+          "maximum": 0.377302138
+        },
+        "candidate_flink": {
+          "median": 0.25150872,
+          "minimum": 0.218059933,
+          "maximum": 0.280039851
+        },
+        "candidate_native": {
+          "median": 0.303681554,
+          "minimum": 0.296341492,
+          "maximum": 0.317166322
+        }
+      },
+      "versus_previous_percent": -11.869929666597123,
+      "versus_stock_percent": 20.743946372913037
+    },
+    {
+      "case": "multiset-cast",
+      "samples": {
+        "previous_flink": {
+          "median": 0.22572164,
+          "minimum": 0.214237311,
+          "maximum": 0.258898178
+        },
+        "previous_native": {
+          "median": 0.263349977,
+          "minimum": 0.25119154,
+          "maximum": 0.316940969
+        },
+        "candidate_flink": {
+          "median": 0.225090286,
+          "minimum": 0.218997112,
+          "maximum": 0.248990719
+        },
+        "candidate_native": {
+          "median": 0.238484389,
+          "minimum": 0.230423938,
+          "maximum": 0.301775123
+        }
+      },
+      "versus_previous_percent": -9.44203158217858,
+      "versus_stock_percent": 5.950546884106767
+    }
+  ]
+}
