@@ -1866,3 +1866,241 @@ fn extreme_decimal_exponents_decode_without_materializing_powers_of_ten() {
         vec![Some(0), Some(0), Some(0), None, Some(0), None, None]
     );
 }
+
+/// A stand-in for the JVM's verdicts: exact matching, recording every token it is asked about.
+struct RecordedVerdicts {
+    database: Option<&'static str>,
+    table: Option<&'static str>,
+    asked: Asked,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl IncludeVerdicts for RecordedVerdicts {
+    fn matches(&self, field: IncludeField, tokens: &[IncludeToken]) -> Vec<bool> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pattern = match field {
+            IncludeField::Database => self.database,
+            IncludeField::Table => self.table,
+        }
+        .expect("asked about an unconfigured filter");
+        tokens
+            .iter()
+            .map(|token| {
+                self.asked.lock().unwrap().push((field, token.clone()));
+                match token {
+                    IncludeToken::Text(text) => text == pattern,
+                    IncludeToken::Literal(literal) => literal == pattern.as_bytes(),
+                }
+            })
+            .collect()
+    }
+}
+
+type Asked = Arc<std::sync::Mutex<Vec<(IncludeField, IncludeToken)>>>;
+
+fn canal_filter(
+    database: Option<&'static str>,
+    table: Option<&'static str>,
+) -> (
+    CanalIncludeFilter,
+    Asked,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let asked: Asked = Arc::default();
+    let calls: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
+    let verdicts = RecordedVerdicts {
+        database,
+        table,
+        asked: asked.clone(),
+        calls: calls.clone(),
+    };
+    (
+        CanalIncludeFilter::new(database.is_some(), table.is_some(), Box::new(verdicts)),
+        asked,
+        calls,
+    )
+}
+
+// Canal's include filters run before row conversion: a rejected message is dropped even when its
+// data could not convert or its type is unknown, while admitted messages decode normally.
+#[test]
+fn canal_include_filter_drops_rejected_messages_before_conversion() {
+    let (filter, _, _) = canal_filter(None, Some("orders"));
+    let decoder = new_canal_decoder(json_schema(), false, filter);
+    let kept = br#"{"data":[{"id":1,"name":"a","score":1.5}],"table":"orders","type":"INSERT"}"#;
+    let bad_data =
+        br#"{"data":[{"id":"x","name":"b","score":"y"}],"table":"users","type":"INSERT"}"#;
+    let unknown_type = br#"{"data":null,"table":"","type":"QUERY"}"#;
+    let body = bodies(vec![
+        Some(kept.as_slice()),
+        Some(bad_data),
+        Some(unknown_type),
+    ]);
+
+    let out = decoder.decode(&body);
+
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(values(&out, 0), vec![1]);
+}
+
+// Flink matches `root.get(key).asText()`: strings as written, JSON null as "null", booleans as
+// their literal, containers as "", the last of repeated keys, and numbers as their raw literal for
+// the JVM to spell.
+#[test]
+fn canal_include_filter_reads_the_value_jackson_would() {
+    let (filter, asked, _) = canal_filter(Some("never"), None);
+    let decoder = new_canal_decoder(json_schema(), false, filter);
+    let messages: Vec<&[u8]> = vec![
+        br#"{"database":"shop","type":"INSERT"}"#,
+        br#"{"database":null,"type":"INSERT"}"#,
+        br#"{"database":true,"type":"INSERT"}"#,
+        br#"{"database":{"a":1},"type":"INSERT"}"#,
+        br#"{"database":[1],"type":"INSERT"}"#,
+        br#"{"database":"first","database":"last","type":"INSERT"}"#,
+        br#"{"database" : 12.50 ,"type":"INSERT"}"#,
+        br#"{"d\u0061tabase":-7e3,"type":"INSERT"}"#,
+    ];
+
+    let out = decoder.decode(&bodies(messages.into_iter().map(Some).collect()));
+
+    assert_eq!(out.num_rows(), 0);
+    let text = |value: &str| (IncludeField::Database, IncludeToken::Text(value.to_owned()));
+    let number = |value: &str| {
+        (
+            IncludeField::Database,
+            IncludeToken::Literal(value.as_bytes().to_vec()),
+        )
+    };
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![
+            text("shop"),
+            text("null"),
+            text("true"),
+            text(""),
+            text("last"),
+            number("12.50"),
+            number("-7e3"),
+        ]
+    );
+}
+
+// simd-json spells a lone high surrogate escape as U+0000 where Jackson keeps the surrogate, so a
+// string that decodes with a NUL reaches the JVM as its raw literal (an escaped NUL too, which
+// Jackson spells the same way). A surrogate pair decodes cleanly and stays text.
+#[test]
+fn canal_include_filter_lets_jackson_spell_strings_simd_json_cannot() {
+    let (filter, asked, _) = canal_filter(Some("never"), None);
+    let decoder = new_canal_decoder(json_schema(), false, filter);
+    let messages: Vec<&[u8]> = vec![
+        br#"{"database":"shop\ud800","type":"INSERT"}"#,
+        br#"{"database":"a\u0000b","type":"INSERT"}"#,
+        br#"{"database":"\ud83d\ude00","type":"INSERT"}"#,
+    ];
+
+    let out = decoder.decode(&bodies(messages.into_iter().map(Some).collect()));
+
+    assert_eq!(out.num_rows(), 0);
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![
+            (
+                IncludeField::Database,
+                IncludeToken::Literal(br#""shop\ud800""#.to_vec())
+            ),
+            (
+                IncludeField::Database,
+                IncludeToken::Literal(br#""a\u0000b""#.to_vec())
+            ),
+            (
+                IncludeField::Database,
+                IncludeToken::Text("\u{1F600}".to_owned())
+            ),
+        ]
+    );
+}
+
+// A message the filter cannot read — unparseable, a non-object root, or a filtered key missing
+// from the root — is corrupt: the job fails, or the message drops under ignore-parse-errors.
+#[test]
+fn canal_include_filter_treats_unreadable_messages_as_corrupt() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let ok = br#"{"data":[{"id":1,"name":"a","score":1.5}],"table":"orders","type":"INSERT"}"#;
+    for corrupt in [
+        br#"{"data":[],"table":"orders","type":"INSERT""#.as_slice(),
+        br#"[{"table":"orders"}]"#,
+        br#""orders""#,
+        br#"{"data":[],"type":"INSERT"}"#,
+    ] {
+        let (strict, _, _) = canal_filter(None, Some("orders"));
+        let strict = new_canal_decoder(json_schema(), false, strict);
+        let failed = catch_unwind(AssertUnwindSafe(|| {
+            strict.decode(&bodies(vec![Some(ok.as_slice()), Some(corrupt)]))
+        }));
+        assert!(failed.is_err(), "{}", String::from_utf8_lossy(corrupt));
+
+        let (skipping, _, _) = canal_filter(None, Some("orders"));
+        let skipping = new_canal_decoder(json_schema(), true, skipping);
+        let out = skipping.decode(&bodies(vec![Some(ok.as_slice()), Some(corrupt)]));
+        assert_eq!(
+            values(&out, 0),
+            vec![1],
+            "{}",
+            String::from_utf8_lossy(corrupt)
+        );
+    }
+}
+
+// The database filter is checked first: once it rejects a message, a missing table is never read,
+// so the message is dropped rather than corrupt.
+#[test]
+fn canal_include_filter_checks_database_before_table() {
+    let (filter, asked, _) = canal_filter(Some("shop"), Some("orders"));
+    let decoder = new_canal_decoder(json_schema(), false, filter);
+    let body = bodies(vec![Some(
+        br#"{"database":"other","type":"INSERT"}"#.as_slice(),
+    )]);
+
+    let out = decoder.decode(&body);
+
+    assert_eq!(out.num_rows(), 0);
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![(
+            IncludeField::Database,
+            IncludeToken::Text("other".to_owned())
+        )]
+    );
+}
+
+// Each distinct value is decided once, a batch's undecided values in one call, and a steady
+// stream of known tables makes no further calls.
+#[test]
+fn canal_include_filter_caches_each_distinct_value() {
+    let (filter, asked, calls) = canal_filter(None, Some("orders"));
+    let decoder = new_canal_decoder(json_schema(), false, filter);
+    let messages: Vec<String> = (0..300)
+        .map(|i| {
+            format!(
+                r#"{{"data":[{{"id":{i},"name":"a","score":1.5}}],"table":"{}","type":"INSERT"}}"#,
+                ["orders", "users", "items"][i % 3]
+            )
+        })
+        .collect();
+
+    let out = decoder.decode(&bodies(
+        messages.iter().map(|m| Some(m.as_bytes())).collect(),
+    ));
+
+    assert_eq!(out.num_rows(), 100);
+    assert_eq!(asked.lock().unwrap().len(), 3);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    let again = decoder.decode(&bodies(
+        messages.iter().map(|m| Some(m.as_bytes())).collect(),
+    ));
+
+    assert_eq!(again.num_rows(), 100);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
