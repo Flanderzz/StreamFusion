@@ -163,6 +163,13 @@ drops just that element, as
 records. `KeyedDecodeParityTest` and `KeyedAvroDecodeParityTest` pin the composition against
 Flink's own record deserializer on both lines.
 
+On ten million records, a mini-batch aggregate over a table with JSON keys and values ran 1.26×
+faster than the previous route (Flink's decode feeding native operators) and 1.82× faster than
+stock Flink; with Avro Confluent keys and values, 3.37× and 3.54×. A raw-keyed table, which
+already decoded natively one record at a time, runs 1.82× faster than that composition, which had
+trailed the previous route. Flink 1.18 shows the same order. See the
+[benchmark archive](../benchmarks/kafka-keys-20261027/README.md).
+
 ### Source admission and fallbacks
 
 - Connector metadata decodes natively (above). A value format's own metadata (a CDC format's
