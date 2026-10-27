@@ -87,6 +87,120 @@ fn decimal_bearing_schemas_read_booleans_like_the_simd_path() {
     assert_eq!(simd.column(1).to_data(), decimal.column(1).to_data());
 }
 
+// Flink's CDC dialects read a DECIMAL-bearing envelope into a tree whose floats are BigDecimals and
+// whose integers are IntNodes, so a zero number token loses its sign (a quoted one keeps it); the
+// plain `json` parser path reads the token's own text and keeps it.
+#[test]
+fn cdc_decimal_bearing_schemas_read_zero_number_tokens_unsigned() {
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("d", DataType::Float64, true),
+        Field::new("f", DataType::Float32, true),
+        Field::new("s", DataType::Utf8, true),
+        Field::new(
+            "a",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            true,
+        ),
+        Field::new("x", DataType::Decimal128(10, 2), true),
+    ]));
+    let messages = bodies(vec![
+        Some(br#"{"d": -0.0, "f": -0, "s": -0, "a": [-0.0, -0e3, -0.5], "x": -0.00}"#.as_slice()),
+        Some(br#"{"d": "-0.0", "f": "-0", "s": "q\"-0", "a": ["-0.0"], "x": "-0.00"}"#.as_slice()),
+    ]);
+    let tree = crate::json::JsonEnv {
+        tree_duplicates: true,
+        ..Default::default()
+    };
+
+    let cdc = JsonDecoder::new(schema.clone(), tree).decode(&messages);
+    let plain = JsonDecoder::new(schema, crate::json::JsonEnv::default()).decode(&messages);
+
+    let bits = |batch: &RecordBatch| {
+        let d = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        let f = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap();
+        let a = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let a = a
+            .values()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        (
+            d.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            f.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            a.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        )
+    };
+    let strings = |batch: &RecordBatch| {
+        let s = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        s.iter().map(|v| v.unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let (zero, negative_zero) = (0f64.to_bits(), (-0f64).to_bits());
+    let (zero32, negative_zero32) = (0f32.to_bits(), (-0f32).to_bits());
+    assert_eq!(
+        bits(&cdc),
+        (
+            vec![zero, negative_zero],
+            vec![zero32, negative_zero32],
+            vec![zero, zero, (-0.5f64).to_bits(), negative_zero],
+        )
+    );
+    assert_eq!(strings(&cdc), vec!["0", "q\"-0"]);
+    assert_eq!(
+        bits(&plain),
+        (
+            vec![negative_zero, negative_zero],
+            vec![negative_zero32, negative_zero32],
+            vec![
+                negative_zero,
+                negative_zero,
+                (-0.5f64).to_bits(),
+                negative_zero
+            ],
+        )
+    );
+    assert_eq!(strings(&plain), vec!["-0", "q\"-0"]);
+}
+
+#[test]
+fn only_zero_number_tokens_lose_their_sign() {
+    let rewrite = |document: &[u8]| {
+        String::from_utf8(crate::json::unsigned_zero_numbers(document).into_owned()).unwrap()
+    };
+
+    assert_eq!(
+        rewrite(br#"[-0, -0.0, -0.000E-5, -0e+2]"#),
+        "[0, 0.0, 0.000E-5, 0e+2]"
+    );
+    assert_eq!(
+        rewrite(br#"[-0.5, -10, -01, 1e-0, -Infinity]"#),
+        "[-0.5, -10, -01, 1e-0, -Infinity]"
+    );
+    assert_eq!(
+        rewrite(br#"{"-0": "-0", "e": "\\", "k": -0}"#),
+        r#"{"-0": "-0", "e": "\\", "k": 0}"#
+    );
+    assert!(matches!(
+        crate::json::unsigned_zero_numbers(br#"{"k": -1}"#),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 #[test]
 fn legacy_array_rejection_keeps_plain_json_parser_retries() {
     let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Float32, true)]));

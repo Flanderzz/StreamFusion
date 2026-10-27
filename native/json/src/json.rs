@@ -40,7 +40,9 @@ pub(crate) struct JsonEnv {
     /// parser-path row converter, whose field counter saturates at the arity and skips the
     /// remaining keys (the default, `false`); the CDC dialects run Flink's tree-based
     /// deserializer (`readTree` + `JsonToRowDataConverters`), where the object is rebuilt as a
-    /// map first — the last occurrence simply wins and no counter exists (`true`).
+    /// map first — the last occurrence simply wins and no counter exists (`true`). That tree
+    /// also reads a DECIMAL-bearing schema's zero number tokens unsigned
+    /// ([`unsigned_zero_numbers`]).
     pub(crate) tree_duplicates: bool,
 }
 
@@ -1653,9 +1655,10 @@ impl JsonDecoder {
                     if !starts_with_object(element) {
                         continue; // a non-object array element drops alone, like the simd path
                     }
+                    let element = self.literal_document(element);
                     let mut decoder = build(1);
                     let decoded = decoder
-                        .decode(element)
+                        .decode(&element)
                         .ok()
                         .filter(|&consumed| consumed == element.len())
                         .and_then(|_| decoder.flush().ok().flatten());
@@ -1667,7 +1670,7 @@ impl JsonDecoder {
         } else {
             // Fanned-out arrays can exceed the input row count, and the decoder stops consuming
             // at its batch size — so gather every document first and size the decoder to fit.
-            let mut documents: Vec<&[u8]> = Vec::with_capacity(bodies.num_rows());
+            let mut documents: Vec<std::borrow::Cow<[u8]>> = Vec::with_capacity(bodies.num_rows());
             for row in 0..bodies.num_rows() {
                 let Some(bytes) = binary_body(column, row) else {
                     continue;
@@ -1676,14 +1679,14 @@ impl JsonDecoder {
                     continue;
                 }
                 match self.array_body(bytes) {
-                    ArrayBody::Not => documents.push(bytes),
+                    ArrayBody::Not => documents.push(self.literal_document(bytes)),
                     ArrayBody::Elements(elements) => {
                         for element in elements {
                             assert!(
                                 starts_with_object(element),
                                 "JSON array element was not an object"
                             );
-                            documents.push(element);
+                            documents.push(self.literal_document(element));
                         }
                     }
                     ArrayBody::Corrupt => panic!("JSON body was not a single object"),
@@ -1692,7 +1695,7 @@ impl JsonDecoder {
             let mut decoder = build(documents.len());
             for document in documents {
                 let consumed = decoder
-                    .decode(document)
+                    .decode(&document)
                     .expect("failed to decode JSON record");
                 assert_eq!(
                     consumed,
@@ -1723,6 +1726,16 @@ impl JsonDecoder {
             })
             .collect();
         RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch")
+    }
+
+    /// A document as arrow-json reads it: on Flink's tree path (the CDC dialects) zero number
+    /// tokens first lose their sign ([`unsigned_zero_numbers`]).
+    fn literal_document<'a>(&self, document: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        if self.env.tree_duplicates {
+            unsigned_zero_numbers(document)
+        } else {
+            std::borrow::Cow::Borrowed(document)
+        }
     }
 
     /// Classifies a body for the raw-literals path: `Not` (the root is not an array — decode it as
@@ -1762,6 +1775,50 @@ enum ArrayBody<'a> {
     Not,
     Elements(Vec<&'a [u8]>),
     Corrupt,
+}
+
+/// Flink's CDC dialects read their envelope into a tree with `USE_BIG_DECIMAL_FOR_FLOATS` once
+/// the schema declares a DECIMAL — exactly when the raw-literals path runs — so a float token
+/// becomes a `BigDecimal` and an integer token an `IntNode`, neither of which holds a negative
+/// zero: a zero number token reads as +0.0 under DOUBLE/FLOAT, and an integer `-0` reads as `0`
+/// under STRING. arrow-json keeps the literal's sign, so the minus is dropped from such tokens
+/// before it decodes. A quoted `"-0.0"` keeps its sign in both. A float token under STRING still
+/// reads as its literal here, where the tree spells its BigDecimal (`1.50` as `1.5`).
+pub(crate) fn unsigned_zero_numbers(document: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !document.windows(2).any(|pair| pair == b"-0") {
+        return std::borrow::Cow::Borrowed(document);
+    }
+    let mut out = Vec::with_capacity(document.len());
+    let (mut in_string, mut escaped) = (false, false);
+    let mut i = 0;
+    while i < document.len() {
+        let byte = document[i];
+        if in_string {
+            in_string = escaped || byte != b'"';
+            escaped = !escaped && byte == b'\\';
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'-' || byte.is_ascii_digit() {
+            let length = document[i..]
+                .iter()
+                .take_while(|b| matches!(b, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'))
+                .count();
+            let token = &document[i..i + length];
+            let mantissa = token[1..].split(|b| matches!(b, b'e' | b'E')).next();
+            let zero = mantissa
+                .is_some_and(|m| m.contains(&b'0') && m.iter().all(|b| matches!(b, b'0' | b'.')));
+            out.extend_from_slice(if byte == b'-' && zero {
+                &token[1..]
+            } else {
+                token
+            });
+            i += length;
+            continue;
+        }
+        out.push(byte);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// [`ArrayRootPolicy::UnwrapSingle`] on the raw-literals path: the message decodes as its lone

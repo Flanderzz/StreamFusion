@@ -13,10 +13,12 @@ import org.apache.flink.formats.json.ogg.OggJsonDeserializationSchema;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
+import org.apache.flink.table.types.logical.FloatType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
@@ -312,6 +314,45 @@ class CdcDecodeParityTest {
     for (boolean skipErrors : new boolean[] {false, true}) {
       for (String scenario : scenarios) {
         assertParity(harness, decimal, DEBEZIUM, scenario, skipErrors);
+      }
+    }
+  }
+
+  /**
+   * A DECIMAL-bearing envelope parses into a tree whose floats are BigDecimals and whose integers
+   * are IntNodes, so a zero number token loses its sign while a quoted zero keeps it.
+   */
+  @Test
+  void decimalSchemasReadZeroNumberTokensUnsigned() throws Exception {
+    RowType decimal =
+        RowType.of(
+            new LogicalType[] {
+              new DecimalType(10, 2),
+              new DoubleType(),
+              new FloatType(),
+              new VarCharType(VarCharType.MAX_LENGTH),
+              new ArrayType(new DoubleType())
+            },
+            new String[] {"amount", "score", "ratio", "note", "scores"});
+    DecodeParityHarness harness = new DecodeParityHarness(decimal, true);
+    String[] images = {
+      "{\"amount\":-0.00,\"score\":-0.0,\"ratio\":-0,\"note\":-0,\"scores\":[-0.0,-0e3,-0.5]}",
+      "{\"amount\":-0,\"score\":-0,\"ratio\":-0.0E-2,\"note\":\"-0\",\"scores\":[-0]}",
+      "{\"amount\":\"-0.00\",\"score\":\"-0.0\",\"ratio\":\"-0\",\"note\":\"-0\","
+          + "\"scores\":[\"-0.0\"]}",
+    };
+    for (String image : images) {
+      for (boolean skipErrors : new boolean[] {false, true}) {
+        assertParity(
+            harness, decimal, MAXWELL, "{\"data\":" + image + ",\"type\":\"insert\"}", skipErrors);
+        assertParity(
+            harness, decimal, CANAL, "{\"data\":[" + image + "],\"type\":\"INSERT\"}", skipErrors);
+        assertParity(
+            harness,
+            decimal,
+            DEBEZIUM,
+            "{\"before\":null,\"after\":" + image + ",\"op\":\"c\"}",
+            skipErrors);
       }
     }
   }
