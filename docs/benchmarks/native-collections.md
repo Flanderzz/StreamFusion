@@ -83,9 +83,11 @@ passes are added to this bounded implementation.
 from 320 measured trials. [Execution evidence](native-collections-2026-10-27/execution-evidence.txt)
 retains the named function routes and all 224 consumed NativeCalc witnesses, each with
 200,000 input rows. The provenance includes both library hashes and the identical benchmark
-fixture hash. The broader local SQL matrix passes on Flink 2.2.1 and 1.18.1: 347 cases on
-each line, with respectively 7 and 88 skips for released capability/established exclusions,
-and no failures. Unchanged upstream runtime contracts and integration suites remain CI gates.
+fixture hash. After the schema repairs, the expanded local SQL matrix passes on Flink 2.2.1
+and 1.18.1: 500 cases on each line, with respectively 7 and 108 skips for released
+capability/established exclusions, and no failures. Unchanged upstream runtime contracts and
+integration suites remain CI gates; the 1.18 legacy MAP-output context explicitly retains
+its existing representation-boundary fallback.
 
 ## Bounded profiling work
 

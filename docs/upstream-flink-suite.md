@@ -50,11 +50,14 @@ configuration and source recovery. The suite agent reads the pinned mini-batch m
 boolean through a `miniBatch=true|false` selector; its display string contains an equals sign
 and is not used as a selector value. No upstream test or setting is changed to force a route.
 
-The unchanged streaming SQL `CalcITCase.testNonPrimitiveMapType` has a consumed NativeCalc
-contract and exact runtime-route scope on both lines. It constructs a MAP from runtime integer
-and STRING columns and retains upstream's output assertions. Focused collection SQL tests
-additionally require empty JVM-evaluator descriptors for the new STRING constructor kernels;
-a NativeCalc label alone does not establish Rust scalar execution.
+The unchanged streaming SQL `CalcITCase.testNonPrimitiveMapType` requires consumed NativeCalc
+work on Flink 2.2. It constructs a MAP from runtime integer and STRING columns and retains
+upstream's output assertions. Flink 1.18's legacy output context retains the existing
+`collection value representation requires a final projection or fused consumer` fallback,
+with an exact fallback contract and runtime-route scope. That boundary remains with
+[#234](https://github.com/datafusion-contrib/StreamFusion/issues/234). Standard runtime-source
+collection SQL tests on both lines additionally require empty JVM-evaluator descriptors for
+the new STRING constructor kernels; a NativeCalc label alone does not establish Rust scalar execution.
 
 The agent self-tests select their contract resource once per JVM. With JDK 17, run separate
 Maven invocations from the repository root for each supported resource, including native

@@ -87,7 +87,7 @@ class FlinkArraySearchSqlHarnessTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"STRING", "NOT_NULL"})
-  void representationSensitiveSearchesKeepTheGeneratedEvaluator(String kind) throws Exception {
+  void stringSearchesRunNativeAndNotNullElementsKeepTheGeneratedEvaluator(String kind) throws Exception {
     requireHost();
     var element = kind.equals("STRING") ? STRING() : INT().notNull();
     Object values = kind.equals("STRING") ? new String[] {"a", "b"} : new Integer[] {1, 2};
@@ -99,7 +99,10 @@ class FlinkArraySearchSqlHarnessTest {
     String sql = "SELECT ARRAY_CONTAINS(a,n), ARRAY_POSITION(a,n) FROM src";
     table.explainSql(sql);
     assertTrue(scan.functionExecutions().stream().anyMatch(execution ->
-        execution.contains("jvm=[ARRAY_CONTAINS, ARRAY_POSITION]")),
+        kind.equals("STRING")
+            ? execution.contains("native=[ARRAY_CONTAINS, ARRAY_POSITION]")
+                && execution.contains("jvm=[]")
+            : execution.contains("jvm=[ARRAY_CONTAINS, ARRAY_POSITION]")),
         scan.functionExecutions().toString());
     BuiltinFunctionParity.assertParity(factory, sql);
   }

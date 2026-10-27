@@ -926,7 +926,11 @@ final class RexExpression {
   private static boolean nativeRowRepresentation(RexCall call) {
     return NativeConfig.collectionExpressionsEnabled()
         && (nativeBasicRow(call) || nativeRepresentedMapConstructor(call)
-            || nativeInputMapProjection(call));
+            || nativeInputMapProjection(call)
+            || isBuiltinDefinition(
+                    call, org.apache.flink.table.functions.BuiltInFunctionDefinitions.MAP_ENTRIES)
+                && call.getOperands().size() == 1
+                && nativeBasicMap(call.getOperands().get(0).getType()));
   }
 
   static boolean nativeBasicRow(RexCall call) {

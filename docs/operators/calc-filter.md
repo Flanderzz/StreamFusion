@@ -3206,6 +3206,9 @@ The UPDATE_BEFORE row filter retains the exact input Arrow fields after filterin
 Java may rename list children during C Data import; restoring the original schema over the
 owned result vectors keeps UTF-16 carriers compatible with native literals and constructors.
 
+Basic MAP_ENTRIES projections keep their existing native fresh-row route, including
+MAP_FROM_ARRAYS with the same array on both sides. Existing fallible-operand guards remain.
+
 ROW constructors with total BOOLEAN/integer/DECIMAL and STRING fields reuse DataFusion's
 released named-struct builder, sharing field arrays. Fields retain their SQL
 names and nullable values; the constructed row itself is present with INSERT
