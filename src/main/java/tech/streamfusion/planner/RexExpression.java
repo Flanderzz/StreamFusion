@@ -2779,9 +2779,11 @@ final class RexExpression {
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
+      if (nativeIntegralRounding(call)) return emit(call.getOperands().get(0));
       return emitFloatUnary(call, 63);
     }
     if ("CEIL".equals(functionName) || "CEILING".equals(functionName)) {
+      if (nativeIntegralRounding(call)) return emit(call.getOperands().get(0));
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
@@ -2823,6 +2825,7 @@ final class RexExpression {
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
         || call.getOperator()
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE) {
+      if (nativeIntegralRounding(call)) return emit(call.getOperands().get(0));
       if (!call.getOperands().isEmpty()
           && call.getOperands().get(0).getType().getSqlTypeName() == SqlTypeName.DECIMAL) {
         return emitDecimalRound(call);
@@ -4306,13 +4309,15 @@ final class RexExpression {
       case "FLOOR":
       case "CEIL":
       case "CEILING":
-        return integral && call.getOperands().size() == 1;
+        return integral && call.getOperands().size() == 1 && !nativeIntegralRounding(call);
       case "TRUNCATE":
-        return integral
-            || SqlTypeFamily.APPROXIMATE_NUMERIC.contains(call.getOperands().get(0).getType());
+        return (integral
+                || SqlTypeFamily.APPROXIMATE_NUMERIC.contains(call.getOperands().get(0).getType()))
+            && !nativeIntegralRounding(call);
       case "ROUND":
         return input != SqlTypeName.DECIMAL
             && SqlTypeFamily.NUMERIC.contains(call.getOperands().get(0).getType())
+            && !nativeIntegralRounding(call)
             && !NativeConfig.allowsIncompatible("ROUND");
       case "EXP":
       case "LN":
@@ -4384,6 +4389,40 @@ final class RexExpression {
       default:
         return false;
     }
+  }
+
+  private static boolean nativeIntegralRounding(RexCall call) {
+    return (call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.FLOOR
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.CEIL
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE)
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getOperands().get(0).getType())
+        && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()
+        && (call.getOperator()
+                != org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE
+            || call.getType().getSqlTypeName() == SqlTypeName.INTEGER
+            || call.getType().getSqlTypeName() == SqlTypeName.BIGINT)
+        && nativeIntegralRoundingOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeIntegralRoundingOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeIntegralRounding(call)) return true;
+    return call.getKind() == SqlKind.CAST
+        && call.getOperands().size() == 1
+        && SqlTypeFamily.INTEGER.contains(call.getType())
+        && wideningTargetCode(
+                call.getOperands().get(0).getType().getSqlTypeName(),
+                call.getType().getSqlTypeName())
+            >= 0
+        && nativeIntegralRoundingOperand(call.getOperands().get(0));
   }
 
   private static boolean nativeIntegralSign(RexCall call) {
@@ -6203,9 +6242,8 @@ final class RexExpression {
 
   /**
    * Emits a unary numeric function (op code {@code op}) admitted only over a float/double operand.
-   * Integer cases are excluded: {@code ABS(INT_MIN)} overflows (Java wraps, DataFusion's checked
-   * kernel errors), and {@code FLOOR}/{@code CEIL} on an integer is an identity Flink keeps in the
-   * integer type — both divergence-prone, so they fall back.
+   * Integer and decimal contracts use separate typed or generated paths: integer rounding retains
+   * its resolved width, and Java integer overflow differs from checked floating-function adapters.
    */
   private boolean emitFloatUnary(RexCall call, int op) {
     if (call.getOperands().size() != 1) {
