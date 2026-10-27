@@ -407,6 +407,135 @@ fn cdc_maxwell_keeps_explicit_null_in_old() {
     assert_eq!(id.values(), &[1, 1]); // absent from `old` → unchanged → copied from `data`
 }
 
+// Under ignore-parse-errors the envelope drops corrupt bodies, and each update's presence must
+// still come from its own body. The batch decodes in one pass — the inner decoder, without the
+// per-message retry that would mask a misalignment.
+#[test]
+fn cdc_maxwell_presence_follows_each_update_past_dropped_bodies() {
+    let body = bodies(vec![
+        Some(br#"{"data":"#.as_slice()),
+        Some(br#"{"data":{"id":1,"name":"a","score":1.5},"type":"insert"}"#),
+        Some(br#"{"data":{"id":2,"name":"b2","score":2.5},"old":{"name":null},"type":"update"}"#),
+        Some(br#"[{"data":{"id":9,"name":"x","score":9.5},"type":"insert"}]"#),
+        Some(br#"{"data":{"id":3,"name":"c2","score":3.5},"old":{"score":null},"type":"update"}"#),
+        Some(br#"{"data":{"id":4,"name":"d","score":4.5},"type":"delete"}"#),
+    ]);
+
+    let out = new_decoder(FORMAT_MAXWELL_JSON, json_schema(), "", "", 0, true, "")
+        .decoder
+        .decode(&body);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 2, 3, 3, 4]);
+    let names = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(
+        (0..6)
+            .map(|i| names.is_valid(i).then(|| names.value(i)))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("a"),
+            None,
+            Some("b2"),
+            Some("c2"),
+            Some("c2"),
+            Some("d")
+        ]
+    );
+    let scores = out
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    assert_eq!(
+        (0..6)
+            .map(|i| scores.is_valid(i).then(|| scores.value(i)))
+            .collect::<Vec<_>>(),
+        vec![Some(1.5), Some(2.5), Some(2.5), None, Some(3.5), Some(4.5)]
+    );
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values(), &[0, 1, 2, 1, 2, 3]);
+}
+
+#[test]
+fn cdc_canal_presence_follows_each_update_past_dropped_bodies() {
+    let body = bodies(vec![
+        Some(br#"{"data":["#.as_slice()),
+        Some(br#"{"data":[{"id":1,"name":"a","score":1.5}],"type":"INSERT"}"#),
+        Some(br#"{"data":[{"id":2,"name":"b2","score":2.5}],"old":[{"name":null}],"type":"UPDATE"}"#),
+        Some(br#""not an envelope""#),
+        Some(br#"{"data":[{"id":3,"name":"c2","score":3.5}],"old":[{"score":null}],"type":"UPDATE"}"#),
+    ]);
+
+    let out = new_decoder(FORMAT_CANAL_JSON, json_schema(), "", "", 0, true, "")
+        .decoder
+        .decode(&body);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 2, 3, 3]);
+    let names = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(
+        (0..5)
+            .map(|i| names.is_valid(i).then(|| names.value(i)))
+            .collect::<Vec<_>>(),
+        vec![Some("a"), None, Some("b2"), Some("c2"), Some("c2")]
+    );
+    let scores = out
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()
+        .unwrap();
+    assert_eq!(
+        (0..5)
+            .map(|i| scores.is_valid(i).then(|| scores.value(i)))
+            .collect::<Vec<_>>(),
+        vec![Some(1.5), Some(2.5), Some(2.5), None, Some(3.5)]
+    );
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values(), &[0, 1, 2, 1, 2]);
+}
+
+// A DECIMAL column puts the envelope on arrow-json, which (like Flink's Jackson) reads a raw
+// control character inside a string where simd-json refuses it. The update's presence then comes
+// from Jackson's tokens, so the explicit null in `old` still survives into UPDATE_BEFORE.
+#[test]
+fn cdc_maxwell_presence_reads_bodies_simd_json_rejects() {
+    use arrow::array::Decimal128Array;
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("amount", DataType::Decimal128(10, 2), true),
+        Field::new("name", DataType::Utf8, true),
+    ]));
+    let update = b"{\"data\":{\"id\":1,\"amount\":1.50,\"name\":\"a\tb\"},\"old\":{\"name\":null},\"type\":\"update\"}";
+    let body = bodies(vec![Some(update.as_slice())]);
+
+    let out = new_decoder(FORMAT_MAXWELL_JSON, schema, "", "", 0, false, "")
+        .decoder
+        .decode(&body);
+
+    assert_eq!(values(&out, 0), vec![1, 1]);
+    let amounts = out
+        .column(1)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(amounts.values(), &[150, 150]);
+    let names = out
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert!(names.is_null(0));
+    assert_eq!(names.value(1), "a\tb");
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values(), &[1, 2]);
+}
+
 // Presence is a per-message bitset sized to the schema, so columns beyond the old 128-bit mask
 // coalesce like any other: present keys (explicit nulls included, and names found nested) keep
 // the pre-image, absent ones copy `data`.
