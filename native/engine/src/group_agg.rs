@@ -11,7 +11,7 @@ use distinct_retention::{
     DistinctViewRetention, APPEND_DISTINCT, PRESERVED_DISTINCT_APPEND, PRESERVED_DISTINCT_STATE,
     RETAINED_DISTINCT_COLUMN,
 };
-mod java_map_order;
+pub(crate) mod java_map_order;
 mod mapped_extreme;
 mod nested_hash;
 mod numeric_map_order;

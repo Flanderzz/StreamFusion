@@ -1,7 +1,7 @@
 use arrow::array::{make_array, Array, ArrayRef, ListArray, MutableArrayData, StructArray};
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field};
-use datafusion::common::{cast::as_list_array, exec_err, DataFusionError, Result};
+use datafusion::common::{cast::as_list_array, exec_err, DataFusionError, Result, ScalarValue};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
@@ -9,6 +9,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(super) const MAP_LIST: &str = "streamfusion.map-list";
+
+pub(super) fn invoke(
+    args: &[ColumnarValue],
+    evaluate: impl FnOnce(&[ArrayRef]) -> Result<ArrayRef>,
+) -> Result<ColumnarValue> {
+    let scalar = args
+        .iter()
+        .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
+    let arrays = ColumnarValue::values_to_arrays(args)?;
+    let output = evaluate(&arrays)?;
+    if scalar {
+        // DataFusion's generic scalar extraction copies the list field's name/nullability,
+        // but drops its MAP marker. Keep the owned one-row list and its complete field.
+        Ok(ColumnarValue::Scalar(ScalarValue::List(Arc::new(
+            as_list_array(&output)?.clone(),
+        ))))
+    } else {
+        Ok(ColumnarValue::Array(output))
+    }
+}
 
 pub(super) fn map_type(key: DataType, value: DataType) -> DataType {
     DataType::List(Arc::new(
@@ -53,7 +73,7 @@ impl ScalarUDFImpl for MapFromArrays {
         }
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        datafusion::functions::utils::make_scalar_function(from_arrays, vec![])(&args.args)
+        invoke(&args.args, from_arrays)
     }
 }
 

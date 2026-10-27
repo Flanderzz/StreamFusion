@@ -10,6 +10,14 @@ pub fn flink_scalar_function(op: i64, arity: usize) -> datafusion::logical_expr:
     crate::flink_functions::function(op, arity).expect("registered scalar benchmark")
 }
 
+/// Production container conversion, including outer failure masking and represented output.
+pub fn collection_cast_function(
+    target: DataType,
+    nullable_failure: bool,
+) -> datafusion::logical_expr::ScalarUDF {
+    crate::flink_functions::collection_cast::function(target, nullable_failure, false, 0)
+}
+
 /// Production builtin certificate, with no perimeter JNI/import in the caller's timer.
 pub fn certified_builtin(operation: i64, arrays: &[ArrayRef], target: &DataType) -> ArrayRef {
     crate::flink_functions::certified::evaluate(operation, arrays, &[], target)

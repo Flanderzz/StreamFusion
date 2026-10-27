@@ -19,14 +19,14 @@ struct Bucket {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct JavaMapOrder<K> {
+pub(crate) struct JavaMapOrder<K> {
     buckets: Vec<Bucket>,
     nodes: Vec<Node<K>>,
     size: usize,
 }
 
 impl<K: Copy + Ord> JavaMapOrder<K> {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             buckets: vec![Bucket::default(); capacity],
             nodes: Vec::new(),
@@ -34,13 +34,13 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.buckets.fill(Bucket::default());
         self.nodes = Vec::new();
         self.size = 0;
     }
 
-    pub(super) fn insert(&mut self, key: K, hash: i32) -> bool {
+    pub(crate) fn insert(&mut self, key: K, hash: i32) -> bool {
         let bucket = hash as u32 as usize & (self.buckets.len() - 1);
         let mut current = self.buckets[bucket].first;
         let tree = self.buckets[bucket].tree;
@@ -104,14 +104,14 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
         true
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = K> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = K> + '_ {
         self.buckets.iter().flat_map(|bucket| {
             std::iter::successors(bucket.first, |&index| self.nodes[index].next)
                 .map(|index| self.nodes[index].key)
         })
     }
 
-    pub(super) fn copy_preserves_order(&self, capacity: usize) -> bool {
+    pub(crate) fn copy_preserves_order(&self, capacity: usize) -> bool {
         self.buckets.len() == capacity
             && self.buckets.iter().all(|bucket| {
                 !bucket.tree
@@ -122,17 +122,17 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
             })
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.size
     }
 
-    pub(super) fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.buckets.capacity() * std::mem::size_of::<Bucket>()
             + self.nodes.capacity() * std::mem::size_of::<Node<K>>()
     }
 
-    pub(super) fn remove(&mut self, key: K, hash: i32) -> bool {
+    pub(crate) fn remove(&mut self, key: K, hash: i32) -> bool {
         let bucket = hash as u32 as usize & (self.buckets.len() - 1);
         let mut current = self.buckets[bucket].first;
         while let Some(index) = current {
@@ -466,7 +466,7 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
 
 #[cfg(test)]
 impl<K: Copy + Ord> JavaMapOrder<K> {
-    pub(super) fn assert_structure(&self) {
+    pub(crate) fn assert_structure(&self) {
         let map = self;
         fn tree<K: Copy + Ord>(
             map: &JavaMapOrder<K>,

@@ -45,7 +45,19 @@ impl ScalarUDFImpl for ArraySearch {
                             | DataType::Int32
                             | DataType::Int64
                             | DataType::Decimal128(_, _)
+                            | DataType::Utf8
                     ) =>
+            {
+                Ok(if self.contains {
+                    DataType::Boolean
+                } else {
+                    DataType::Int32
+                })
+            }
+            [DataType::List(field), needle]
+                if crate::flink_key::represented_string(field.data_type())
+                    && (crate::flink_key::represented_string(needle)
+                        || needle == &DataType::Utf8) =>
             {
                 Ok(if self.contains {
                     DataType::Boolean
@@ -87,6 +99,30 @@ impl ScalarUDFImpl for ArraySearch {
 fn evaluate(array: &ArrayRef, needle: &ArrayRef, scalar: bool, contains: bool) -> Result<ArrayRef> {
     let array = array.as_list::<i32>();
     let values = array.values();
+    if values.data_type() == &DataType::Utf8
+        || crate::flink_key::represented_string(values.data_type())
+    {
+        let values = super::collection_string::Strings::new(values)?;
+        let needle = super::collection_string::Strings::new(needle)?;
+        let positions = (0..array.len()).map(|row| {
+            let n = if scalar { 0 } else { row };
+            if array.is_null(row) || !contains && needle.is_null(n) {
+                return None;
+            }
+            let start = array.value_offsets()[row] as usize;
+            let end = array.value_offsets()[row + 1] as usize;
+            Some(
+                (start..end)
+                    .position(|i| values.equal(i, &needle, n))
+                    .map_or(0, |i| (i + 1) as i32),
+            )
+        });
+        return Ok(if contains {
+            Arc::new(BooleanArray::from_iter(positions.map(|p| p.map(|i| i > 0))))
+        } else {
+            Arc::new(Int32Array::from_iter(positions))
+        });
+    }
     macro_rules! primitive {
         ($kind:ty) => {{
             let values = values.as_primitive::<$kind>();

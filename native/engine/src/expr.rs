@@ -217,6 +217,29 @@ pub(crate) fn build_expr(
             );
             crate::flink_functions::decimal_float::function(arg == 4).call(vec![child])
         }
+        46 => {
+            let encoded = strings[arg]
+                .as_deref()
+                .expect("container cast configuration");
+            let parts = encoded.splitn(4, '|').collect::<Vec<_>>();
+            let target = encoded_field_type(parts[3]);
+            crate::flink_functions::collection_cast::function(
+                target,
+                parts[0] == "1",
+                parts[1] == "1",
+                parts[2].parse().expect("cast length"),
+            )
+            .call(vec![build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            )])
+        }
         43 => {
             let target = encoded_field_type(strings[arg].as_deref().expect("ARRAY cast schema"));
             let child = build_expr(

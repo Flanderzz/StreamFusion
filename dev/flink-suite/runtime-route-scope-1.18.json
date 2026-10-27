@@ -15,6 +15,12 @@
       "route": "native"
     },
     {
+      "test": "org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNonPrimitiveMapType",
+      "display_name": "testNonPrimitiveMapType",
+      "count": 1,
+      "route": "full_fallback"
+    },
+    {
       "test": "org.apache.flink.table.planner.runtime.stream.table.CalcITCase#testInlineScalarFunction",
       "display_name": "testInlineScalarFunction[StateBackend=HEAP]",
       "count": 1,

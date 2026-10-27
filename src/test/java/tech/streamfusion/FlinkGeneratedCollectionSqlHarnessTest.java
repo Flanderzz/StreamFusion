@@ -22,14 +22,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 class FlinkGeneratedCollectionSqlHarnessTest {
   @ParameterizedTest
   @ValueSource(strings = {"ROW(n,s)"})
-  void constructorDiagnosticsIdentifyJvmEvaluation(String expression) {
+  void constructorDiagnosticsIdentifyNativeEvaluation(String expression) {
     var table = environment(false);
     var scan = tech.streamfusion.planner.NativePlanner.install(table);
     String plan = table.explainSql("SELECT " + expression + " FROM src");
     String name = expression.substring(0, expression.indexOf(expression.contains("[") ? '[' : '('));
     assertTrue(
         scan.functionExecutions().stream()
-            .anyMatch(execution -> execution.contains("jvm=[" + name + "]")),
+            .anyMatch(execution -> execution.contains("native=[" + name + "]")
+                && execution.contains("jvm=[]")),
         plan + scan.functionExecutions());
   }
 
@@ -128,6 +129,22 @@ class FlinkGeneratedCollectionSqlHarnessTest {
           NativeFailureParity.Route.NATIVE);
     } else runs.assertSuccess(NativeFailureParity.Route.NATIVE);
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+  }
+
+  @ParameterizedTest
+  @MethodSource("mapProjections")
+  void nestedInputMapProjectionsExecuteWithoutGeneratedEvaluation(String kind, String function) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    org.junit.jupiter.api.Assumptions.assumeFalse(kind.endsWith("_NOT_NULL"));
+    var table = typedMaps(kind);
+    var scan = tech.streamfusion.planner.NativePlanner.install(table);
+    String sql = "SELECT id," + function + "(m) FROM src";
+    String plan = table.explainSql(sql);
+    assertTrue(plan.contains("NativeCalc"), plan + scan.explainSummary());
+    assertTrue(
+        scan.functionExecutions().stream()
+            .anyMatch(execution -> execution.contains(function) && execution.contains("jvm=[]")),
+        plan + scan.functionExecutions());
   }
 
   static java.util.stream.Stream<Arguments> mapProjections() {

@@ -40,7 +40,11 @@ fn validate(source: &DataType, target: &DataType) -> Result<()> {
     }
 }
 
-fn convert(input: &ArrayRef, target: &DataType, config: &Arc<ConfigOptions>) -> Result<ArrayRef> {
+pub(super) fn convert(
+    input: &ArrayRef,
+    target: &DataType,
+    config: &Arc<ConfigOptions>,
+) -> Result<ArrayRef> {
     if let (Some(input), DataType::List(field)) =
         (input.as_any().downcast_ref::<ListArray>(), target)
     {
