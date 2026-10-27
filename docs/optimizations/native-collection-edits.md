@@ -514,3 +514,13 @@ not establish an allocation or elapsed-time improvement from those two small cha
 maintainer authorized correctness-verified slower groundwork after two profiling passes for
 [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505). Complete-job evidence must
 retain both transposes and must not describe a slower case as accelerated.
+
+
+`DynamicCollectionBenchmark` retains its original complete-job timer, sources, sink and
+transpose assertions. `collection.numericStrings=true` fills STRING arrays with signed ASCII
+decimal integers for parsing workloads; `collection.integerMap=true` supplies INT map values
+for MAP<STRING,BIGINT> casts. `collection.multiset=true` supplies the matching internal
+MULTISET<INT> source fixture for element casts. These switches default false and must match across stock,
+preceding and candidate cohorts. `collection.rustFunction` requires an empty JVM function
+list plus the named native function; consumed NativeCalc metrics are checked after every
+native trial, outside the elapsed-time region.
