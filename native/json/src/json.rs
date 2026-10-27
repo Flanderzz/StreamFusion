@@ -209,9 +209,9 @@ where
     }
 }
 
-/// DATE: strings parse per Java's strict `ISO_LOCAL_DATE` (`yyyy-MM-dd`, a real calendar date) —
-/// Flink rejects everything else, bare numbers included (its converter renders the token to text
-/// and hands it to the date formatter, which fails on digits).
+/// DATE: strings parse per Java's strict `ISO_LOCAL_DATE` (`yyyy-MM-dd` or a signed expanded year,
+/// a real calendar date) — Flink rejects everything else, bare numbers included (its converter
+/// renders the token to text and hands it to the date formatter, which fails on digits).
 pub(crate) struct DateJsonAppender {
     builder: PrimitiveBuilder<Date32Type>,
     env: JsonEnv,
@@ -1884,8 +1884,9 @@ fn top_level_array_elements(bytes: &[u8]) -> Vec<&[u8]> {
 }
 
 /// The leaves the raw-literals path decodes as Utf8 and converts with a Flink-exact parser after
-/// arrow-json: DECIMAL (needs the raw number literal), TIME, VARBINARY and BOOLEAN (arrow-json's
-/// own envelopes differ from Flink's; it rejects the quoted boolean `parseBoolean` reads).
+/// arrow-json: DECIMAL (needs the raw number literal), DATE, TIME, TIMESTAMP, VARBINARY and BOOLEAN
+/// (arrow-json's own envelopes differ from Flink's; it rejects the quoted boolean `parseBoolean`
+/// reads and accepts the unpadded date `ISO_LOCAL_DATE` rejects).
 fn text_restored_leaf(data_type: &DataType) -> bool {
     streamfusion_bridge::timestamp::is_timestamp(data_type)
         || matches!(
@@ -1895,6 +1896,7 @@ fn text_restored_leaf(data_type: &DataType) -> bool {
                 | DataType::Time64(_)
                 | DataType::Binary
                 | DataType::Boolean
+                | DataType::Date32
         )
 }
 
@@ -1911,8 +1913,8 @@ fn needs_text_restore(data_type: &DataType) -> bool {
     }
 }
 
-/// The arrow-json decode schema for the raw-literals path: every (nested) DECIMAL/TIME/VARBINARY/
-/// BOOLEAN leaf becomes Utf8, so `coerce_primitive` captures the exact literal for
+/// The arrow-json decode schema for the raw-literals path: every (nested) text-restored leaf
+/// ([`text_restored_leaf`]) becomes Utf8, so `coerce_primitive` captures the exact literal for
 /// [`restore_exact_leaves`] to convert.
 fn exact_leaves_as_text(field: &Field) -> Field {
     let data_type = match field.data_type() {
@@ -1934,10 +1936,11 @@ fn exact_leaves_as_text(field: &Field) -> Field {
 
 /// Converts a raw-literals column back to its declared type: a Utf8-decoded DECIMAL leaf parses
 /// with Flink's `BigDecimal` + `DecimalData.fromBigDecimal` (HALF_UP, precision overflow → NULL,
-/// garbage fails), TIME with the `SQL_TIME_FORMAT`-and-truncate rule, VARBINARY with Jackson's
-/// base64 read, BOOLEAN with `parseBoolean` over trimmed text (a number renders to text that is
-/// simply false); containers rebuild around their converted children; anything else is already
-/// its declared type.
+/// garbage fails), TIME with the `SQL_TIME_FORMAT`-and-truncate rule, TIMESTAMP with the table's
+/// `timestamp-format.standard`, VARBINARY with Jackson's base64 read, BOOLEAN with `parseBoolean`
+/// over trimmed text (a number renders to text that is simply false), DATE with the strict
+/// `ISO_LOCAL_DATE` (a number's text fails); containers rebuild around their converted children;
+/// anything else is already its declared type.
 fn restore_exact_leaves(column: &ArrayRef, target: &DataType, env: JsonEnv) -> ArrayRef {
     if !needs_text_restore(target) {
         return column.clone();
@@ -1987,6 +1990,24 @@ fn restore_exact_leaves(column: &ArrayRef, target: &DataType, env: JsonEnv) -> A
                 .iter()
                 .map(|text| {
                     text.map(|text| flink_text::parse_java_boolean(flink_text::trim_java(text)))
+                })
+                .collect();
+            Arc::new(values)
+        }
+        DataType::Date32 => {
+            let strings = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("date text");
+            let values: arrow::array::Date32Array = strings
+                .iter()
+                .map(|text| {
+                    let text = text?;
+                    match flink_text::parse_iso_local_date(text) {
+                        Some(days) => Some(days),
+                        None if env.lenient => None,
+                        None => panic!("failed to parse \"{text}\" as DATE"),
+                    }
                 })
                 .collect();
             Arc::new(values)

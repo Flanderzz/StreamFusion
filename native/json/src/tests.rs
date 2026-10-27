@@ -87,6 +87,73 @@ fn decimal_bearing_schemas_read_booleans_like_the_simd_path() {
     assert_eq!(simd.column(1).to_data(), decimal.column(1).to_data());
 }
 
+// Flink parses DATE with the strict ISO_LOCAL_DATE whatever the schema holds; arrow-json's own
+// date parse accepts an unpadded date, so a DECIMAL-bearing schema converts DATE leaves from
+// their text like the simd path.
+#[test]
+fn decimal_bearing_schemas_read_dates_like_the_simd_path() {
+    let messages = bodies(vec![
+        Some(br#"{"d":"2024-01-05","a":["2024-1-5","1970-01-01"]}"#.as_slice()),
+        Some(br#"{"d":"2024-1-5"}"#.as_slice()),
+        Some(br#"{"d":"2023-02-29"}"#.as_slice()),
+        Some(br#"{"d":" 2024-01-05"}"#.as_slice()),
+        Some(br#"{"d":20240105}"#.as_slice()),
+        Some(br#"{"d":null}"#.as_slice()),
+        Some(br#"{"d":"-0001-01-01","a":["+10000-01-01","+2024-01-05"]}"#.as_slice()),
+        Some(br#"{"d":"-0000-01-01"}"#.as_slice()),
+        Some(br#"{"d":"+999999999-12-31"}"#.as_slice()),
+    ]);
+    let dates = Field::new("d", DataType::Date32, true);
+    let array = Field::new(
+        "a",
+        DataType::List(Arc::new(Field::new("item", DataType::Date32, true))),
+        true,
+    );
+    let simd_schema: SchemaRef = Arc::new(Schema::new(vec![dates.clone(), array.clone()]));
+    let decimal_schema: SchemaRef = Arc::new(Schema::new(vec![
+        dates,
+        array,
+        Field::new("x", DataType::Decimal128(10, 2), true),
+    ]));
+
+    let simd = new_decoder(FORMAT_JSON, simd_schema.clone(), "", "", 0, true, "").decode(&messages);
+    let decimal =
+        new_decoder(FORMAT_JSON, decimal_schema.clone(), "", "", 0, true, "").decode(&messages);
+    let unpadded = bodies(vec![Some(br#"{"d":"2024-1-5"}"#.as_slice())]);
+    let strict_simd = new_decoder(FORMAT_JSON, simd_schema, "", "", 0, false, "");
+    let strict_decimal = new_decoder(FORMAT_JSON, decimal_schema, "", "", 0, false, "");
+
+    let column = |batch: &RecordBatch| {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        Some(19727),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(-719_893),
+        None,
+        Some(169_560_311),
+    ];
+    assert_eq!(column(&simd), expected);
+    assert_eq!(column(&decimal), expected);
+    assert_eq!(simd.column(1).to_data(), decimal.column(1).to_data());
+    let fails = |decoder: &MessageDecoder| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode(&unpadded)))
+            .is_err()
+    };
+    assert!(fails(&strict_simd));
+    assert!(fails(&strict_decimal));
+}
+
 // Flink's CDC dialects read a DECIMAL-bearing envelope into a tree whose floats are BigDecimals and
 // whose integers are IntNodes, so a zero number token loses its sign (a quoted one keeps it); the
 // plain `json` parser path reads the token's own text and keeps it.

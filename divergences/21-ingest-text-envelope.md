@@ -72,7 +72,8 @@ value — a job that runs on both engines produces identical results.
   both shapes is accepted rather than plumbing an LTZ marker through the boundary for a pure
   strictness gain.
 - **Java-only numeric exotica are rejected**: hex float literals (`0x1.8p1`) and expanded ISO years
-  beyond four digits (`+10000-01-01`) fail natively where Java parses them.
+  inside a timestamp (`+10000-01-01 00:00:00`) fail natively where Java parses them. A DATE reads
+  `ISO_LOCAL_DATE`'s signed expanded years exactly.
 - **An unterminated quote parses as field content** (csv-core prefers *a* parse over *no* parse)
   where Jackson throws on EOF inside a quote.
 - **A message holding several CSV records emits only the first** — same as Flink (Jackson's

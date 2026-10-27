@@ -16,6 +16,7 @@ import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.BooleanType;
+import org.apache.flink.table.types.logical.DateType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.FloatType;
@@ -107,6 +108,52 @@ class CdcDecodeParityTest {
             DEBEZIUM,
             "{\"before\":null,\"after\":" + image + ",\"op\":\"c\"}",
             skipErrors);
+      }
+    }
+  }
+
+  /**
+   * DATE reads through the strict {@code ISO_LOCAL_DATE}, signed {@code EXCEEDS_PAD} years and the
+   * int-narrowed epoch day included, with and without a DECIMAL in the schema; a date that fails
+   * nulls just that field under ignore-parse-errors.
+   */
+  @Test
+  void datesReadLikeIsoLocalDateOnBothPaths() throws Exception {
+    RowType simd =
+        RowType.of(new LogicalType[] {new BigIntType(), new DateType()}, new String[] {"id", "day"});
+    RowType decimal =
+        RowType.of(
+            new LogicalType[] {new DecimalType(10, 2), new DateType()},
+            new String[] {"id", "day"});
+    String[] dates = {
+      "\"2024-01-05\"",
+      "\"-0001-01-01\"",
+      "\"+10000-02-29\"",
+      "\"+999999999-12-31\"",
+      "\"+2024-01-05\"",
+      "\"12024-01-05\"",
+      "\"-0000-01-01\"",
+      "\"2024-1-5\"",
+      "\"2023-02-29\"",
+      "20240105",
+      "null",
+    };
+    for (RowType rowType : List.of(simd, decimal)) {
+      DecodeParityHarness harness = new DecodeParityHarness(rowType, true);
+      for (String date : dates) {
+        String image = "{\"id\":1,\"day\":" + date + "}";
+        for (boolean skipErrors : new boolean[] {false, true}) {
+          assertParity(
+              harness, rowType, MAXWELL, "{\"data\":" + image + ",\"type\":\"insert\"}", skipErrors);
+          assertParity(
+              harness, rowType, CANAL, "{\"data\":[" + image + "],\"type\":\"INSERT\"}", skipErrors);
+          assertParity(
+              harness,
+              rowType,
+              DEBEZIUM,
+              "{\"before\":null,\"after\":" + image + ",\"op\":\"c\"}",
+              skipErrors);
+        }
       }
     }
   }
