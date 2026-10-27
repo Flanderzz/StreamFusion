@@ -18,6 +18,9 @@ Candidate `a8f8027c` and previous `d98dc2f2` use released Flink 2.2.1, OpenJDK
 Both native libraries are release builds with mimalloc. Production baseline sources are
 unchanged; only the identical `DynamicCollectionBenchmark` fixture is overlaid to expose its
 numeric-STRING, integer-MAP and MULTISET input switches on both revisions.
+These timings precede the later scalar-MAP and changelog-schema correctness repairs. They
+make no new performance claim for those repairs; the measured revisions and hashes remain
+explicit in the retained artifacts.
 
 Each cohort starts a fresh JVM with an 8 GiB heap, parallelism one and the default 1,024-row
 transpose batches. Each engine processes 200,000 rows per trial, with two warmups and five

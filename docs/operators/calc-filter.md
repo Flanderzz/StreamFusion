@@ -3202,6 +3202,10 @@ marker and resolved decimal precision/scale; broadcasting a constant must not tu
 carrier into an ordinary ARRAY of rows. The unchanged upstream mixed-precision decimal MAP
 case and focused constant/runtime-source regressions exercise this boundary.
 
+The UPDATE_BEFORE row filter retains the exact input Arrow fields after filtering. Arrow
+Java may rename list children during C Data import; restoring the original schema over the
+owned result vectors keeps UTF-16 carriers compatible with native literals and constructors.
+
 ROW constructors with total BOOLEAN/integer/DECIMAL and STRING fields reuse DataFusion's
 released named-struct builder, sharing field arrays. Fields retain their SQL
 names and nullable values; the constructed row itself is present with INSERT
