@@ -62,6 +62,10 @@ unsafe Arrow schema construction. This follows the existing IPC carrier; the Jav
 recognizes either its original outer marker or the expression child marker. Matching
 input offsets share both flattened child buffers; other offsets are aligned by row.
 NULL keys, duplicate keys and entry order remain visible to subsequent consumers.
+Scalar MAP results retain their complete owned one-row ListArray directly. DataFusion 54's
+generic scalar extraction copies the list field's name and nullability but drops its metadata;
+using it here loses the MAP marker, including for constant mixed-precision decimal constructors.
+The MAP adapters preserve the field through scalar broadcast as well as array evaluation.
 Rust IPC
 validates it during restore. For these newly admitted queries, a metadata-only schema view aliases
 MAP buffers as List-of-entry-Struct with nullable keys before native import. Map and List share

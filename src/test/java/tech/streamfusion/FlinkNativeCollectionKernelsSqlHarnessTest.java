@@ -62,6 +62,12 @@ class FlinkNativeCollectionKernelsSqlHarnessTest {
         "MAP_FROM_ARRAYS(a,nums)",
         "MAP_FROM_ARRAYS(a,a)",
         "MAP['a',i]",
+        "MAP['a',0.12,'b',0.5]",
+        "MAP_FROM_ARRAYS(ARRAY['a','b',CAST(NULL AS STRING)],"
+            + "ARRAY[0.12,0.5,CAST(NULL AS DECIMAL(3,2))])",
+        "MAP_UNION(MAP[CAST(NULL AS STRING),CAST(NULL AS DECIMAL(3,2)),'a',0.12],"
+            + "MAP[CAST(NULL AS STRING),CAST(NULL AS DECIMAL(3,2)),'b',0.50])",
+        "CAST(MAP[CAST(NULL AS STRING),CAST(NULL AS INT),'a',1] AS MAP<STRING,BIGINT>)",
         "MAP_KEYS(MAP[r,i])",
         "MAP_VALUES(MAP[i,r])",
         "MAP_ENTRIES(MAP[i,r])",

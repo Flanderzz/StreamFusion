@@ -81,15 +81,16 @@ impl ScalarUDFImpl for CollectionCast {
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let config = args.config_options;
-        let result = datafusion::functions::utils::make_scalar_function(
-            |arrays| {
-                let target = self.return_type(&[arrays[0].data_type().clone()])?;
-                let (array, failed) = convert(&arrays[0], &target, self, &config)?;
-                mask(&array, failed.iter().map(|bad| !bad).collect())
-            },
-            vec![],
-        )(&args.args);
-        result
+        let evaluate = |arrays: &[ArrayRef]| {
+            let target = self.return_type(&[arrays[0].data_type().clone()])?;
+            let (array, failed) = convert(&arrays[0], &target, self, &config)?;
+            mask(&array, failed.iter().map(|bad| !bad).collect())
+        };
+        if matches!(self.target, DataType::Map(_, _)) {
+            super::map_arrays::invoke(&args.args, evaluate)
+        } else {
+            datafusion::functions::utils::make_scalar_function(evaluate, vec![])(&args.args)
+        }
     }
 }
 

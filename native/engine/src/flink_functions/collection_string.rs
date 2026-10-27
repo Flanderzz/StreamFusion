@@ -53,10 +53,7 @@ impl ScalarUDFImpl for MapInput {
         Ok(binary_type(&types[0]))
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        datafusion::functions::utils::make_scalar_function(
-            |arrays| binary_snapshot(&arrays[0], false),
-            vec![],
-        )(&args.args)
+        super::map_arrays::invoke(&args.args, |arrays| binary_snapshot(&arrays[0], false))
     }
 }
 

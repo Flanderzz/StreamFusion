@@ -41,7 +41,7 @@ impl ScalarUDFImpl for MapUnion {
         ))
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        datafusion::functions::utils::make_scalar_function(union, vec![])(&args.args)
+        super::map_arrays::invoke(&args.args, union)
     }
 }
 fn union(args: &[ArrayRef]) -> Result<ArrayRef> {

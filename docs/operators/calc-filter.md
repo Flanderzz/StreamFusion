@@ -3196,6 +3196,12 @@ that line; deterministic 2.2 construction preserves input order exactly. The old
 multi-entry 1.18 constructor path retains generation. Repeated key expressions, fallible operands
 and released narrow-integer compilation failures retain their existing guards.
 
+Constant MAP constructors, MAP_FROM_ARRAYS, MAP_UNION and MAP casts retain the complete
+nullable-key entry-list field when returned as a scalar. This includes its physical MAP
+marker and resolved decimal precision/scale; broadcasting a constant must not turn the
+carrier into an ordinary ARRAY of rows. The unchanged upstream mixed-precision decimal MAP
+case and focused constant/runtime-source regressions exercise this boundary.
+
 ROW constructors with total BOOLEAN/integer/DECIMAL and STRING fields reuse DataFusion's
 released named-struct builder, sharing field arrays. Fields retain their SQL
 names and nullable values; the constructed row itself is present with INSERT
