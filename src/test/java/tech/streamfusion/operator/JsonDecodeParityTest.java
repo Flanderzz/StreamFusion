@@ -150,6 +150,15 @@ class JsonDecodeParityTest {
           new LogicalType[] {new DecimalType(5, 2), new TimeType(3), new VarBinaryType(8)},
           new String[] {"dec", "t", "b"});
 
+  private static final RowType DECIMAL_BOOLEAN_TYPE =
+      RowType.of(
+          new LogicalType[] {
+            new DecimalType(5, 2),
+            new BooleanType(),
+            new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BooleanType())
+          },
+          new String[] {"dec", "b", "m"});
+
   private static final RowType DECIMAL_MAP_TYPE =
       RowType.of(
           new LogicalType[] {
@@ -517,6 +526,23 @@ class JsonDecodeParityTest {
     for (String scenario : scenarios) {
       assertParity(TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", false);
       assertParity(TIME_BINARY_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+  }
+
+  @Test
+  void booleansRideTheDecimalPathExactly() throws Exception {
+    // arrow-json rejects a quoted boolean that Flink's parseBoolean reads, so a DECIMAL-bearing
+    // schema converts BOOLEAN leaves from their text like the simd path.
+    String[] scenarios = {
+      "{\"dec\": 1.5, \"b\": true, \"m\": {\"k\": false}}",
+      "{\"b\": \"TRUE\", \"m\": {\"k\": \" true \", \"j\": \"yes\"}}",
+      "{\"b\": \"no\"}",
+      "{\"b\": 1, \"m\": {\"k\": 0}}",
+      "{\"b\": null, \"m\": {\"k\": null}}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(DECIMAL_BOOLEAN_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(DECIMAL_BOOLEAN_TYPE, scenario, TimestampFormat.SQL, "", true);
     }
   }
 

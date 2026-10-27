@@ -31,6 +31,62 @@ fn bodies(docs: Vec<Option<&[u8]>>) -> RecordBatch {
     .unwrap()
 }
 
+// A decimal-bearing schema decodes through arrow-json, which rejects a quoted boolean; Flink's
+// `parseBoolean` reads it, so that path converts BOOLEAN leaves from their text the way the SIMD
+// path does.
+#[test]
+fn decimal_bearing_schemas_read_booleans_like_the_simd_path() {
+    let messages = bodies(vec![
+        Some(br#"{"b":true}"#.as_slice()),
+        Some(br#"{"b":"TRUE"}"#.as_slice()),
+        Some(br#"{"b":" true "}"#.as_slice()),
+        Some(br#"{"b":"yes"}"#.as_slice()),
+        Some(br#"{"b":1}"#.as_slice()),
+        Some(br#"{"b":null}"#.as_slice()),
+        Some(br#"{"b":false,"m":{"k":"true"}}"#.as_slice()),
+    ]);
+    let booleans = Field::new("b", DataType::Boolean, true);
+    let map = Field::new_map(
+        "m",
+        "entries",
+        Field::new("keys", DataType::Utf8, false),
+        Field::new("values", DataType::Boolean, true),
+        false,
+        true,
+    );
+    let simd_schema: SchemaRef = Arc::new(Schema::new(vec![booleans.clone(), map.clone()]));
+    let decimal_schema: SchemaRef = Arc::new(Schema::new(vec![
+        booleans,
+        map,
+        Field::new("d", DataType::Decimal128(10, 2), true),
+    ]));
+
+    let simd = new_decoder(FORMAT_JSON, simd_schema, "", "", 0, false, "").decode(&messages);
+    let decimal = new_decoder(FORMAT_JSON, decimal_schema, "", "", 0, false, "").decode(&messages);
+
+    let expected: Vec<Option<bool>> = vec![
+        Some(true),
+        Some(true),
+        Some(true),
+        Some(false),
+        Some(false),
+        None,
+        Some(false),
+    ];
+    let column = |batch: &RecordBatch| {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(column(&simd), expected);
+    assert_eq!(column(&decimal), expected);
+    assert_eq!(simd.column(1).to_data(), decimal.column(1).to_data());
+}
+
 #[test]
 fn legacy_array_rejection_keeps_plain_json_parser_retries() {
     let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Float32, true)]));

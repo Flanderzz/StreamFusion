@@ -14,6 +14,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.BooleanType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.LogicalType;
@@ -73,6 +74,38 @@ class CdcDecodeParityTest {
     for (String scenario : scenarios) {
       assertParity(MAXWELL, scenario, false);
       assertParity(MAXWELL, scenario, true);
+    }
+  }
+
+  /** A DECIMAL-bearing envelope reads BOOLEAN through {@code parseBoolean} over trimmed text. */
+  @Test
+  void decimalSchemasReadBooleansLikeFlink() throws Exception {
+    RowType decimal =
+        RowType.of(
+            new LogicalType[] {new DecimalType(10, 2), new BooleanType()},
+            new String[] {"amount", "flag"});
+    DecodeParityHarness harness = new DecodeParityHarness(decimal, true);
+    String[] images = {
+      "{\"amount\":1.5,\"flag\":\"true\"}",
+      "{\"amount\":1.5,\"flag\":\" TRUE \"}",
+      "{\"amount\":1.5,\"flag\":\"1\"}",
+      "{\"amount\":1.5,\"flag\":1}",
+      "{\"amount\":1.5,\"flag\":true}",
+      "{\"amount\":1.5,\"flag\":null}",
+    };
+    for (String image : images) {
+      for (boolean skipErrors : new boolean[] {false, true}) {
+        assertParity(
+            harness, decimal, MAXWELL, "{\"data\":" + image + ",\"type\":\"insert\"}", skipErrors);
+        assertParity(
+            harness, decimal, CANAL, "{\"data\":[" + image + "],\"type\":\"INSERT\"}", skipErrors);
+        assertParity(
+            harness,
+            decimal,
+            DEBEZIUM,
+            "{\"before\":null,\"after\":" + image + ",\"op\":\"c\"}",
+            skipErrors);
+      }
     }
   }
 
