@@ -160,7 +160,8 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
             .collect(java.util.stream.Collectors.toList());
     if (expectNative) {
       assertTrue(scan.substitutions() > 0, scan.fallbackReasons().toString());
-      if (consumed.length == 0) RecoveryExecutionMetrics.assertConsumed(work, "NativeJvmGroup");
+      if (consumed.length == 0)
+        RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
       else for (String operator : consumed) RecoveryExecutionMetrics.assertConsumed(work, operator);
     } else assertTrue(work.isEmpty(), work.toString());
     SharedFlinkCluster.assertNativeMemoryReleased("collection-legacy-consumer");

@@ -28,7 +28,7 @@ final class JvmGroupAggregateMatcher {
     return false;
   }
 
-  private static boolean verifiedCollectionAggregate(
+  static boolean verifiedCollectionAggregate(
       StreamPhysicalGroupAggregate node, org.apache.calcite.rel.core.AggregateCall call) {
     boolean collect =
         call.getAggregation()

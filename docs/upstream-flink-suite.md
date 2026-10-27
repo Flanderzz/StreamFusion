@@ -41,7 +41,7 @@ consumption, using the same consumed-row recorder as the other columnar operator
 
 The unchanged SQL `AggregateITCase.testUnboundedGroupByCollect` now has explicit contracts
 and route scopes for all seven 2.2 and six 1.18 variants. Synchronous HEAP/ROCKSDB variants
-require consumed input in the JVM group itself, not merely a Calc; the local runs observe 21
+require consumed input in the Rust group aggregate itself, not merely a Calc; the local runs observe 21
 rows each. The local candidate run
 matches two native/five fallback cases on 2.2 and two native/four fallback cases on 1.18.
 Mini-batch/local-global and async-state variants retain exact fallback reasons; 1.18 additionally

@@ -60,7 +60,13 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends StreamPhysicalNa
     this.stateTtlHintMillis = stateTtlHintMillis;
   }
 
+  boolean hasCollectionResults() {
+    for (int kind : aggregateKinds) if (kind >= 48 && kind <= 53) return true;
+    return false;
+  }
+
   boolean preservesCollections() {
+    if (hasCollectionResults()) return true;
     for (int i = 0; i < aggregateKinds.length; i++) {
       if (valueTypes[i] == 100
           && (aggregateKinds[i] == 7

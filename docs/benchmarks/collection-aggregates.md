@@ -1,5 +1,10 @@
 # Collection aggregates
 
+The sections before [Rust collection state](#rust-collection-state) retain the measured history
+of the preceding generated JVM collection handler. The default verified COLLECT/ARRAY_AGG route now uses
+[Rust collection state](../operators/group-by.md#integer-collect); those historical timings
+must not be read as measurements of the replacement kernel.
+
 ## Integer COLLECT
 
 COLLECT(INT/BIGINT) reuses the released Flink handler and managed MapViews inside the existing
@@ -370,3 +375,88 @@ For the two captures set `SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, select
 `cases=array_agg_boolean`, `keys=64`. Retain the same rows/domain/library and pass
 `jvmagg.seconds=8` plus an async-profiler executable through `profile.asprof`. Profiled
 timings do not enter the comparison table.
+
+## Rust collection state
+
+Verified primitive COLLECT and Flink 2.2 ARRAY_AGG now use Rust state rather than the generated
+JVM handler. These release/mimalloc comparisons use Flink 2.2.1, JDK 17, parallelism one, an
+8 GiB heap, INT grouping keys and no JVM accumulator cache. COLLECT uses 200,000 runtime rows;
+ARRAY_AGG uses 50,000. Values cycle through an eight-value per-key domain with every eighth
+source value NULL. BOOLEAN uses `(v>3)`; narrow integers use the corresponding CAST. Two
+warmups precede three alternating stock/native trials per fresh cohort JVM. The ordinary
+row-to-Arrow batch preference is 1,024 rows; operator coalescing retains its production defaults.
+
+Each complete-job timer includes planning/submission, source and blackhole sink, keyed state,
+result materialization and both perimeter transposes. The plan and consumed-work checks require
+the intended Rust or JVM aggregate and both conversions; stock controls require no native work.
+The preceding implementation is selected by `rustCollectionAggregates=false` in the same
+candidate/library, retaining its unchanged released JVM handler and managed state. Each prior
+cohort also has independent stock controls, retained in the artifact. This isolates the state
+replacement instead of comparing against an unrelated older fallback.
+
+A two-second process sampler excludes external Java/Cargo/Rust/C++ workloads from all eight
+final cohorts. The driver waits for external work to finish; an earlier overlapping cohort is
+excluded from the comparison. [All 320 trials, configuration, source/library hashes and profile
+counts](results/native-collection-state-2026-10-27.json) retain warmups and every unfavorable
+measurement. Median seconds (minimum–maximum):
+
+| Function / element | Groups | Paired stock | Previous JVM handler | Rust state |
+| --- | ---: | ---: | ---: | ---: |
+| COLLECT / BIGINT | 64 | 0.410145 (0.401101–0.419614) | 0.393537 (0.381584–0.423012) | 0.393378 (0.383773–0.404893) |
+| COLLECT / BOOLEAN | 64 | 0.284471 (0.237033–0.301163) | 0.330348 (0.246450–0.333776) | 0.364429 (0.362557–0.367449) |
+| COLLECT / TINYINT | 64 | 0.328230 (0.315705–0.346342) | 0.337080 (0.327306–0.346345) | 0.365508 (0.364999–0.368424) |
+| COLLECT / SMALLINT | 64 | 0.325115 (0.318091–0.332782) | 0.333629 (0.330462–0.340949) | 0.367524 (0.366840–0.372131) |
+| COLLECT / BIGINT | 4096 | 0.460723 (0.421718–0.490280) | 0.435095 (0.375358–0.460587) | 0.401804 (0.390525–0.457847) |
+| COLLECT / BOOLEAN | 4096 | 0.358457 (0.294082–0.364548) | 0.356140 (0.272621–0.356972) | 0.399951 (0.381539–0.406156) |
+| COLLECT / TINYINT | 4096 | 0.387977 (0.368634–0.399182) | 0.378671 (0.361047–0.379734) | 0.376801 (0.369625–0.380383) |
+| COLLECT / SMALLINT | 4096 | 0.367354 (0.366178–0.402927) | 0.363072 (0.350699–0.370132) | 0.377457 (0.375738–0.383737) |
+| ARRAY_AGG / BIGINT | 64 | 0.664409 (0.570414–0.683745) | 0.776970 (0.732698–0.982627) | 0.264972 (0.247862–0.326301) |
+| ARRAY_AGG / BOOLEAN | 64 | 0.630213 (0.617130–0.732652) | 0.907002 (0.689615–0.959422) | 0.218179 (0.217967–0.232675) |
+| ARRAY_AGG / TINYINT | 64 | 0.617490 (0.579958–0.646764) | 0.857952 (0.739006–1.040668) | 0.298172 (0.296794–0.303482) |
+| ARRAY_AGG / SMALLINT | 64 | 0.671095 (0.557645–0.689471) | 0.933262 (0.775930–1.092321) | 0.328728 (0.325788–0.334471) |
+| ARRAY_AGG / BIGINT | 4096 | 0.214582 (0.192095–0.241505) | 0.188545 (0.180697–0.228420) | 0.205435 (0.097222–0.214132) |
+| ARRAY_AGG / BOOLEAN | 4096 | 0.168819 (0.168175–0.203160) | 0.182682 (0.173632–0.211900) | 0.109156 (0.105359–0.169975) |
+| ARRAY_AGG / TINYINT | 4096 | 0.105090 (0.087479–0.109616) | 0.094128 (0.085395–0.102327) | 0.099306 (0.093339–0.108791) |
+| ARRAY_AGG / SMALLINT | 4096 | 0.094673 (0.094157–0.113881) | 0.103676 (0.100000–0.104341) | 0.102178 (0.095571–0.113202) |
+
+ARRAY_AGG at 64 groups improves paired stock by 2.04–2.89× and the preceding handler by
+2.84–4.16× in these jobs. At 4,096 groups the arrays contain only 12/13 elements and timings
+are much shorter; medians/ranges overlap in several cells. COLLECT is mixed: BIGINT improves
+paired stock, while BOOLEAN and several narrow-integer shapes remain slower. These short,
+startup/JIT-sensitive jobs do not establish sustained throughput or a universal acceleration
+claim. Slower cases ship as correctness-verified native-state groundwork under the maintainer's
+explicit two-pass agreement, with no performance-only opt-in.
+
+Optimization stops after two eight-second CPU captures, sampled only in native jobs after two
+unprofiled warmups. The first, BIGINT COLLECT at 64 groups, has 14,552 samples: 4,425 inclusive
+in Rust group update, 2,089 in result-column finishing, 1,974 in generic scalar-to-array conversion
+and 272 in collection result-type construction. Reusing the operator's immutable result type
+removes that per-row schema construction. The initial 64-group BIGINT native median was
+0.455002 s and the final median is 0.393378 s; separate cohort/JIT variation prevents attributing
+the entire difference to that small change.
+
+The second and final capture, BIGINT ARRAY_AGG at 64 groups after that change, has 15,396 samples:
+1,519 inclusive in Rust group update and 525 in result-column finishing; boxed Long construction
+and RowData copying have 1,489 and 578 self samples. The Arrow-to-row exit and array
+reader have 2,341 and 1,582 inclusive samples. JVM compiler threads account for 6,223/7,799
+inclusive samples respectively. Counts overlap and include all JVM threads; they are CPU samples,
+not allocation requests or copied-byte measurements. The remaining output materialization,
+boxed-array reconstruction, equality work and startup need broader changes; they remain in
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239). No further tuning pass is used.
+
+Reproduce after building the release library:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=JvmAggregateBenchmark#completeJobsRetainKeyedStateAndBothTransposes' \
+  -Dsf.testForks=1 -Djvmagg.cases=collect,collect_boolean,collect_tinyint,collect_smallint \
+  -Djvmagg.rows=200000 -Djvmagg.keys=64 -Djvmagg.values=8 \
+  -Djvmagg.warmup=2 -Djvmagg.runs=3 -Djvmagg.expectNative=true \
+  -Djvmagg.expectCache=false -Dstreamfusion.experimental.jvmAccumulatorCacheEntries=0 \
+  -Dstreamfusion.experimental.rustCollectionAggregates=true
+```
+
+Repeat at 4,096 keys, then select the analogous `array_agg` cases with 50,000 rows. Repeat each
+cohort with `rustCollectionAggregates=false` for the preceding handler. The CPU captures use
+async-profiler 4.6, `-e cpu --cstack dwarf -i 1ms`, and an eight-second recording after two
+unprofiled native-only jobs. Profiled timings are excluded from the comparison table.

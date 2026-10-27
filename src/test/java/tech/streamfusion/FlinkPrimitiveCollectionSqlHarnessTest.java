@@ -100,7 +100,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             + "(v) FILTER (WHERE "
             + (type.equals("BOOLEAN") ? "v" : "v>0")
             + "),COUNT(*) FROM src GROUP BY k",
-        "NativeJvmGroup");
+        "NativeColumnarGroupAggregate");
     check(
         type,
         "SELECT k,CAST("
@@ -112,12 +112,12 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             + " AS "
             + type
             + "))) FROM src GROUP BY k",
-        "NativeJvmGroup");
+        "NativeColumnarGroupAggregate");
     if (function.equals("ARRAY_AGG"))
       check(
           type,
           "SELECT k,ARRAY_AGG(v) IGNORE NULLS,ARRAY_AGG(v) RESPECT NULLS FROM src GROUP BY k",
-          "NativeJvmGroup");
+          "NativeColumnarGroupAggregate");
   }
 
   @ParameterizedTest
@@ -143,13 +143,13 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         type,
         "SELECT k,a FROM (SELECT k,a,ROW_NUMBER() OVER (ORDER BY k) AS rn FROM "
             + "(SELECT k,ARRAY_AGG(v) AS a FROM src GROUP BY k)) WHERE rn<=2",
-        "NativeJvmGroup",
+        "NativeColumnarGroupAggregate",
         "NativeColumnarTopN");
     check(
         type,
         "SELECT k,x FROM (SELECT k,ARRAY_AGG(v) AS a FROM src GROUP BY k) AS s "
             + "CROSS JOIN UNNEST(a) AS u(x)",
-        "NativeJvmGroup",
+        "NativeColumnarGroupAggregate",
         "NativeUnnest");
   }
 
@@ -221,7 +221,8 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
       assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
       assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
       recovery.verifyRepeatedRecovery();
-      RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), "NativeColumnarGroupAggregate");
       SharedFlinkCluster.assertNativeMemoryReleased("primitive-collection-recovery");
     }
   }

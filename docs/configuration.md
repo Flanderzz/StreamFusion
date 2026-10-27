@@ -20,6 +20,12 @@ serialized operator configuration rather than process-global state before a stab
   verified synchronous single-phase JVM UDAFs with VARCHAR/INT/BIGINT inputs/results. Set false
   for the preceding host fallback. Cache and borrowed-exit performance experiments retain their
   existing defaults. See [GROUP BY](operators/group-by.md#jvm-aggregate-investigation).
+- **`streamfusion.experimental.rustCollectionAggregates`** (system property, default true) —
+  use Rust state for the verified single-phase integer/BOOLEAN COLLECT and Flink 2.2 ARRAY_AGG
+  signatures. Set false to retain the preceding JVM handler when restoring its managed-state
+  savepoints; automatic JVM/native collection-state migration is not supported. The existing
+  `jvmGroupAggregates` switch and collection-consumer guards still apply. See
+  [collection state](operators/group-by.md#integer-collect).
 - **`streamfusion.experimental.nestedScalarUdfs`** (system property, default true) — enable
   verified external Java Row and Map callbacks and the matching nested RowKind/raw BINARY
   transport. MAP callbacks use Flink-generated whole-Calc evaluation; computed collection outputs
