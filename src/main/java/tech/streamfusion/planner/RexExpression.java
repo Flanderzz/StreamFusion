@@ -1097,19 +1097,29 @@ final class RexExpression {
     return rule != null && "IdentityCastRule".equals(rule.getClass().getSimpleName());
   }
 
+  /**
+   * Whether a CAST only changes a collection's nullability and Flink runs it as the identity, so it
+   * reads exactly its operand. The encoder reads such a cast as that operand, as a map function's
+   * operand too, which is what lets the collection gate treat it like the column it reads.
+   */
+  private static boolean identityCollectionCast(RexCall call) {
+    if (call.getKind() != SqlKind.CAST || call.getOperands().size() != 1) {
+      return false;
+    }
+    RelDataType source = call.getOperands().get(0).getType();
+    return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
+            .contains(source.getSqlTypeName())
+        && identityNullabilityCast(source, call.getType());
+  }
+
   private static boolean standaloneCollectionExpression(RexCall call) {
     if (directBinaryMultisetCase(call)) return true;
+    if (identityCollectionCast(call)) return false;
     if ((call.getKind() == SqlKind.CAST
             || call.getOperator()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
         && call.getOperands().size() == 1) {
-      RelDataType sourceType = call.getOperands().get(0).getType();
-      // A cast Flink runs as the identity passes the value through unchanged (the cast encoder
-      // emits its operand), like the plain column reference it replaces.
-      if (call.getKind() == SqlKind.CAST && identityNullabilityCast(sourceType, call.getType())) {
-        return false;
-      }
-      var source = sourceType.getSqlTypeName();
+      var source = call.getOperands().get(0).getType().getSqlTypeName();
       return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
               .contains(source)
           && (source == call.getType().getSqlTypeName() || isCharacter(call));
@@ -1760,6 +1770,9 @@ final class RexExpression {
   }
 
   private boolean emitCollectionOperand(RexNode node) {
+    if (node instanceof RexCall && identityCollectionCast((RexCall) node)) {
+      return emitCollectionOperand(((RexCall) node).getOperands().get(0));
+    }
     if (node instanceof RexInputRef && Set.of(SqlTypeName.MAP,SqlTypeName.MULTISET).contains(node.getType().getSqlTypeName())) {
       add(KIND_CALL,227,1);
       return emit(node);
@@ -3745,6 +3758,9 @@ final class RexExpression {
   private boolean emitCast(RexCall call) {
     if (call.getOperands().size() != 1) {
       return reject("unsupported CAST arity");
+    }
+    if (identityCollectionCast(call)) {
+      return emit(call.getOperands().get(0));
     }
     RelDataType sourceType = call.getOperands().get(0).getType();
     RelDataType resultType = call.getType();
