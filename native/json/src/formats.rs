@@ -21,7 +21,7 @@ pub(crate) fn new_decoder(
     )
 }
 
-fn build_decoder(
+pub(crate) fn build_decoder(
     format: i32,
     output_schema: SchemaRef,
     _avro_schema: &str,
