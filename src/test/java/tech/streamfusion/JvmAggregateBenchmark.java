@@ -36,6 +36,13 @@ class JvmAggregateBenchmark {
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
       boolean jvm = udf || collect || arrayAgg;
+      String groupOperator =
+          (collect || arrayAgg)
+                  && Boolean.parseBoolean(
+                      System.getProperty(
+                          "streamfusion.experimental.rustCollectionAggregates", "true"))
+              ? "NativeColumnarGroupAggregate"
+              : jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate";
       String argument =
           collectionShape.equals("array_agg_not_null")
               ? "COALESCE(v,CAST(0 AS BIGINT))"
@@ -109,7 +116,7 @@ class JvmAggregateBenchmark {
             if (!legacy && engine == 1) {
               if (!jvm || expectedUdf) {
                 assertTrue(
-                    plan.contains(jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate")
+                    plan.contains(groupOperator)
                         && plan.contains("RowDataToArrow")
                         && plan.contains("ArrowToRowData"),
                     plan);
@@ -148,7 +155,7 @@ class JvmAggregateBenchmark {
                 seconds);
             if (trial >= warmups) elapsed[engine][trial - warmups] = seconds;
             if (engine == 1
-                && jvm
+                && groupOperator.equals("NativeJvmGroup")
                 && expectedUdf
                 && expectedCache
                 && Integer.getInteger("streamfusion.experimental.jvmAccumulatorCacheEntries", 0)
@@ -171,9 +178,7 @@ class JvmAggregateBenchmark {
                   metrics.nativeOperators().isEmpty(),
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
-              RecoveryExecutionMetrics.assertConsumed(
-                  metrics.nativeOperators(),
-                  jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate");
+              RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
               if (legacy) {
                 var jobs =
                     metrics.nativeOperators().stream()

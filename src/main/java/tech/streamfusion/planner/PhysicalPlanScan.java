@@ -300,6 +300,21 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     entries.add(
         Substitution.of(
                 StreamPhysicalGroupAggregate.class,
+                "groupAggregate",
+                GroupAggregateMatcher::substitute)
+            .shaped(GroupAggregateMatcher::hasCollections)
+            .keyedState()
+            .matching(GroupAggregateMatcher::matches)
+            .reason(
+                node ->
+                    JvmGroupAggregateMatcher.matches(node)
+                        ? GroupAggregateMatcher.unsupportedReason(node)
+                        : JvmGroupAggregateMatcher.unsupportedReason(node))
+            .changelogSafe());
+
+    entries.add(
+        Substitution.of(
+                StreamPhysicalGroupAggregate.class,
                 "jvmGroupAggregate",
                 JvmGroupAggregateMatcher::substitute)
             .shaped(JvmGroupAggregateMatcher::enabledAggregate)
@@ -454,7 +469,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // (the `$row_kind$` tag rides through), so — like Expand — it is exempt from the insert-only
     // guard.
     entries.add(
-        Substitution.of(StreamPhysicalCorrelate.class, "tableFunction", TableFunctionMatcher::substitute)
+        Substitution.of(
+                StreamPhysicalCorrelate.class, "tableFunction", TableFunctionMatcher::substitute)
             .shaped(TableFunctionMatcher::isUserTableFunction)
             .matching(TableFunctionMatcher::matches)
             .reason(TableFunctionMatcher::unsupportedReason)
@@ -625,7 +641,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .changelogSafe());
 
     entries.add(
-        Substitution.of(StreamPhysicalOverAggregate.class, "over", NonTimeRowNumberMatcher::substitute)
+        Substitution.of(
+                StreamPhysicalOverAggregate.class, "over", NonTimeRowNumberMatcher::substitute)
             .shaped(NonTimeRowNumberMatcher::hasShape)
             .keyedState()
             .matching(NonTimeRowNumberMatcher::matches)

@@ -1,5 +1,10 @@
 # Collection aggregates
 
+The sections below retain the measured history of the preceding generated JVM collection
+handler. The default verified COLLECT/ARRAY_AGG route now uses
+[Rust collection state](../operators/group-by.md#integer-collect); those historical timings
+must not be read as measurements of the replacement kernel.
+
 ## Integer COLLECT
 
 COLLECT(INT/BIGINT) reuses the released Flink handler and managed MapViews inside the existing

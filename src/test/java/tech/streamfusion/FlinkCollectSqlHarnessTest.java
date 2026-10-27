@@ -81,6 +81,66 @@ class FlinkCollectSqlHarnessTest {
     }
   }
 
+  @org.junit.jupiter.api.Test
+  void explicitJvmRouteRemainsAvailableForExistingSavepoints() throws Exception {
+    String property = "streamfusion.experimental.rustCollectionAggregates";
+    String previous = System.getProperty(property);
+    try {
+      System.setProperty(property, "false");
+      var runs =
+          NativeFailureParity.run(
+              FlinkCollectSqlHarnessTest::environment,
+              "SELECT k,COLLECT(v),COUNT(*) FROM src GROUP BY k");
+      runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+      assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+      RecoveryExecutionMetrics.assertConsumed(METRICS.nativeOperators(), "NativeJvmGroup");
+      var rows = new java.util.ArrayList<Row>();
+      for (int i = 0; i < 96; i++) rows.add(Row.of(i % 3, i % 5 == 0 ? null : (long) i));
+      try (var recovery =
+          new PortableSqlRecovery(
+                  "hashmap",
+                  rows,
+                  Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, Types.LONG),
+                  Schema.newBuilder()
+                      .column("k", DataTypes.INT())
+                      .column("v", DataTypes.BIGINT())
+                      .build(),
+                  false,
+                  32,
+                  64)
+              .withExecutionMetrics()) {
+        var restored =
+            NativeFailureParity.runRecovery(
+                () -> onePhase(recovery.uninterrupted()),
+                () -> onePhase(recovery.get()),
+                "SELECT k,COLLECT(v),COUNT(*) FROM recovery_input GROUP BY k");
+        restored.assertSuccess(NativeFailureParity.Route.NATIVE);
+        recovery.verifyRepeatedRecovery();
+        RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
+      }
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
+  }
+
+  @org.junit.jupiter.api.Test
+  void mixedUserAggregateRetainsOneVerifiedJvmHandler() {
+    var runs =
+        NativeFailureParity.run(
+            () -> {
+              var table = environment();
+              table.createTemporarySystemFunction(
+                  "mixed_collection_udaf", new PortableSqlFixtures.Sum());
+              return table;
+            },
+            "SELECT k,COLLECT(v),mixed_collection_udaf(v) FROM src GROUP BY k");
+    runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+    assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+    assertFalse(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
+    RecoveryExecutionMetrics.assertConsumed(METRICS.nativeOperators(), "NativeJvmGroup");
+  }
+
   @ParameterizedTest
   @ValueSource(strings = {"hashmap", "tech.streamfusion.state.RocksDBNativeStateBackendFactory"})
   void managedCollectViewsRestoreAfterRepeatedCheckpoints(String backend) throws Exception {
@@ -112,7 +172,8 @@ class FlinkCollectSqlHarnessTest {
       runs.assertSuccess(NativeFailureParity.Route.NATIVE);
       assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
       recovery.verifyRepeatedRecovery();
-      RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), "NativeColumnarGroupAggregate");
       SharedFlinkCluster.assertNativeMemoryReleased("integer-collect-recovery");
     }
   }
@@ -121,7 +182,8 @@ class FlinkCollectSqlHarnessTest {
   @ValueSource(
       strings = {
         "SELECT k,COLLECT(v) FROM src WHERE k<0 GROUP BY k",
-        "SELECT COLLECT(v),COUNT(*) FROM src WHERE k<0"
+        "SELECT COLLECT(v),COUNT(*) FROM src WHERE k<0",
+        "SELECT COLLECT(CAST(1/(k-k) AS INT)) FROM src WHERE k<0"
       })
   void emptyInputRetainsReleasedGlobalAndGroupedResults(String sql) {
     var previous =
@@ -130,13 +192,13 @@ class FlinkCollectSqlHarnessTest {
             .collect(java.util.stream.Collectors.toSet());
     var runs = NativeFailureParity.run(FlinkCollectSqlHarnessTest::environment, sql);
     runs.assertSuccess(NativeFailureParity.Route.NATIVE);
-    assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+    assertTrue(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
     RecoveryExecutionMetrics.assertConsumed(
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList()),
-        "NativeFilter");
+        sql.contains("1/(k-k)") ? "NativeCalc" : "NativeFilter");
   }
 
   private static TableEnvironment onePhase(TableEnvironment table) {
@@ -162,11 +224,11 @@ class FlinkCollectSqlHarnessTest {
     var runs = NativeFailureParity.run(FlinkCollectSqlHarnessTest::environment, sql);
     runs.assertSuccess(NativeFailureParity.Route.NATIVE);
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
-    assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+    assertTrue(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
     RecoveryExecutionMetrics.assertConsumed(
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList()),
-        "NativeJvmGroup");
+        "NativeColumnarGroupAggregate");
   }
 }

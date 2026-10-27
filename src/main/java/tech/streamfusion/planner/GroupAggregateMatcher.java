@@ -52,6 +52,15 @@ final class GroupAggregateMatcher {
       // A FILTER (call.filterArg >= 0) is native — the filter is a boolean input column the
       // operator
       // gates each fold on; only an approximate aggregate is rejected.
+      if (collectionKind(call) >= 0) {
+        if (!Boolean.parseBoolean(
+                System.getProperty("streamfusion.experimental.rustCollectionAggregates", "true"))
+            || !JvmGroupAggregateMatcher.enabledAggregate(agg)
+            || !JvmGroupAggregateMatcher.matches(agg)
+            || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
+          return "GROUP BY: unverified native collection signature or context";
+        continue;
+      }
       if (call.isApproximate()) {
         return "GROUP BY: an approximate aggregate";
       }
@@ -350,6 +359,9 @@ final class GroupAggregateMatcher {
               || kind == 19
               || kind == 20
               || kind == 34
+              || kind == 49
+              || kind == 51
+              || kind == 53
               || kind == KIND_LISTAGG_DISTINCT_APPEND
               || kind == KIND_LISTAGG_DISTINCT_RETRACT)) {
         kind |= tech.streamfusion.Native.AGGREGATE_DISTINCT_TTL;
@@ -361,7 +373,23 @@ final class GroupAggregateMatcher {
     return kinds;
   }
 
+  static int collectionKind(AggregateCall call) {
+    if (call.getAggregation()
+        == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT)
+      return call.isDistinct() ? 49 : 48;
+    if (FlinkCompat.isBuiltinArrayAgg(call.getAggregation()))
+      return (call.ignoreNulls() ? 52 : 50) + (call.isDistinct() ? 1 : 0);
+    return -1;
+  }
+
+  static boolean hasCollections(StreamPhysicalGroupAggregate agg) {
+    for (int i = 0; i < agg.aggCalls().size(); i++)
+      if (collectionKind(agg.aggCalls().apply(i)) >= 0) return true;
+    return false;
+  }
+
   private static int aggregateKind(StreamPhysicalGroupAggregate agg, AggregateCall call) {
+    if (collectionKind(call) >= 0) return collectionKind(call);
     switch (call.getAggregation().getKind()) {
       case JSON_ARRAYAGG:
         return ((org.apache.calcite.sql.fun.SqlJsonArrayAggAggFunction) call.getAggregation())
@@ -488,7 +516,7 @@ final class GroupAggregateMatcher {
     Seq<AggregateCall> aggCalls = agg.aggCalls();
     for (int i = 0; i < codes.length; i++) {
       AggregateCall call = aggCalls.apply(i);
-      boolean retainsValue = false;
+      boolean retainsValue = collectionKind(call) >= 0;
       if (!call.getArgList().isEmpty()) {
         switch (call.getAggregation().getKind()) {
           case MIN:
@@ -499,7 +527,6 @@ final class GroupAggregateMatcher {
             retainsValue = true;
             break;
           default:
-            retainsValue = false;
             break;
         }
       }

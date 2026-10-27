@@ -1,7 +1,7 @@
 //! Java HashMap iteration order for caller-supplied spread hashes and tie order.
 //! Callers supply keys whose Ord matches the host key comparison for equal hashes.
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Node<K> {
     key: K,
     hash: i32,
@@ -12,12 +12,13 @@ struct Node<K> {
     red: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Bucket {
     first: Option<usize>,
     tree: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct JavaMapOrder<K> {
     buckets: Vec<Bucket>,
     nodes: Vec<Node<K>>,
@@ -143,6 +144,34 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
             current = self.nodes[index].next;
         }
         false
+    }
+
+    pub(super) fn compact(&mut self) {
+        if self.nodes.len() <= self.size.saturating_mul(2).saturating_add(64) {
+            return;
+        }
+        let mut indices = vec![None; self.nodes.len()];
+        let mut nodes = Vec::with_capacity(self.size);
+        for bucket in &self.buckets {
+            let mut current = bucket.first;
+            while let Some(index) = current {
+                indices[index] = Some(nodes.len());
+                nodes.push(self.nodes[index].clone());
+                current = self.nodes[index].next;
+            }
+        }
+        for node in &mut nodes {
+            node.next = node.next.and_then(|index| indices[index]);
+            node.prev = node.prev.and_then(|index| indices[index]);
+            node.parent = node.parent.and_then(|index| indices[index]);
+            node.children = node
+                .children
+                .map(|child| child.and_then(|index| indices[index]));
+        }
+        for bucket in &mut self.buckets {
+            bucket.first = bucket.first.and_then(|index| indices[index]);
+        }
+        self.nodes = nodes;
     }
 
     fn remove_node(&mut self, bucket: usize, removed: usize) {
