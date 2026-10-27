@@ -30,6 +30,8 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -92,6 +94,7 @@ class KafkaSourceBenchmark {
     register(new CanalTables("canal-one-of-ten-tables", 10, "t0"));
     register(new CanalTables("canal-all-ten-tables", 10, "t\\d"));
     register(new CanalTables("canal-sharded-tables", 1_000_000, "t\\d*0"));
+    register(new JsonMetadata());
   }
 
   private static void register(Workload workload) {
@@ -514,6 +517,51 @@ class KafkaSourceBenchmark {
           (int) ((index / 10) % PARTITIONS),
           Long.toString(index).getBytes(StandardCharsets.UTF_8),
           value.getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  /**
+   * JSON records read with connector metadata: each carries three headers and its own timestamp,
+   * and the query aggregates the partition, offset, timestamp and a header lookup with the values.
+   */
+  private static final class JsonMetadata implements Workload {
+    @Override
+    public String id() {
+      return "json-metadata";
+    }
+
+    @Override
+    public String ddl(String brokers, String topic) {
+      return "CREATE TABLE cdc (id BIGINT, tenant STRING, name STRING, amount BIGINT,"
+          + " part INT METADATA FROM 'partition', off BIGINT METADATA FROM 'offset',"
+          + " ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp',"
+          + " hdrs MAP<STRING, BYTES> METADATA FROM 'headers')"
+          + bounded(brokers, topic, "json", "");
+    }
+
+    @Override
+    public String query() {
+      return "SELECT tenant, COUNT(*) AS records, SUM(amount) AS amount, MAX(part) AS part,"
+          + " MAX(off) AS last_offset, MAX(ts) AS latest, COUNT(hdrs['trace']) AS traced"
+          + " FROM cdc GROUP BY tenant";
+    }
+
+    @Override
+    public ProducerRecord<byte[], byte[]> record(String topic, long index, long records) {
+      String value =
+          "{\"id\":" + index + ",\"tenant\":\"t" + (index % 64) + "\",\"name\":\"n" + index
+              + "\",\"amount\":" + (index % 1000) + "}";
+      return new ProducerRecord<>(
+          topic,
+          (int) (index % PARTITIONS),
+          1_600_000_000_000L + index,
+          null,
+          value.getBytes(StandardCharsets.UTF_8),
+          List.<Header>of(
+              new RecordHeader("trace", Long.toString(index).getBytes(StandardCharsets.UTF_8)),
+              new RecordHeader("source", "orders".getBytes(StandardCharsets.UTF_8)),
+              new RecordHeader(
+                  "tenant", ("t" + (index % 64)).getBytes(StandardCharsets.UTF_8))));
     }
   }
 }

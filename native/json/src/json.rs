@@ -623,6 +623,9 @@ pub(crate) struct StructJsonAppender {
     index: Option<HashMap<String, usize>>,
     nulls: NullBufferBuilder,
     pending_nulls: usize,
+    /// Objects appended through [`Self::try_append_object`] since the last finish — the decoded
+    /// row count when this appender is a batch's root.
+    objects: usize,
 }
 
 // Nexmark's source rows sit in the medium-width range where repeated linear name scans show up in
@@ -650,6 +653,7 @@ impl StructJsonAppender {
             index,
             nulls: NullBufferBuilder::new(capacity),
             pending_nulls: 0,
+            objects: 0,
         }
     }
 
@@ -720,11 +724,13 @@ impl StructJsonAppender {
         for (child, slot) in self.children.iter_mut().zip(slots.iter()) {
             child.append(*slot);
         }
+        self.objects += 1;
         true
     }
 
     fn finish_columns(&mut self) -> Vec<ArrayRef> {
         self.flush_pending_nulls();
+        self.objects = 0;
         self.children.iter_mut().map(|c| c.finish()).collect()
     }
 
@@ -1266,7 +1272,7 @@ fn decode_json_bodies_simd(
     scratch: &mut Vec<u8>,
     buffers: &mut simd_json::Buffers,
     reusable_tape: &mut Option<simd_json::tape::Tape<'static>>,
-) -> RecordBatch {
+) -> (RecordBatch, Sources) {
     use simd_json::prelude::*;
     let column = bodies.column(0);
     let scan_binary = env.lenient
@@ -1274,108 +1280,114 @@ fn decode_json_bodies_simd(
             .fields()
             .iter()
             .any(|f| contains_binary(f.data_type()));
+    let mut sources = SourceRecorder::with_capacity(bodies.num_rows());
     for row in 0..bodies.num_rows() {
-        let Some(bytes) = binary_body(column, row) else {
-            continue;
-        };
-        if skip_blank_body(bytes, env.lenient) {
-            continue;
-        }
-        if array_roots == ArrayRootPolicy::Corrupt
-            && bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'[')
-        {
-            assert!(env.lenient, "JSON body was not a single object");
-            continue;
-        }
-        scratch.clear();
-        scratch.extend_from_slice(bytes);
-        let mut tape = reusable_tape
-            .take()
-            .unwrap_or_else(simd_json::tape::Tape::null)
-            .reset();
-        // A structurally bad document (or a root that is neither object nor fanned-out array)
-        // fails the job like Flink's deserializer; under ignore-parse-errors it drops the whole
-        // message (the value-level skips inside a good document are the appenders' per-field
-        // nulls).
-        match simd_json::fill_tape(scratch, buffers, &mut tape) {
-            Ok(()) => {}
-            // simd-json is spec-strict where Jackson tokenizes more: out-of-range number
-            // literals, raw control characters inside strings, content trailing the root
-            // document. Retryable messages re-decode through the Jackson-faithful walk, which
-            // rewrites them into sanitized rows this fast path appends.
-            Err(_) if retryable => {
-                *reusable_tape = Some(tape.reset());
-                append_rewritten(root, bytes, schema.fields(), env, scan_binary);
-                continue;
+        'message: {
+            let Some(bytes) = binary_body(column, row) else {
+                break 'message;
+            };
+            if skip_blank_body(bytes, env.lenient) {
+                break 'message;
             }
-            Err(_) if env.lenient => {
-                *reusable_tape = Some(tape.reset());
-                continue;
+            if array_roots == ArrayRootPolicy::Corrupt
+                && bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'[')
+            {
+                assert!(env.lenient, "JSON body was not a single object");
+                break 'message;
             }
-            Err(e) => {
-                *reusable_tape = Some(tape.reset());
-                panic!("failed to decode JSON record: {e}")
-            }
-        }
-        let value = tape.as_value();
-        match value.value_type() {
-            simd_json::ValueType::Array if array_roots == ArrayRootPolicy::FanOut => {
-                let array = value.as_array().expect("array node");
-                // A drift anywhere re-decodes the MESSAGE: Flink's cursor drift crosses element
-                // boundaries (a nested-array element drifts the element loop itself).
-                if array
-                    .iter()
-                    .any(|element| element_needs_token_walk(drift, element))
-                {
+            scratch.clear();
+            scratch.extend_from_slice(bytes);
+            let mut tape = reusable_tape
+                .take()
+                .unwrap_or_else(simd_json::tape::Tape::null)
+                .reset();
+            // A structurally bad document (or a root that is neither object nor fanned-out array)
+            // fails the job like Flink's deserializer; under ignore-parse-errors it drops the whole
+            // message (the value-level skips inside a good document are the appenders' per-field
+            // nulls).
+            match simd_json::fill_tape(scratch, buffers, &mut tape) {
+                Ok(()) => {}
+                // simd-json is spec-strict where Jackson tokenizes more: out-of-range number
+                // literals, raw control characters inside strings, content trailing the root
+                // document. Retryable messages re-decode through the Jackson-faithful walk, which
+                // rewrites them into sanitized rows this fast path appends.
+                Err(_) if retryable => {
+                    *reusable_tape = Some(tape.reset());
                     append_rewritten(root, bytes, schema.fields(), env, scan_binary);
-                } else {
-                    for element in &array {
-                        match element.as_object() {
-                            Some(object) => {
-                                append_checked(root, &object, schema.fields(), scan_binary)
-                            }
-                            None if env.lenient => {}
-                            None => panic!(
-                                "JSON array element was not an object: {:?}",
-                                element.value_type()
-                            ),
-                        }
-                    }
+                    break 'message;
+                }
+                Err(_) if env.lenient => {
+                    *reusable_tape = Some(tape.reset());
+                    break 'message;
+                }
+                Err(e) => {
+                    *reusable_tape = Some(tape.reset());
+                    panic!("failed to decode JSON record: {e}")
                 }
             }
-            simd_json::ValueType::Array if array_roots == ArrayRootPolicy::UnwrapSingle => {
-                let array = value.as_array().expect("array node");
-                if env.lenient {
-                    let mut objects = array.iter().filter_map(|element| element.as_object());
-                    if let (Some(object), None) = (objects.next(), objects.next()) {
-                        append_checked(root, &object, schema.fields(), scan_binary);
-                    }
-                    // else: 0 or 2+ decodable envelopes — the whole message drops.
-                } else {
-                    let mut elements = array.iter();
-                    match (elements.next().and_then(|e| e.as_object()), elements.next()) {
-                        (Some(object), None) => {
-                            append_checked(root, &object, schema.fields(), scan_binary)
-                        }
-                        _ => panic!("CDC message array root did not hold exactly one envelope"),
-                    }
-                }
-            }
-            _ => match value.as_object() {
-                Some(object) => {
-                    if !(scan_binary && object_poisoned(schema.fields(), &object))
-                        && !root.try_append_object(&object, retryable.then_some(drift))
+            let value = tape.as_value();
+            match value.value_type() {
+                simd_json::ValueType::Array if array_roots == ArrayRootPolicy::FanOut => {
+                    let array = value.as_array().expect("array node");
+                    // A drift anywhere re-decodes the MESSAGE: Flink's cursor drift crosses element
+                    // boundaries (a nested-array element drifts the element loop itself).
+                    if array
+                        .iter()
+                        .any(|element| element_needs_token_walk(drift, element))
                     {
                         append_rewritten(root, bytes, schema.fields(), env, scan_binary);
+                    } else {
+                        for element in &array {
+                            match element.as_object() {
+                                Some(object) => {
+                                    append_checked(root, &object, schema.fields(), scan_binary)
+                                }
+                                None if env.lenient => {}
+                                None => panic!(
+                                    "JSON array element was not an object: {:?}",
+                                    element.value_type()
+                                ),
+                            }
+                        }
                     }
                 }
-                None if env.lenient => {}
-                None => panic!("JSON body was not a single object"),
-            },
+                simd_json::ValueType::Array if array_roots == ArrayRootPolicy::UnwrapSingle => {
+                    let array = value.as_array().expect("array node");
+                    if env.lenient {
+                        let mut objects = array.iter().filter_map(|element| element.as_object());
+                        if let (Some(object), None) = (objects.next(), objects.next()) {
+                            append_checked(root, &object, schema.fields(), scan_binary);
+                        }
+                        // else: 0 or 2+ decodable envelopes — the whole message drops.
+                    } else {
+                        let mut elements = array.iter();
+                        match (elements.next().and_then(|e| e.as_object()), elements.next()) {
+                            (Some(object), None) => {
+                                append_checked(root, &object, schema.fields(), scan_binary)
+                            }
+                            _ => panic!("CDC message array root did not hold exactly one envelope"),
+                        }
+                    }
+                }
+                _ => match value.as_object() {
+                    Some(object) => {
+                        if !(scan_binary && object_poisoned(schema.fields(), &object))
+                            && !root.try_append_object(&object, retryable.then_some(drift))
+                        {
+                            append_rewritten(root, bytes, schema.fields(), env, scan_binary);
+                        }
+                    }
+                    None if env.lenient => {}
+                    None => panic!("JSON body was not a single object"),
+                },
+            }
+            *reusable_tape = Some(tape.reset());
         }
-        *reusable_tape = Some(tape.reset());
+        sources.message_done(row, root.objects);
     }
-    RecordBatch::try_new(schema.clone(), root.finish_columns()).expect("failed to build JSON batch")
+    let batch = RecordBatch::try_new(schema.clone(), root.finish_columns())
+        .expect("failed to build JSON batch");
+    (batch, sources.finish(bodies.num_rows()))
 }
 
 /// Appends one decoded row object, first applying the lenient BINARY poison pre-scan (a
@@ -1569,6 +1581,10 @@ impl JsonDecoder {
     /// complete document decoding to one row — or, for a fanned-out top-level array, one row per
     /// element; a null body contributes no row.
     pub(crate) fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
+        self.decode_traced(bodies).0
+    }
+
+    pub(crate) fn decode_traced(&self, bodies: &RecordBatch) -> (RecordBatch, Sources) {
         if self.raw_literals {
             return self.decode_raw_literals(bodies);
         }
@@ -1603,7 +1619,7 @@ impl JsonDecoder {
     /// convert through the same Flink-exact parsers the simd path uses — arrow-json's own
     /// time/binary handling has a different envelope. Documents feed one at a time to keep the
     /// decoder's record boundaries aligned with the input rows.
-    fn decode_raw_literals(&self, bodies: &RecordBatch) -> RecordBatch {
+    fn decode_raw_literals(&self, bodies: &RecordBatch) -> (RecordBatch, Sources) {
         let column = bodies.column(0);
         let text_schema = Arc::new(Schema::new(
             self.schema
@@ -1626,6 +1642,8 @@ impl JsonDecoder {
         // granularity for non-decimal errors — divergences/21; the decimal cells themselves skip
         // per FIELD in restore_exact_leaves, like the host.
         let mut batches = Vec::new();
+        // Each decoded document is one row, so a row's source is its document's message.
+        let mut sources: Vec<u32> = Vec::with_capacity(bodies.num_rows());
         if self.env.lenient {
             for row in 0..bodies.num_rows() {
                 let Some(bytes) = binary_body(column, row) else {
@@ -1651,6 +1669,7 @@ impl JsonDecoder {
                         .filter(|&consumed| consumed == element.len())
                         .and_then(|_| decoder.flush().ok().flatten());
                     if let Some(batch) = decoded {
+                        sources.resize(sources.len() + batch.num_rows(), row as u32);
                         batches.push(batch);
                     }
                 }
@@ -1667,7 +1686,10 @@ impl JsonDecoder {
                     continue;
                 }
                 match self.array_body(bytes) {
-                    ArrayBody::Not => documents.push(bytes),
+                    ArrayBody::Not => {
+                        documents.push(bytes);
+                        sources.push(row as u32);
+                    }
                     ArrayBody::Elements(elements) => {
                         for element in elements {
                             assert!(
@@ -1675,6 +1697,7 @@ impl JsonDecoder {
                                 "JSON array element was not an object"
                             );
                             documents.push(element);
+                            sources.push(row as u32);
                         }
                     }
                     ArrayBody::Corrupt => panic!("JSON body was not a single object"),
@@ -1713,7 +1736,14 @@ impl JsonDecoder {
                 collapse_duplicate_map_keys(&column, field.data_type())
             })
             .collect();
-        RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch")
+        let batch =
+            RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch");
+        debug_assert_eq!(
+            batch.num_rows(),
+            sources.len(),
+            "one row per decoded document"
+        );
+        (batch, Sources::from_rows(sources, bodies.num_rows()))
     }
 
     /// Classifies a body for the raw-literals path: `Not` (the root is not an array — decode it as

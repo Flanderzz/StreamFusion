@@ -113,6 +113,8 @@ same machinery as the plain `avro-confluent` source.
 Fallbacks on read:
 
 - the `schema-include` envelope wrapper;
-- metadata/computed columns;
+- computed columns, and the format's own metadata (`value.*` keys such as Canal's
+  `value.database`); the Kafka connector's metadata decodes natively — see
+  [Kafka](../kafka.md#connector-metadata);
 - a Canal include pattern Java can't compile — the scan stays on Flink, whose planner fails with
   its own pattern error.

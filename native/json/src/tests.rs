@@ -2104,3 +2104,292 @@ fn canal_include_filter_caches_each_distinct_value() {
     assert_eq!(again.num_rows(), 100);
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
+
+// Kafka connector metadata follows each row's record: a JSON array fans one record out into rows
+// that repeat its metadata, and a tombstone, which yields no row, contributes none.
+#[test]
+fn metadata_columns_follow_each_rows_record() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("off", DataType::Int64, false),
+        Field::new("epoch", DataType::Int32, true),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("topic", DataType::Utf8, false),
+        Field::new("part", DataType::Int32, false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "metadata.columns=1:offset,2:leader-epoch,3:timestamp-type,4:topic,5:partition\n",
+    );
+    let body = bodies(vec![
+        Some(br#"[{"id":1},{"id":2}]"#.as_slice()),
+        None,
+        Some(br#"{"id":3}"#),
+    ]);
+    let offsets = [10_i64, 11, 12];
+    let epochs = [4_i64, ABSENT_LEADER_EPOCH, ABSENT_LEADER_EPOCH];
+    let types = [0_i8, 1, -1];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 7,
+        offsets: &offsets,
+        timestamps: &[],
+        timestamp_types: &types,
+        leader_epochs: &epochs,
+        headers: RecordHeaders::new(&[], &[]),
+    };
+
+    let out = decoder.decode_records(&body, &metadata);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 3]);
+    assert_eq!(values(&out, 1), vec![10, 10, 12]);
+    let epoch = out.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(
+        epoch.iter().collect::<Vec<_>>(),
+        vec![Some(4), Some(4), None]
+    );
+    let kind = out
+        .column(3)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        kind.iter().collect::<Vec<_>>(),
+        vec![
+            Some("CreateTime"),
+            Some("CreateTime"),
+            Some("NoTimestampType")
+        ]
+    );
+    let topic = out
+        .column(4)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        topic.iter().flatten().collect::<Vec<_>>(),
+        vec!["orders"; 3]
+    );
+    let partition = out.column(5).as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(partition.values().to_vec(), vec![7, 7, 7]);
+}
+
+// Headers become Flink's `HashMap<StringData, byte[]>`: a repeated key keeps its first position and
+// takes its last value, a null value stays null, and entries iterate in the map's order.
+#[test]
+fn metadata_headers_follow_flinks_hashmap() {
+    let entries = Arc::new(Field::new(
+        "entries",
+        DataType::Struct(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Binary, true),
+            ]
+            .into(),
+        ),
+        false,
+    ));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("headers", DataType::Map(entries, false), false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "metadata.columns=1:headers\n",
+    );
+    let body = bodies(vec![Some(br#"{"id":1}"#.as_slice()), Some(br#"{"id":2}"#)]);
+    let first: Vec<(&str, Option<&[u8]>)> = vec![
+        ("trace", Some(b"t1")),
+        ("tenant", None),
+        ("source", Some(b"s")),
+        ("trace", Some(b"t2")),
+    ];
+    let mut header_bytes = Vec::new();
+    for (key, value) in &first {
+        header_bytes.extend_from_slice(&(key.len() as i32).to_ne_bytes());
+        header_bytes.extend_from_slice(key.as_bytes());
+        match value {
+            Some(value) => {
+                header_bytes.extend_from_slice(&(value.len() as i32).to_ne_bytes());
+                header_bytes.extend_from_slice(value);
+            }
+            None => header_bytes.extend_from_slice(&(-1_i32).to_ne_bytes()),
+        }
+    }
+    let counts = [first.len() as i32, 0];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 0,
+        offsets: &[],
+        timestamps: &[],
+        timestamp_types: &[],
+        leader_epochs: &[],
+        headers: RecordHeaders::new(&counts, &header_bytes),
+    };
+
+    let out = decoder.decode_records(&body, &metadata);
+
+    let keys: Vec<&str> = first.iter().map(|(key, _)| *key).collect();
+    let expected: Vec<(String, Option<Vec<u8>>)> = StringDataMapOrder::default()
+        .entries(&keys)
+        .iter()
+        .map(|&(at, last)| {
+            (
+                keys[at].to_owned(),
+                first[last].1.map(|value| value.to_vec()),
+            )
+        })
+        .collect();
+    assert_eq!(expected.len(), 3);
+    let headers = out.column(1).as_any().downcast_ref::<MapArray>().unwrap();
+    let map = headers.value(0);
+    let names = map
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let values = map
+        .column(1)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .unwrap();
+    let actual: Vec<(String, Option<Vec<u8>>)> = (0..map.len())
+        .map(|entry| {
+            (
+                names.value(entry).to_owned(),
+                values.is_valid(entry).then(|| values.value(entry).to_vec()),
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(headers.value_length(1), 0);
+}
+
+// A CDC decode's metadata columns sit before its row-kind column, and both rows of an update carry
+// their record's metadata.
+#[test]
+fn metadata_columns_precede_the_cdc_row_kind() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("off", DataType::Int64, false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_CANAL_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "metadata.columns=2:offset\n",
+    );
+    let insert = br#"{"data":[{"id":1,"name":"a"},{"id":2,"name":"b"}],"type":"INSERT"}"#;
+    let update = br#"{"data":[{"id":1,"name":"a2"}],"old":[{"name":"a"}],"type":"UPDATE"}"#;
+    let body = bodies(vec![Some(insert.as_slice()), Some(update)]);
+    let offsets = [100_i64, 101];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 0,
+        offsets: &offsets,
+        timestamps: &[],
+        timestamp_types: &[],
+        leader_epochs: &[],
+        headers: RecordHeaders::new(&[], &[]),
+    };
+
+    let out = decoder.decode_records(&body, &metadata);
+
+    assert_eq!(out.schema().field(3).name(), ROW_KIND_COLUMN);
+    assert_eq!(values(&out, 0), vec![1, 2, 1, 1]);
+    assert_eq!(values(&out, 2), vec![100, 100, 101, 101]);
+    let kinds = out.column(3).as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(kinds.values().to_vec(), vec![0, 0, 1, 2]);
+}
+
+// Under ignore-parse-errors a corrupt message drops whole, and the others keep their own metadata.
+#[test]
+fn metadata_skips_the_records_a_lenient_decode_drops() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("off", DataType::Int64, false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_DEBEZIUM_JSON,
+        schema,
+        "",
+        "",
+        0,
+        true,
+        "metadata.columns=1:offset\n",
+    );
+    let body = bodies(vec![
+        Some(br#"{"before":null,"after":{"id":1},"op":"c"}"#.as_slice()),
+        Some(br#"{"before":null,"after":{"id":2},"op":"x"}"#),
+        Some(br#"{"before":null,"after":{"id":3},"op":"c"}"#),
+    ]);
+    let offsets = [5_i64, 6, 7];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 0,
+        offsets: &offsets,
+        timestamps: &[],
+        timestamp_types: &[],
+        leader_epochs: &[],
+        headers: RecordHeaders::new(&[], &[]),
+    };
+
+    let out = decoder.decode_records(&body, &metadata);
+
+    assert_eq!(values(&out, 0), vec![1, 3]);
+    assert_eq!(values(&out, 1), vec![5, 7]);
+}
+
+// The DECIMAL-bearing JSON path decodes through its own reader, so its rows are traced to their
+// records separately: a fanned-out array repeats its record's metadata there too.
+#[test]
+fn metadata_follows_records_on_the_decimal_path() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("amount", DataType::Decimal128(10, 2), true),
+        Field::new("off", DataType::Int64, false),
+    ]));
+    let decoder = new_decoder(
+        FORMAT_JSON,
+        schema,
+        "",
+        "",
+        0,
+        false,
+        "metadata.columns=2:offset\n",
+    );
+    let body = bodies(vec![
+        Some(br#"{"id":1,"amount":1.50}"#.as_slice()),
+        None,
+        Some(br#"[{"id":2,"amount":2.25},{"id":3,"amount":3}]"#),
+    ]);
+    let offsets = [40_i64, 41, 42];
+    let metadata = RecordMetadata {
+        topic: "orders",
+        partition: 0,
+        offsets: &offsets,
+        timestamps: &[],
+        timestamp_types: &[],
+        leader_epochs: &[],
+        headers: RecordHeaders::new(&[], &[]),
+    };
+
+    let out = decoder.decode_records(&body, &metadata);
+
+    assert_eq!(values(&out, 0), vec![1, 2, 3]);
+    assert_eq!(values(&out, 2), vec![40, 42, 42]);
+}

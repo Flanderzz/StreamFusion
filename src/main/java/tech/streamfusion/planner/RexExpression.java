@@ -374,7 +374,9 @@ final class RexExpression {
 
   private static boolean isWatermarkRowtime(RexNode node, int column, boolean epochMillis) {
     if (!epochMillis) {
-      return node instanceof RexInputRef && ((RexInputRef) node).getIndex() == column;
+      RexInputRef cast = ScanWatermarkSpec.identityTimestampCast(node);
+      return (node instanceof RexInputRef && ((RexInputRef) node).getIndex() == column)
+          || (cast != null && cast.getIndex() == column);
     }
     if (!(node instanceof RexCall)) {
       return false;
