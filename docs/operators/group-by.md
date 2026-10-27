@@ -2518,7 +2518,10 @@ formats; automatic migration is not supported. Groups containing functions outsi
 aggregate matcher retain their verified JVM route. These switches do not broaden admission. Mini-batching, async state, approximate/ordered calls and unverified function
 specialization retain fallback. A COLLECT result may reach a final row sink or a verified
 collection-preserving Calc. Unverified state, ordering, exchange and native-writer boundaries
-retain the existing collection guards. Updating retained MAP/MULTISET payloads remain deferred
+retain the existing collection guards. Direct COLLECT with SUM/MIN/MAX/COUNT or AVG is native;
+when the host shares SUM/AVG/COUNT through an outer arithmetic projection that cannot preserve
+the MULTISET representation, the existing whole-plan fallback remains on both state routes.
+Updating retained MAP/MULTISET payloads remain deferred
 in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
 [Release comparisons](../benchmarks/collection-aggregates.md#integer-collect) retain source,
@@ -2643,7 +2646,7 @@ acceleration claim.
 
 ## Rust collection state validation
 
-The focused runtime-source matrix passes 109 checks on Flink 2.2.1 and 54 checks with 55
+The focused runtime-source matrix passes 112 checks on Flink 2.2.1 and 57 checks with 55
 version skips on 1.18.1. The Rust group-state tests pass 104 cases, including typed collection
 snapshots, signed-count overflow, first-match retractions and bounded map-order reinsertion.
 The SQL tests require consumed work from the Rust group itself; empty filtered projections

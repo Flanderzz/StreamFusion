@@ -11,6 +11,9 @@ first matching retraction. The common DISTINCT retention machinery preserves sha
 write policies independently from collection contents. Result Arrow buffers own their contents;
 later input cannot mutate an already emitted changelog row.
 
+Result emission reuses the immutable Arrow result type already owned by the group operator,
+avoiding per-row field/type reconstruction identified in the first CPU profile.
+
 Collection state uses a versioned native snapshot in the existing heap/RocksDB store and
 key-group partitioning. `streamfusion.experimental.rustCollectionAggregates=false` retains the
 preceding managed JVM handler for its savepoints and for comparisons. Mixed groups whose other
@@ -22,3 +25,12 @@ describe the exact boundary.
 controls and complete-job measurement boundaries. Consumed native work proves the Rust route,
 not a speedup. Collection snapshots, output materialization and both perimeter conversions
 remain costs; performance investigations follow the accepted two-pass optimization timebox.
+
+The [release comparison](../benchmarks/collection-aggregates.md#rust-collection-state) reports
+all trials and ranges. For 50,000 rows and 64 groups, BIGINT ARRAY_AGG takes 0.264972 s median
+versus stock's 0.664409 s and the preceding JVM route's 0.776970 s. All four measured primitive
+ARRAY_AGG shapes improve stock at that cardinality; high-cardinality ranges overlap more.
+COLLECT retains slower BOOLEAN/narrow-integer cases. These are workload-specific complete-job
+results, not a universal throughput claim. Two CPU captures close the optimization timebox;
+generic result materialization and boxed arrays at row exits remain follow-up work in
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).

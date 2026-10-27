@@ -53,8 +53,7 @@ final class GroupAggregateMatcher {
       // operator
       // gates each fold on; only an approximate aggregate is rejected.
       if (collectionKind(call) >= 0) {
-        if (!Boolean.parseBoolean(
-                System.getProperty("streamfusion.experimental.rustCollectionAggregates", "true"))
+        if (!rustCollectionsEnabled()
             || !JvmGroupAggregateMatcher.enabledAggregate(agg)
             || !JvmGroupAggregateMatcher.matches(agg)
             || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
@@ -380,6 +379,11 @@ final class GroupAggregateMatcher {
     if (FlinkCompat.isBuiltinArrayAgg(call.getAggregation()))
       return (call.ignoreNulls() ? 52 : 50) + (call.isDistinct() ? 1 : 0);
     return -1;
+  }
+
+  static boolean rustCollectionsEnabled() {
+    return Boolean.parseBoolean(
+        System.getProperty("streamfusion.experimental.rustCollectionAggregates", "true"));
   }
 
   static boolean hasCollections(StreamPhysicalGroupAggregate agg) {

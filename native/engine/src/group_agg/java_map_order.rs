@@ -537,6 +537,11 @@ mod tests {
                 } else {
                     assert!(map.remove(key, hash));
                 }
+                // Exercise reclamation at every JDK fixture step without changing live nodes.
+                if let Some(dead) = map.nodes.first().cloned() {
+                    map.nodes.resize(map.size * 2 + 65, dead);
+                }
+                map.compact();
                 map.assert_structure();
                 let expected: Vec<_> = step["order"]
                     .as_array()

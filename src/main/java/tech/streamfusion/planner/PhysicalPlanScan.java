@@ -302,7 +302,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
                 StreamPhysicalGroupAggregate.class,
                 "groupAggregate",
                 GroupAggregateMatcher::substitute)
-            .shaped(GroupAggregateMatcher::hasCollections)
+            .shaped(
+                node ->
+                    GroupAggregateMatcher.rustCollectionsEnabled()
+                        && GroupAggregateMatcher.hasCollections(node))
             .keyedState()
             .matching(GroupAggregateMatcher::matches)
             .reason(

@@ -787,7 +787,7 @@ impl GroupAggState {
         match self {
             Self::Mapped(state) => state.emit(result_type),
             Self::Json(_) => unreachable!("JSON output uses fallible materialization"),
-            Self::Collection(state) => state.emit(),
+            Self::Collection(state) => state.emit(result_type),
             Self::List(state) => state.emit(),
             Self::Ordered(state) => state.emit(),
             GroupAggState::Running { agg, non_null } => emit_running(agg, *non_null, result_type),

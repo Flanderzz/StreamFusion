@@ -85,8 +85,11 @@ class FlinkCollectSqlHarnessTest {
   void explicitJvmRouteRemainsAvailableForExistingSavepoints() throws Exception {
     String property = "streamfusion.experimental.rustCollectionAggregates";
     String previous = System.getProperty(property);
+    String groupProperty = "streamfusion.operator.groupAggregate.enabled";
+    String previousGroup = System.getProperty(groupProperty);
     try {
       System.setProperty(property, "false");
+      System.setProperty(groupProperty, "false");
       var runs =
           NativeFailureParity.run(
               FlinkCollectSqlHarnessTest::environment,
@@ -119,6 +122,8 @@ class FlinkCollectSqlHarnessTest {
         RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
       }
     } finally {
+      if (previousGroup == null) System.clearProperty(groupProperty);
+      else System.setProperty(groupProperty, previousGroup);
       if (previous == null) System.clearProperty(property);
       else System.setProperty(property, previous);
     }
@@ -139,6 +144,29 @@ class FlinkCollectSqlHarnessTest {
     assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
     assertFalse(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
     RecoveryExecutionMetrics.assertConsumed(METRICS.nativeOperators(), "NativeJvmGroup");
+  }
+
+  @org.junit.jupiter.api.Test
+  void sharedAverageProjectionRetainsTheExistingCollectionConsumerGuard() {
+    String property = "streamfusion.experimental.rustCollectionAggregates";
+    String previous = System.getProperty(property);
+    try {
+      for (String enabled : new String[] {"false", "true"}) {
+        System.setProperty(property, enabled);
+        var runs =
+            NativeFailureParity.run(
+                FlinkCollectSqlHarnessTest::environment,
+                "SELECT k,COLLECT(v),SUM(v),MIN(v),MAX(v),AVG(v),COUNT(v) FROM src GROUP BY k");
+        runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
+        assertTrue(
+            runs.nativeRun().fallbackReasons().stream()
+                .anyMatch(reason -> reason.contains("generated collection representation")),
+            runs::toString);
+      }
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
   }
 
   @ParameterizedTest
@@ -210,6 +238,8 @@ class FlinkCollectSqlHarnessTest {
   @ValueSource(
       strings = {
         "SELECT k,COLLECT(v),COUNT(*) FROM src GROUP BY k",
+        "SELECT k,COLLECT(v),SUM(v),MIN(v),MAX(v),COUNT(v) FROM src GROUP BY k",
+        "SELECT k,COLLECT(v),AVG(v) FROM src GROUP BY k",
         "SELECT CAST(k AS STRING),COLLECT(v) FROM src GROUP BY CAST(k AS STRING)",
         "SELECT COLLECT(v),COUNT(*) FROM src",
         "SELECT k,COLLECT(DISTINCT v),COLLECT(v) FILTER (WHERE v>0) FROM src GROUP BY k",

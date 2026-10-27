@@ -232,7 +232,7 @@ impl CollectionState {
         true
     }
 
-    pub(super) fn emit(&self) -> ScalarValue {
+    pub(super) fn emit(&self, result: &DataType) -> ScalarValue {
         fn array(values: impl IntoIterator<Item = Option<i64>>, ty: &DataType) -> ArrayRef {
             match ty {
                 DataType::Boolean => Arc::new(BooleanArray::from(
@@ -267,7 +267,6 @@ impl CollectionState {
         }
         let ty = self.element.data_type();
         let ty = &ty;
-        let result = result_type(self.kind, ty);
         if self.kind <= 49 {
             // StateMapView.getMap materializes a fresh HashMap for each result.
             let capacity = (self.order.len().saturating_mul(4).div_ceil(3))
@@ -300,7 +299,7 @@ impl CollectionState {
                 None,
             );
             let map = arrow::array::MapArray::new(
-                field,
+                field.clone(),
                 arrow::buffer::OffsetBuffer::from_lengths([entries.len()]),
                 entries,
                 None,
@@ -308,13 +307,13 @@ impl CollectionState {
             );
             ScalarValue::Map(Arc::new(map))
         } else if self.values.is_empty() {
-            null_scalar(&result)
+            null_scalar(result)
         } else {
             let DataType::List(field) = result else {
                 unreachable!()
             };
             ScalarValue::List(Arc::new(arrow::array::ListArray::new(
-                field,
+                field.clone(),
                 arrow::buffer::OffsetBuffer::from_lengths([self.values.len()]),
                 array(self.values.iter().copied(), ty),
                 None,
@@ -432,10 +431,11 @@ mod tests {
                 ] {
                     state.update(value, retract, ttl, false);
                 }
-                let old = state.emit();
+                let result = result_type(kind, &ty);
+                let old = state.emit(&result);
                 let mut restored = CollectionState::new(kind, &ty);
                 restored.restore(state.snapshot()).unwrap();
-                assert_eq!(old, restored.emit());
+                assert_eq!(old, restored.emit(&result));
                 let expected = format!("{old:?}");
                 state.update(Some(1), true, ttl, false);
                 assert_eq!(
