@@ -3280,3 +3280,11 @@ A MAP_FROM_ARRAYS call with different operands remains a potential length-error 
 it inside CAST and MAP_KEYS, for example, retains the complete generated Calc under the existing
 fallible-operand guard. The direct MAP_FROM_ARRAYS kernel still runs in Rust and preserves its
 released length exception. A NativeCalc for that composed query is explicitly mixed execution.
+
+
+Function-engine diagnostics include TRY_CAST explicitly, alongside CAST. Both native and
+JVM-backed TRY_CAST calls therefore name their actual route; an empty function-name list
+cannot serve as evidence that a runtime TRY_CAST kernel executed. The collection tests require
+the named root function plus an empty JVM list and consumed native Calc input. Runtime STRING
+ELEMENT checks use source arrays, including cardinality failures, rather than relying only on
+a singleton constructor expression.

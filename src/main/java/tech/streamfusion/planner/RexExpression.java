@@ -1290,6 +1290,7 @@ final class RexExpression {
     SqlSyntax syntax = call.getOperator().getSyntax();
     return call.getKind() == SqlKind.CAST
         || call.getKind() == SqlKind.MINUS_PREFIX
+        || call.getOperator() == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST
         || call.getKind() == SqlKind.ARRAY_VALUE_CONSTRUCTOR
         || call.getKind() == SqlKind.MAP_VALUE_CONSTRUCTOR
         || call.getKind() == SqlKind.ROW

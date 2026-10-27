@@ -104,6 +104,16 @@ class FlinkNativeCollectionKernelsSqlHarnessTest {
   }
 
   @Test
+  void stringElementReadsRuntimeArraysAndRetainsCardinalityFailures() {
+    for (boolean reuse : new boolean[] {false, true})
+      check("ELEMENT(a)", reuse, " WHERE CARDINALITY(a)<2");
+    var runs = NativeFailureParity.run(() -> environment(true), "SELECT ELEMENT(a) FROM src");
+    assertNotNull(runs.host().failure());
+    runs.assertFailure(
+        runs.host().rootCause().getClass(), runs.host().phase(), NativeFailureParity.Route.NATIVE);
+  }
+
+  @Test
   void multiEntryStringMapsRetainTheReleasedGroupingContract() {
     String expression = "MAP['a',i,'b',j]";
     check(expression, true, "");
@@ -160,6 +170,22 @@ class FlinkNativeCollectionKernelsSqlHarnessTest {
         !scan.functionExecutions().isEmpty()
             && scan.functionExecutions().stream().allMatch(e -> e.contains("jvm=[]")),
         plan + scan.functionExecutions());
+    int end =
+        expression.indexOf(
+            expression.startsWith("ARRAY[") || expression.startsWith("MAP[") ? '[' : '(');
+    String function = expression.substring(0, end);
+    assertTrue(
+        scan.functionExecutions().stream()
+            .anyMatch(
+                execution -> {
+                  int start = execution.indexOf("native=[");
+                  if (start < 0) return false;
+                  start += "native=[".length();
+                  int close = execution.indexOf(']', start);
+                  return java.util.Arrays.stream(execution.substring(start, close).split(","))
+                      .anyMatch(name -> function.equals(name.trim()));
+                }),
+        "Expected native " + function + ": " + scan.functionExecutions());
     var earlier =
         METRICS.nativeOperators().stream()
             .map(row -> row.get("jobId"))
