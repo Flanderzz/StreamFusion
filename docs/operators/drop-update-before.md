@@ -1,7 +1,8 @@
 # Drop update-before
 
 **Status: Partial.** Native inside an admitted columnar pipeline for input types carried by the
-Arrow boundary. A standalone filter between a row source and row sink stays on Flink by default.
+Arrow boundary. Standalone filtering defaults native for those verified types under the
+Rust-side gate described below.
 
 Flink inserts `DropUpdateBefore` when a downstream consumer needs INSERT, UPDATE_AFTER and DELETE
 but does not need UPDATE_BEFORE, and the source cannot omit that kind itself. This includes an
@@ -18,6 +19,14 @@ unchanged without JNI, allocation or a data-buffer copy; fully discarded batches
 input without an output batch. Mixed batches use Arrow's batch filter through the existing C Data
 ownership bridge. Watermarks and other stream control events pass through the stateless operator,
 including after a fully discarded batch. Record timestamps are retained.
+
+Attaching hidden RowKind/cache columns retains the original data fields rather than deriving
+their nested names from vectors. Mixed-batch output also retains the exact input Arrow schema.
+Arrow Java's C Data import may rename
+list children to `$data$`; a replacement owning root preserves the original field names and
+metadata over the imported vectors. The vectors are closed once by that output batch. No data
+copy or new representation admission is introduced. This keeps represented UTF-16 strings
+compatible with native literals and MAP constructors after filtering an updating source.
 
 A lone row-source filter cannot repay both Arrow conversions: a release measurement at 4 million
 rows recorded 0.713 s native versus 0.476 s stock Flink. That complete-job result remains
@@ -41,6 +50,9 @@ and restores source and result-sink checkpoints twice with both in-memory and na
 backends. Direct operator tests cover shared input ownership, row lineage, record timestamps,
 watermarks after discarded input, absent kinds and zero-column batches. Native Rust tests cover
 sliced nested arrays, nullable sidecars, schema metadata and empty/all-retained/all-discarded input.
+A regression also checks exact list-child names, field metadata, surrogate units and owned
+buffers through the Java C Data round-trip; updating MAP construction followed by UNNEST
+checks the composed consumer.
 
 Release-mode Criterion fixtures exercise the production Rust filter at 16, 1024 and 16384 rows,
 with narrow/wide nullable payloads and absent/retained/mixed/discarded row-kind patterns. The

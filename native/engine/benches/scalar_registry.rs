@@ -10,7 +10,9 @@ use arrow::datatypes::{DataType, Field};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use datafusion::common::{config::ConfigOptions, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs};
-use streamfusion::bench::{flink_scalar_function, parameterized_scalar, registered_scalar_codes};
+use streamfusion::bench::{
+    collection_cast_function, flink_scalar_function, parameterized_scalar, registered_scalar_codes,
+};
 use streamfusion_benchmark_support::{header, measure, report, CountingAllocator};
 use streamfusion_bridge::timestamp::timestamps_from_millis;
 
@@ -28,6 +30,69 @@ fn long(value: i64) -> ColumnarValue {
 }
 fn array(value: impl Array + 'static, rows: usize) -> ColumnarValue {
     ColumnarValue::Array(Arc::new(value).slice(1, rows))
+}
+
+fn invoke_fixture(op: i64, args: Vec<ColumnarValue>, rows: usize) -> ColumnarValue {
+    let udf = flink_scalar_function(op, args.len());
+    let fields: Vec<_> = args
+        .iter()
+        .map(|arg| Arc::new(Field::new("input", arg.data_type(), true)))
+        .collect();
+    let scalars: Vec<_> = args
+        .iter()
+        .map(|arg| match arg {
+            ColumnarValue::Scalar(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    let field = udf
+        .return_field_from_args(ReturnFieldArgs {
+            arg_fields: &fields,
+            scalar_arguments: &scalars,
+        })
+        .unwrap();
+    udf.invoke_with_args(ScalarFunctionArgs {
+        args,
+        arg_fields: fields,
+        number_rows: rows,
+        return_field: field,
+        config_options: Arc::new(ConfigOptions::new()),
+    })
+    .unwrap()
+}
+
+fn represented(input: &ColumnarValue, rows: usize) -> ColumnarValue {
+    let input = input.to_array(rows).unwrap();
+    let input = input.as_any().downcast_ref::<StringArray>().unwrap();
+    let bytes = BinaryArray::from_iter(input.iter().map(|value| {
+        value.map(|value| {
+            value
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        })
+    }));
+    invoke_fixture(226, vec![ColumnarValue::Array(Arc::new(bytes))], rows)
+}
+
+fn represented_list(input: &ColumnarValue, rows: usize) -> ColumnarValue {
+    let input = input.to_array(rows).unwrap();
+    let input = input
+        .as_any()
+        .downcast_ref::<arrow::array::ListArray>()
+        .unwrap();
+    let values = represented(
+        &ColumnarValue::Array(input.values().clone()),
+        input.values().len(),
+    )
+    .to_array(input.values().len())
+    .unwrap();
+    ColumnarValue::Array(Arc::new(arrow::array::ListArray::new(
+        Arc::new(Field::new_list_field(values.data_type().clone(), true)),
+        input.offsets().clone(),
+        values,
+        input.nulls().cloned(),
+    )))
 }
 
 fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarValue>)> {
@@ -236,11 +301,11 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
         ),
         (190, vec![singletons.clone()]),
         (201, vec![singletons]),
-        (191, vec![lists.clone(), lists]),
+        (191, vec![lists.clone(), lists.clone()]),
         (192, vec![maps.clone()]),
         (193, vec![maps.clone()]),
         (194, vec![maps.clone()]),
-        (195, vec![maps.clone(), maps]),
+        (195, vec![maps.clone(), maps.clone()]),
         (
             196,
             vec![integers.clone(), long(2), long(3), integers.clone()],
@@ -257,7 +322,7 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
             199,
             vec![literal("a"), integers.clone(), literal("b"), long(2)],
         ),
-        (200, vec![string_lists, string("|"), string("NULL")]),
+        (200, vec![string_lists.clone(), string("|"), string("NULL")]),
     ];
     for op in 203..=208 {
         cases.push((op, vec![dates.clone()]));
@@ -284,6 +349,65 @@ fn fixtures(rows: usize, nulls: bool, unicode: bool) -> Vec<(i64, Vec<ColumnarVa
         (214, vec![times.clone(), int(1), boolean(false)]),
         (215, vec![times.clone(), times.clone()]),
         (216, vec![times.clone(), times]),
+        (217, vec![lists.clone(), boolean(true), boolean(false)]),
+        (218, vec![integers.clone()]),
+        (219, vec![integers.clone()]),
+        (220, vec![string_lists.clone(), string_lists.clone()]),
+        (
+            221,
+            vec![
+                literal("x"),
+                integers.clone(),
+                literal("y"),
+                represented(&string(&text), rows),
+            ],
+        ),
+        (
+            222,
+            vec![
+                literal("x"),
+                integers.clone(),
+                literal("y"),
+                represented(&string(&text), rows),
+            ],
+        ),
+        (
+            223,
+            vec![
+                represented(&string(&text), rows),
+                represented(&string("|"), rows),
+            ],
+        ),
+        (224, vec![lists, boolean(true), boolean(false)]),
+        (225, vec![represented(&string(&text), rows), integers]),
+        (
+            226,
+            vec![array(
+                BinaryArray::from_iter((0..rows + 1).map(|i| {
+                    valid(i).then(|| {
+                        text.encode_utf16()
+                            .flat_map(u16::to_le_bytes)
+                            .collect::<Vec<_>>()
+                    })
+                })),
+                rows,
+            )],
+        ),
+        (227, vec![maps]),
+        (228, vec![represented_list(&string_lists, rows)]),
+        (229, vec![represented_list(&string_lists, rows)]),
+        (
+            202,
+            vec![
+                represented(&string("{\"a\":1}"), rows),
+                literal("strict $.a"),
+                literal("NULL"),
+                literal(""),
+                literal("NULL"),
+                literal(""),
+                literal("13.0"),
+            ],
+        ),
     ]);
     for op in [144, 145, 146, 147] {
         cases.push((op, vec![string("{\"a\":1}"), literal("13.0")]));
@@ -425,6 +549,174 @@ fn parameterized(
     cases
 }
 
+fn collection_cases(
+    rows: usize,
+    nulls: bool,
+) -> Vec<(
+    String,
+    datafusion::logical_expr::ScalarUDF,
+    Vec<ColumnarValue>,
+)> {
+    let mut cases = Vec::new();
+    for width in [8, 64] {
+        let domain = if width == 8 { 4 } else { width };
+        let valid = |row| !nulls || row % 7 != 0;
+        let mut strings = ListBuilder::new(arrow::array::StringBuilder::new());
+        let mut numbers = ListBuilder::new(arrow::array::Int32Builder::new());
+        let mut parse = ListBuilder::new(arrow::array::StringBuilder::new());
+        let mut multiset = MapBuilder::new(
+            None,
+            arrow::array::Int32Builder::new(),
+            arrow::array::Int32Builder::new(),
+        );
+        for row in 0..=rows {
+            if row % 11 != 0 {
+                for col in 0..width {
+                    let value = format!("é中\0{:04}", col % domain);
+                    let present = !nulls || col % 9 != 0;
+                    strings
+                        .values()
+                        .append_option(present.then_some(value.as_str()));
+                    numbers
+                        .values()
+                        .append_option(present.then_some((col % domain) as i32));
+                    parse
+                        .values()
+                        .append_option(present.then_some(if col == 3 && nulls {
+                            "bad".to_owned()
+                        } else {
+                            (col % domain).to_string()
+                        }));
+                    multiset.keys().append_value((col % domain) as i32);
+                    multiset.values().append_value((col % 3 + 1) as i32);
+                }
+            }
+            strings.append(valid(row));
+            numbers.append(valid(row));
+            parse.append(valid(row));
+            multiset.append(valid(row)).unwrap();
+        }
+        let strings = represented_list(&array(strings.finish(), rows), rows);
+        let numbers = array(numbers.finish(), rows);
+        let parse = represented_list(&array(parse.finish(), rows), rows);
+        let multiset = array(multiset.finish(), rows);
+        let needle = represented(
+            &array(
+                StringArray::from_iter((0..=rows).map(|row| valid(row).then_some("é中\0"))),
+                rows,
+            ),
+            rows,
+        );
+        let flags = array(
+            arrow::array::BooleanArray::from_iter(
+                (0..=rows).map(|row| valid(row + 1).then_some(row % 2 == 0)),
+            ),
+            rows,
+        );
+        let map = invoke_fixture(191, vec![strings.clone(), numbers.clone()], rows);
+        let mut add = |op, suffix: &str, args: Vec<ColumnarValue>| {
+            cases.push((
+                format!("represented/{op}/{suffix}/width={width}/domain={domain}"),
+                flink_scalar_function(op, args.len()),
+                args,
+            ));
+        };
+        for op in [165, 169, 228, 229] {
+            add(op, "unary", vec![strings.clone()]);
+        }
+        for op in [178, 179, 182, 183, 184] {
+            add(op, "needle", vec![strings.clone(), needle.clone()]);
+        }
+        for op in [185, 220, 187, 188] {
+            add(op, "set", vec![strings.clone(), strings.clone()]);
+        }
+        add(170, "slice", vec![strings.clone(), int(-3), int(-1)]);
+        add(
+            224,
+            "runtime-flags",
+            vec![strings.clone(), flags.clone(), flags],
+        );
+        add(
+            191,
+            "map-from-arrays",
+            vec![strings.clone(), numbers.clone()],
+        );
+        for op in [192, 193, 194, 227] {
+            add(op, "map-projection", vec![map.clone()]);
+        }
+        add(195, "map-union", vec![map.clone(), map.clone()]);
+        add(225, "map-constructor", vec![needle.clone(), int(7)]);
+        for op in [221, 222] {
+            add(
+                op,
+                "row-object",
+                vec![literal("x"), int(7), literal("y"), needle.clone()],
+            );
+        }
+        for separator in [Some(""), Some("|"), None] {
+            let separator_arg = represented(
+                &array(StringArray::from_iter((0..=rows).map(|_| separator)), rows),
+                rows,
+            );
+            add(
+                223,
+                &format!("split-{separator:?}"),
+                vec![needle.clone(), separator_arg],
+            );
+        }
+        let map_type = |key, value| {
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(
+                        vec![
+                            Arc::new(Field::new("key", key, false)),
+                            Arc::new(Field::new("value", value, true)),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                )),
+                false,
+            )
+        };
+        for (name, input, target, nullable_failure) in [
+            (
+                if nulls { "try-array-int" } else { "array-int" },
+                parse,
+                DataType::new_list(DataType::Int32, true),
+                nulls,
+            ),
+            ("array-string", numbers.clone(), DataType::Utf8, false),
+            (
+                "array-boolean",
+                numbers,
+                DataType::new_list(DataType::Boolean, true),
+                false,
+            ),
+            (
+                "map-bigint",
+                map,
+                map_type(DataType::Utf8, DataType::Int64),
+                false,
+            ),
+            (
+                "multiset-bigint",
+                multiset,
+                map_type(DataType::Int64, DataType::Int32),
+                false,
+            ),
+        ] {
+            cases.push((
+                format!("represented/{name}/width={width}/domain={domain}"),
+                collection_cast_function(target, nullable_failure),
+                vec![input],
+            ));
+        }
+    }
+    cases
+}
+
 fn registry(c: &mut Criterion) {
     let classpath = std::env::var("SF_NATIVE_BENCH_CLASSPATH")
         .expect("Run bin/bench-native.py to prepare the SQL/JSON JVM classpath");
@@ -457,6 +749,7 @@ fn registry(c: &mut Criterion) {
                 .collect();
             if !unicode {
                 cases.extend(parameterized(rows, nulls));
+                cases.extend(collection_cases(rows, nulls));
             }
             for charset in ["UTF-16", "UTF-16BE", "UTF-16LE"] {
                 let text = if unicode {
@@ -552,6 +845,46 @@ fn registry(c: &mut Criterion) {
                 let output = output.to_array(rows).unwrap();
                 assert_eq!(output.len(), rows);
                 assert_eq!(output.data_type(), &output_type);
+                if case.starts_with("represented/try-array-int/") {
+                    for row in 0..rows {
+                        let source_row = row + 1;
+                        assert_eq!(
+                            output.is_null(row),
+                            source_row % 11 != 0 || source_row % 7 == 0
+                        );
+                    }
+                }
+                if case.starts_with("represented/array-boolean/") {
+                    let input = args[0].to_array(rows).unwrap();
+                    let input = input
+                        .as_any()
+                        .downcast_ref::<arrow::array::ListArray>()
+                        .unwrap();
+                    let result = output
+                        .as_any()
+                        .downcast_ref::<arrow::array::ListArray>()
+                        .unwrap();
+                    assert_eq!(result.nulls(), input.nulls());
+                    for row in 0..rows {
+                        if input.is_null(row) {
+                            continue;
+                        }
+                        let values = input.value(row);
+                        let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+                        let actual = result.value(row);
+                        let actual = actual
+                            .as_any()
+                            .downcast_ref::<arrow::array::BooleanArray>()
+                            .unwrap();
+                        assert_eq!(
+                            actual.iter().collect::<Vec<_>>(),
+                            values
+                                .iter()
+                                .map(|value| value.map(|value| value != 0))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
                 let inputs: Vec<_> = args
                     .iter()
                     .filter_map(|arg| match arg {

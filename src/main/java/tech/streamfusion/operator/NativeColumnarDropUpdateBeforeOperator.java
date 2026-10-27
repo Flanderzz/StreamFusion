@@ -1,10 +1,13 @@
 package tech.streamfusion.operator;
 
+import java.util.ArrayList;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import tech.streamfusion.Native;
@@ -53,10 +56,33 @@ public class NativeColumnarDropUpdateBeforeOperator extends FlinkStreamOperator<
         VectorSchemaRoot result =
             Data.importVectorSchemaRoot(
                 allocator, outArray, outSchema, NativeAllocator.DICTIONARIES);
+        if (!result.getSchema().equals(in.getSchema())) {
+          // Filtering preserves fields. Arrow Java import can rename list children; keep the
+          // original names but imported dictionary IDs. Only this replacement root owns vectors.
+          var fields = new ArrayList<Field>();
+          for (int i = 0; i < in.getSchema().getFields().size(); i++) {
+            fields.add(
+                preserveFieldNames(
+                    in.getSchema().getFields().get(i), result.getSchema().getFields().get(i)));
+          }
+          result =
+              new VectorSchemaRoot(
+                  new Schema(fields, result.getSchema().getCustomMetadata()),
+                  result.getFieldVectors(),
+                  result.getRowCount());
+        }
         ArrowBatch filtered = batch.filtered(result, i -> kinds.get(i) != 1);
         ColumnarRecordMetrics.forward(
             output, getMetricGroup(), element.copy(filtered), filtered.rowCount());
       }
     }
+  }
+
+  private static Field preserveFieldNames(Field original, Field imported) {
+    var children = new ArrayList<Field>();
+    for (int i = 0; i < original.getChildren().size(); i++) {
+      children.add(preserveFieldNames(original.getChildren().get(i), imported.getChildren().get(i)));
+    }
+    return new Field(original.getName(), imported.getFieldType(), children);
   }
 }
