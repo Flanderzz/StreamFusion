@@ -100,12 +100,13 @@ DataFusion 54 instead probes the longer input, which can reorder a shorter left
 array; that implementation cannot be used unchanged. Tests cover both relative
 input lengths, duplicates, NULL keys, empty arrays and exact DECIMAL values.
 
-## Sorting verified arrays
+## Sorting represented arrays
 
-ARRAY_SORT reuses DataFusion 54 for nullable integer/DECIMAL arrays whose Flink
-comparator is verified safe: fewer than 32 elements, or a native ARRAY_DISTINCT
-result. Literal Boolean options map explicitly to ASC/DESC and NULLS FIRST/LAST;
-the two-argument Flink form puts NULL first exactly when ascending is true.
+ARRAY_SORT retains its proven short/distinct numeric fast paths and uses a native index
+TimSort for other nullable signed integer, DECIMAL and represented STRING arrays. It follows Flink's comparator and Java's run/gallop schedule, including the
+nonzero comparison of equal non-NULL values. Runtime and NULL Boolean flags are evaluated per
+row. The two-argument form puts NULL first exactly when ascending is true. A total-order Arrow
+sort would silently change equal-value identities and long duplicate-array failures.
 
 Runtime Boolean options use a typed Rust kernel over the same verified arrays.
 Following DataFusion's and Comet's primitive-array sorting structure, it copies
@@ -117,15 +118,11 @@ precision/scale and child-field metadata are preserved. No JVM callback or
 per-row result array is needed. Non-NULL constant options retain the existing
 DataFusion path; no configuration switch is added.
 
-Unrestricted arrays retain generated Flink evaluation. Flink's comparator returns
--1 on equal non-NULL values; long duplicate-bearing arrays can therefore throw
-`IllegalArgumentException: Comparison method violates its general contract!` in
-Java TimSort. Substituting a total-order Arrow sort would change that observable
-behavior. A 64-element runtime SQL reproducer protects this failure path. Strings,
-nested types, NOT NULL element declarations and fallible operands also retain
-Flink evaluation. This is deliberately partial native admission, and ARRAY_SORT
-is absent from Flink 1.18.1. The runtime-option measurements are recorded on the
-[scalar benchmark page](../benchmarks/scalar-functions.md#runtime-array_sort-options-2026-10-27).
+The Apache Spark 4.0.1/Android TimSort port retains its Apache license notice. An independent
+JDK 17 Arrays.sort oracle checks all 480 resulting index orders or failures, including 107
+invalid-comparator errors. This oracle is reproducible from the checked Java generator. SQL
+fixtures separately check numeric and represented-STRING values, runtime options and Flink's
+exception class/message. Other types, fallible operands and unverified consumers keep generation.
 
 ## Extracting a singleton
 
@@ -143,8 +140,8 @@ Projected runtime ARRAY expressions reuse the existing native scalar constructor
 for matching nullable Boolean, integer, DECIMAL and temporal elements. The released
 DataFusion builder interleaves columns into flat Arrow child storage. The existing
 compact/expanded timestamp normalization retains Flink precision and pre-epoch
-behavior. No new JNI protocol or container sidecar is introduced. Fallible,
-STRING/nested and NOT NULL-element projections retain their previous evaluator.
+behavior. No new JNI protocol or container sidecar is introduced. Nullable STRING arrays additionally interleave represented literal/input values, retaining original
+Java UTF-16 caches. Fallible, other nested and NOT NULL-element projections retain their previous evaluator.
 SQL fixtures verify typed NULL literals, exact wide decimals, DATE/TIME and
 TIMESTAMP/LTZ at millisecond and nanosecond precision.
 
@@ -155,8 +152,8 @@ aligns visible ranges otherwise. Duplicate and NULL keys are retained, both
 parents must be present, and length mismatch uses Flink's exception class/message.
 The existing List-of-entry-Struct carrier permits nullable keys without unsafe
 Arrow construction or a new ownership protocol. Its marker lives on the child
-field so expression type inference preserves it. Only basic nullable key/value
-types are admitted; representation-sensitive inputs retain generated evaluation.
+field so expression type inference preserves it. Nullable basic and represented STRING key/value arrays are admitted; other
+representation-sensitive inputs retain generated evaluation.
 
 ## Shared map key views
 
@@ -494,3 +491,41 @@ checks, 330 successful JDK 11/Flink 1.18 checks with 99 released-capability skip
 690 release Rust core tests, and 630 array-edit, 480 sort and 240 collection-registry
 Criterion smoke fixtures. The full JVM, external connector integration and
 stateful recovery suites were not run locally.
+
+## Represented STRING operations
+
+The typed offsets/flat-values structure also operates on marked STRING structs. Comparisons
+use UTF-16 when both values have Java caches and UTF-8 bytes otherwise. Unpaired surrogates can
+make that equality nontransitive, so stable STRING set selection checks retained candidates
+rather than inserting them into a Rust Eq hash set. Gathered elements retain their whole cache
+and validity. New generic arrays reset the containing-array category; unchanged ranges keep it.
+
+STRING min/max retain the first equal value. Empty-separator SPLIT emits cached individual Java
+UTF-16 units, while nonempty runtime separators emit cold byte substrings. Binary ROW/MAP
+constructors clear STRING caches; generic OBJECT construction retains them. All these paths use
+owned Arrow batches and the existing boundary serializers.
+
+Two low-cost optimization passes targeted the shared representation boundary: the STRING reader
+sets the original Java cache on its single owned BinaryStringData wrapper, and generic-array
+category adjustment returns early before allocating flag storage when every flag is already
+correct. These changes preserve serializer snapshots and ownership. The previous profiling
+passes found ArrayDataSerializer copies and BinaryStringData materialization dominant; they did
+not establish an allocation or elapsed-time improvement from those two small changes. The
+maintainer authorized correctness-verified slower groundwork after two profiling passes for
+[#505](https://github.com/datafusion-contrib/StreamFusion/issues/505). Complete-job evidence must
+retain both transposes and must not describe a slower case as accelerated.
+
+The [remaining-signature comparisons](../benchmarks/native-collections.md) retain matched
+stock/previous/candidate jobs at two STRING array widths, runtime sorts, SPLIT, constructors
+and container casts. They report the complete-job limits of this coverage work separately
+from the earlier primitive-kernel gains above.
+
+
+`DynamicCollectionBenchmark` retains its original complete-job timer, sources, sink and
+transpose assertions. `collection.numericStrings=true` fills STRING arrays with signed ASCII
+decimal integers for parsing workloads; `collection.integerMap=true` supplies INT map values
+for MAP<STRING,BIGINT> casts. `collection.multiset=true` supplies the matching internal
+MULTISET<INT> source fixture for element casts. These switches default false and must match across stock,
+preceding and candidate cohorts. `collection.rustFunction` requires an empty JVM function
+list plus the named native function; consumed NativeCalc metrics are checked after every
+native trial, outside the elapsed-time region.

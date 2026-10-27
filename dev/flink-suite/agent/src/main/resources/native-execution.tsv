@@ -2,6 +2,7 @@
 # * matches every invocation; field=true/false selects a pinned fixture parameter.
 # + requires every operator; | separates alternatives; ! requires full fallback and its reason.
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNotIn	*	NativeFilterOperator|NativeCalcOperator
+org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testNonPrimitiveMapType	*	NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testLongProjectionList	*	NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testIfFunction	*	NativeCalcOperator
 org.apache.flink.table.planner.runtime.stream.sql.CalcITCase#testCastNumericToBooleanInCondition	*	NativeFilterOperator|NativeCalcOperator
