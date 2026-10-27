@@ -587,3 +587,47 @@ fn metadata_follows_avro_records() {
 
     assert_eq!(values(&out, 1), vec![5, 7]);
 }
+
+// A writer schema without fields encodes every datum in zero bytes; Avro resolution still reads
+// one record per message, filling the reader's fields from their defaults, so each message is one
+// all-null row in its place.
+#[test]
+fn zero_byte_datums_of_a_fieldless_writer_decode_one_row_each() {
+    let reader = r#"{"type":"record","name":"record","namespace":"org.apache.flink.avro.generated","fields":[
+            {"name":"f0","type":["null","boolean"],"default":null}]}"#;
+    let fieldless = r#"{"type":"record","name":"Envelope","namespace":"com.example",
+            "aliases":["org.apache.flink.avro.generated.record"],"fields":[]}"#;
+    let full = r#"{"type":"record","name":"record","namespace":"org.apache.flink.avro.generated",
+            "fields":[{"name":"f0","type":["null","boolean"],"default":null}]}"#;
+    let target: SchemaRef = Arc::new(Schema::new(vec![Field::new("f0", DataType::Boolean, true)]));
+    let mut decoder = new_decoder(FORMAT_AVRO_CONFLUENT, target, "", reader, 0, false, "");
+    decoder.register_writer_schema(7, fieldless);
+    decoder.register_writer_schema(9, full);
+    // union branch 1 (boolean), then true
+    let (m1, m2, m3, m4) = (
+        confluent_frame(7, vec![]),
+        confluent_frame(9, vec![0x02, 0x01]),
+        confluent_frame(7, vec![]),
+        confluent_frame(7, vec![]),
+    );
+    let body = bodies(vec![Some(&m1), Some(&m2), Some(&m3), Some(&m4)]);
+    // The batch ends on a zero-byte datum whose writer switch waits behind decoded rows.
+    let switching = bodies(vec![Some(&m2), Some(&m3)]);
+
+    let (out, sources) = decoder.decode_traced(&body);
+    let (switched, switched_sources) = decoder.decode_traced(&switching);
+
+    let values = |batch: &RecordBatch| {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(values(&out), vec![None, Some(true), None, None]);
+    assert_eq!(sources, Sources::Identity);
+    assert_eq!(values(&switched), vec![Some(true), None]);
+    assert_eq!(switched_sources, Sources::Identity);
+}
