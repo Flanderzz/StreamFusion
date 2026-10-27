@@ -87,6 +87,73 @@ fn decimal_bearing_schemas_read_booleans_like_the_simd_path() {
     assert_eq!(simd.column(1).to_data(), decimal.column(1).to_data());
 }
 
+// Jackson reads one root value and never looks past it, so Flink's plain JSON format ignores the
+// content after it; a DECIMAL-bearing schema reads only that value, like the simd path's walk.
+#[test]
+fn decimal_bearing_schemas_ignore_content_after_the_root_value() {
+    let messages = bodies(vec![
+        Some(br#"{"d": 1.5, "s": "a"}}"#.as_slice()),
+        Some(br#"[{"d": 2, "s": "]"}] trailing"#.as_slice()),
+        Some(br#"{"d": 3, "s": "}"} {"d": 4}"#.as_slice()),
+    ]);
+    let strings = Field::new("s", DataType::Utf8, true);
+    let simd_schema: SchemaRef = Arc::new(Schema::new(vec![strings.clone()]));
+    let decimal_schema: SchemaRef = Arc::new(Schema::new(vec![
+        strings,
+        Field::new("d", DataType::Decimal128(10, 2), true),
+    ]));
+
+    let simd = new_decoder(FORMAT_JSON, simd_schema, "", "", 0, false, "").decode(&messages);
+    let strict =
+        new_decoder(FORMAT_JSON, decimal_schema.clone(), "", "", 0, false, "").decode(&messages);
+    let lenient = new_decoder(FORMAT_JSON, decimal_schema, "", "", 0, true, "").decode(&messages);
+
+    let column = |batch: &RecordBatch| {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|value| value.unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(column(&simd), vec!["a", "]", "}"]);
+    assert_eq!(column(&strict), vec!["a", "]", "}"]);
+    assert_eq!(column(&lenient), vec!["a", "]", "}"]);
+}
+
+// An unterminated root leaves arrow-json mid-record: strict mode fails that message rather than
+// let the next message's bytes complete the record, and skip mode drops it alone.
+#[test]
+fn decimal_bearing_schemas_never_finish_a_root_with_the_next_message() {
+    let messages = bodies(vec![
+        Some(br#"{"d": 1.5,"#.as_slice()),
+        Some(br#""e": 2}"#.as_slice()),
+        Some(br#"{"d": 2.5, "e": 3}"#.as_slice()),
+    ]);
+    let schema: SchemaRef = Arc::new(Schema::new(vec![
+        Field::new("e", DataType::Int32, true),
+        Field::new("d", DataType::Decimal128(10, 2), true),
+    ]));
+    let strict = new_decoder(FORMAT_JSON, schema.clone(), "", "", 0, false, "");
+
+    let lenient = new_decoder(FORMAT_JSON, schema, "", "", 0, true, "").decode(&messages);
+    let strict_failed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strict.decode(&messages)))
+            .is_err();
+
+    assert!(strict_failed);
+    let ints = lenient
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int32Array>()
+        .unwrap()
+        .iter()
+        .collect::<Vec<_>>();
+    assert_eq!(ints, vec![Some(3)]);
+}
+
 // Flink parses DATE with the strict ISO_LOCAL_DATE whatever the schema holds; arrow-json's own
 // date parse accepts an unpadded date, so a DECIMAL-bearing schema converts DATE leaves from
 // their text like the simd path.

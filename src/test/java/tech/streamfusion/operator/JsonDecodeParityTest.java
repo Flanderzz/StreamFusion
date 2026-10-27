@@ -545,6 +545,26 @@ class JsonDecodeParityTest {
   }
 
   @Test
+  void theDecimalPathIgnoresContentAfterTheRootValue() throws Exception {
+    // Jackson reads one root value and never looks past it, so Flink ignores what trails it; a
+    // DECIMAL-bearing schema reads only that value, like the simd path's Jackson-faithful walk.
+    String[] scenarios = {
+      "{\"dec\": 1.5, \"b\": true}}",
+      "{\"dec\": 2, \"m\": {\"k\": \"}\"}} {\"dec\": 3}",
+      "[{\"dec\": 4}] trailing",
+      // Escapes: a quote escaped before a brace, and an escaped backslash ending a string.
+      "{\"m\": {\"\\\"}\": true}, \"dec\": 1}}",
+      "{\"m\": {\"\\\\\": false}, \"dec\": 1}]",
+      // An unterminated root: strict fails, lenient drops.
+      "{\"dec\": 1",
+    };
+    for (String scenario : scenarios) {
+      assertParity(DECIMAL_BOOLEAN_TYPE, scenario, TimestampFormat.SQL, "", false);
+      assertParity(DECIMAL_BOOLEAN_TYPE, scenario, TimestampFormat.SQL, "", true);
+    }
+  }
+
+  @Test
   void datesRideTheDecimalPathExactly() throws Exception {
     // arrow-json accepts an unpadded date that Flink's strict ISO_LOCAL_DATE rejects, so a
     // DECIMAL-bearing schema converts DATE leaves from their text like the simd path.

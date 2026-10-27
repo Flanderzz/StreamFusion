@@ -1645,6 +1645,7 @@ impl JsonDecoder {
                 if skip_blank_body(bytes, true) {
                     continue;
                 }
+                let bytes = self.root_document(bytes);
                 let elements = match self.array_body(bytes) {
                     ArrayBody::Not => vec![bytes],
                     ArrayBody::Elements(elements) => elements,
@@ -1678,6 +1679,7 @@ impl JsonDecoder {
                 if skip_blank_body(bytes, false) {
                     continue;
                 }
+                let bytes = self.root_document(bytes);
                 match self.array_body(bytes) {
                     ArrayBody::Not => documents.push(self.literal_document(bytes)),
                     ArrayBody::Elements(elements) => {
@@ -1697,9 +1699,9 @@ impl JsonDecoder {
                 let consumed = decoder
                     .decode(&document)
                     .expect("failed to decode JSON record");
-                assert_eq!(
-                    consumed,
-                    document.len(),
+                // An unterminated root would otherwise be completed by the next message's bytes.
+                assert!(
+                    consumed == document.len() && !decoder.has_partial_record(),
                     "JSON body was not a single complete document"
                 );
             }
@@ -1726,6 +1728,18 @@ impl JsonDecoder {
             })
             .collect();
         RecordBatch::try_new(self.schema.clone(), columns).expect("failed to build JSON batch")
+    }
+
+    /// The part of a message Flink's plain `json` format reads: Jackson parses one root value and
+    /// never looks past it, so content trailing a root object or array (`{"a":1}}`) is ignored,
+    /// as the simd path's Jackson-faithful walk ignores it. The CDC dialects keep their strict
+    /// parse (divergences/21).
+    fn root_document<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
+        if self.retryable {
+            first_root_value(bytes)
+        } else {
+            bytes
+        }
     }
 
     /// A document as arrow-json reads it: on Flink's tree path (the CDC dialects) zero number
@@ -1775,6 +1789,37 @@ enum ArrayBody<'a> {
     Not,
     Elements(Vec<&'a [u8]>),
     Corrupt,
+}
+
+/// The bytes through the end of a message's root object or array; a message whose root is not a
+/// closed container is returned whole.
+pub(crate) fn first_root_value(bytes: &[u8]) -> &[u8] {
+    let Some(start) = bytes.iter().position(|b| !b.is_ascii_whitespace()) else {
+        return bytes;
+    };
+    if !matches!(bytes[start], b'{' | b'[') {
+        return bytes;
+    }
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            in_string = escaped || byte != b'"';
+            escaped = !escaped && byte == b'\\';
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &bytes[..=i];
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    bytes
 }
 
 /// Flink's CDC dialects read their envelope into a tree with `USE_BIG_DECIMAL_FOR_FLOATS` once
