@@ -17,6 +17,12 @@ public interface NativeMessageDecoder extends AutoCloseable {
   /** {@link #beforeDecode(VarBinaryVector, int)} for message bodies held as arrays. */
   default void beforeDecode(byte[][] bodies, int count) throws Exception {}
 
+  /** {@link #beforeDecode(VarBinaryVector, int)} for a keyed table's keys. */
+  default void beforeDecodeKeys(VarBinaryVector keys, int count) throws Exception {}
+
+  /** {@link #beforeDecodeKeys(VarBinaryVector, int)} for keys held as arrays. */
+  default void beforeDecodeKeys(byte[][] keys, int count) throws Exception {}
+
   /**
    * The exported driver init of this decoder's native library, or 0 when the decode cannot be
    * invoked without JVM mediation (the default — a decoder must opt in, and one that needs

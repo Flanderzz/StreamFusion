@@ -123,12 +123,9 @@ final class KafkaTables {
     if (metadata == null) {
       return false;
     }
-    if (!metadata.isEmpty() && options.containsKey("key.format")) {
-      return false; // the keyed composition doesn't carry metadata yet
-    }
-    // A keyed table: the raw-key composition must resolve (see KeyedDecodeSpec), and the value
+    // A keyed table: the key/value composition must resolve (see KeyedDecodeSpec), and the value
     // format's gate then runs against the VALUE row type — the physical schema minus the key
-    // column under EXCEPT_KEY.
+    // columns under EXCEPT_KEY.
     RowType valueRowType = FilesystemTables.physicalRowType(scan);
     if (options.containsKey("key.format")) {
       KeyedDecodeSpec keyed = KeyedDecodeSpec.resolve(options, valueRowType);
@@ -352,7 +349,7 @@ final class KafkaTables {
       Map<String, String> options, Properties props) {
     // A keyed table's edge carries both byte arrays per record as one frame element.
     KafkaRecordDeserializationSchema<byte[]> deserializer =
-        options.containsKey(NativeFormatOptions.KEYED_KEY_POSITION)
+        options.containsKey(NativeFormatOptions.KEYED_KEY_FORMAT)
             ? new KeyedKafkaBytesDeserialization()
             : KafkaRecordDeserializationSchema.valueOnly(ByteArrayDeserializer.class);
     KafkaSourceBuilder<byte[]> builder =

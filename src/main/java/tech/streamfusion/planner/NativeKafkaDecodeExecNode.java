@@ -71,7 +71,7 @@ public class NativeKafkaDecodeExecNode extends ExecNodeBase<ArrowBatch>
     // A keyed table's value format sees only the value positions — the provider's type gate and
     // decoder run against that projection, while the operator still exports the physical schema
     // (the native keyed composition owns the split and the scatter).
-    boolean keyed = options.containsKey(NativeFormatOptions.KEYED_KEY_POSITION);
+    boolean keyed = options.containsKey(NativeFormatOptions.KEYED_KEY_FORMAT);
     RowType formatType = keyed ? valueRowType() : withoutMetadata(writerType);
     // A table reading connector metadata: the value format sees only the other columns, and the
     // native decode fills each metadata column's output position from the row's record.
