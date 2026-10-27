@@ -227,11 +227,10 @@ public class RowDataToArrowOperator extends FlinkStreamOperator<ArrowBatch>
     writer.finish();
     VectorSchemaRoot root = pendingRoot;
     if (kinds != null || stringCaches != null) {
-      var columns = new ArrayList<FieldVector>(root.getFieldVectors());
+      var columns = new ArrayList<FieldVector>();
       if (kinds != null) { kinds.setValueCount(pendingRows); columns.add(kinds); }
       if (stringCaches != null) columns.addAll(stringCaches.finish(pendingRows));
-      root = new VectorSchemaRoot(columns);
-      root.setRowCount(pendingRows);
+      root = RowDataArrowConverter.withExtraColumns(root, columns, pendingRows);
     }
     ArrowBatch batch = new ArrowBatch(root);
     clearPending();

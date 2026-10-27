@@ -508,3 +508,14 @@ TimSort can reject some long duplicate arrays, so the planner keeps its existing
 shorter-than-32 or native-ARRAY_DISTINCT proof before admitting either Rust path.
 Unrestricted arrays and fallible options keep generated Flink evaluation. This
 preserves released behavior without a new JVM callback or representation format.
+
+
+## Java-compatible index ordering
+
+Flink's ARRAY_SORT comparator returns a nonzero result for equal non-NULL values. A total-order
+Arrow sort cannot reproduce every selected identity or the invalid-comparator failure of long
+duplicate inputs. A native index TimSort helper follows Java's run/gallop schedule using the
+Apache-licensed Android implementation carried by Apache Spark 4.0.1. Its independent JDK 17
+Arrays.sort fixture checks 480 complete index orders or failures, including 107 comparator
+errors. The checked Java generator reproduces the compressed fixture. This helper changes no
+SQL admission by itself; the Calc coverage page defines the wired native paths.
