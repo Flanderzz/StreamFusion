@@ -11,12 +11,16 @@ import org.apache.flink.formats.json.debezium.DebeziumJsonDeserializationSchema;
 import org.apache.flink.formats.json.maxwell.MaxwellJsonDeserializationSchema;
 import org.apache.flink.formats.json.ogg.OggJsonDeserializationSchema;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.ArrayType;
 import org.apache.flink.table.types.logical.BigIntType;
 import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.DoubleType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.MapType;
+import org.apache.flink.table.types.logical.MultisetType;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.table.types.utils.TypeConversions;
@@ -50,6 +54,24 @@ class CdcDecodeParityTest {
           new String[] {"id", "name", "score"});
 
   private static final DecodeParityHarness HARNESS = new DecodeParityHarness(ROW_TYPE, true);
+
+  private static final RowType NESTED_ROW_TYPE =
+      RowType.of(
+          new LogicalType[] {
+            new BigIntType(),
+            new VarCharType(VarCharType.MAX_LENGTH),
+            RowType.of(
+                new LogicalType[] {new VarCharType(VarCharType.MAX_LENGTH), new DoubleType()},
+                new String[] {"name", "score"}),
+            new ArrayType(new VarCharType(VarCharType.MAX_LENGTH)),
+            new MapType(new VarCharType(VarCharType.MAX_LENGTH), new BigIntType()),
+            new MultisetType(new VarCharType(VarCharType.MAX_LENGTH)),
+            new ArrayType(
+                RowType.of(
+                    new LogicalType[] {new BigIntType(), new VarCharType(VarCharType.MAX_LENGTH)},
+                    new String[] {"id", "name"}))
+          },
+          new String[] {"id", "name", "info", "tags", "attrs", "bag", "items"});
 
   private static final int MAXWELL = FormatCodes.MAXWELL_JSON;
   private static final int CANAL = FormatCodes.CANAL_JSON;
@@ -157,6 +179,38 @@ class CdcDecodeParityTest {
     for (String scenario : scenarios) {
       assertParity(CANAL, scenario, false);
       assertParity(CANAL, scenario, true);
+    }
+  }
+
+  /**
+   * The CDC dialects convert through Flink's tree deserializer, whose MAP and MULTISET values also
+   * fill a {@code java.util.HashMap}: entries iterate in its bucket order through resizes and tree
+   * bins, here forced by fourteen keys sharing a bucket of a 64-slot table.
+   */
+  @Test
+  void cdcMapEntriesIterateInFlinksHashMapOrder() throws Exception {
+    DecodeParityHarness harness = new DecodeParityHarness(NESTED_ROW_TYPE, true);
+    StringBuilder attrs = new StringBuilder("{");
+    int collisions = 0;
+    for (int i = 0; collisions < 14; i++) {
+      int hash = StringData.fromString("t" + i).hashCode();
+      if (((hash ^ (hash >>> 16)) & 63) == 5) {
+        attrs.append(collisions == 0 ? "" : ",").append("\"t").append(i).append("\":").append(i);
+        collisions++;
+      }
+    }
+    for (int i = 0; i < 30; i++) {
+      attrs.append(",\"k").append(i).append("\":").append(i);
+    }
+    attrs.append('}');
+    String data = "{\"id\":1,\"attrs\":" + attrs + ",\"bag\":" + attrs + "}";
+    String[] scenarios = {
+      "{\"data\":" + data + ",\"type\":\"insert\"}",
+      "{\"data\":" + data + ",\"old\":{\"attrs\":" + attrs + "},\"type\":\"update\"}",
+    };
+    for (String scenario : scenarios) {
+      assertParity(harness, NESTED_ROW_TYPE, MAXWELL, scenario, false);
+      assertParity(harness, NESTED_ROW_TYPE, MAXWELL, scenario, true);
     }
   }
 

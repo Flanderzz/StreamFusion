@@ -1175,10 +1175,11 @@ fn json_decode_decimal_path_collapses_duplicate_map_keys() {
         .as_any()
         .downcast_ref::<Decimal128Array>()
         .unwrap();
-    // Row 0: k keeps its first position with the LAST value (HALF_UP of 3.456), j follows.
+    // Row 0: entries iterate in Flink's HashMap order (j before k), and k keeps its LAST value
+    // (HALF_UP of 3.456).
     assert_eq!(maps.value_length(0), 2);
-    assert_eq!((keys.value(0), values.value(0)), ("k", 346));
-    assert_eq!((keys.value(1), values.value(1)), ("j", 200));
+    assert_eq!((keys.value(0), values.value(0)), ("j", 200));
+    assert_eq!((keys.value(1), values.value(1)), ("k", 346));
     // Row 1 (no duplicates) is untouched.
     assert_eq!(maps.value_length(1), 1);
     assert_eq!((keys.value(2), values.value(2)), ("u", 700));
