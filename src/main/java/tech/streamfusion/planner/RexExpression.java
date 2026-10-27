@@ -2780,7 +2780,7 @@ final class RexExpression {
       return emitDateFormat(call.getOperands());
     }
     if ("ABS".equals(functionName)) {
-      if (nativeIntegralAbs(call)) return emitBuiltinCall(call, 218);
+      if (nativeIntegralAbs(call) || nativeDecimalAbs(call)) return emitBuiltinCall(call, 218);
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
@@ -4308,7 +4308,7 @@ final class RexExpression {
     if (call.getKind() == SqlKind.MINUS_PREFIX) return exact && !nativeIntegralNegate(call);
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
-        return exact && !nativeIntegralAbs(call);
+        return exact && !nativeIntegralAbs(call) && !nativeDecimalAbs(call);
       case "SIGN":
         return exact && !nativeIntegralSign(call);
       case "FLOOR":
@@ -4453,6 +4453,30 @@ final class RexExpression {
                 call.getType().getSqlTypeName())
             >= 0
         && nativeIntegralSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeDecimalAbs(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ABS
+        && call.getOperands().size() == 1
+        && call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+        && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+            call.getType(), call.getOperands().get(0).getType())
+        && nativeDecimalAbsOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeDecimalAbsOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeDecimalAbs(call)) return true;
+    if (call.getKind() != SqlKind.CAST || call.getOperands().size() != 1) return false;
+    RelDataType input = call.getOperands().get(0).getType();
+    return input.getSqlTypeName() == SqlTypeName.DECIMAL
+        && call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+        && call.getType().getPrecision() >= input.getPrecision()
+        && call.getType().getScale() == input.getScale()
+        && nativeDecimalAbsOperand(call.getOperands().get(0));
   }
 
   private static boolean nativeIntegralAbs(RexCall call) {

@@ -1445,7 +1445,17 @@ with their enclosing negation. [Release measurements](../benchmarks/scalar-funct
 compare prepared inputs with stock and the previous callback, and separately report the
 complete row-source job with both transposes.
 
-DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
+DECIMAL ABS also uses the exact Rust kernel for direct input references, typed literals,
+nested admitted ABS and recursive precision widening at the same scale. It preserves
+the declared precision (1 through 38), scale, NULLs and sliced validity; it never converts
+through floating point. Like Comet's decimal ABS, the kernel transforms the unscaled i128
+and explicitly retains its Arrow decimal type. Rescaling, precision narrowing, arithmetic
+and other unverified producers retain the enclosing generated expression. Existing
+value-dependent FLOOR/CEIL and runtime-scale rounding guards still apply before this matcher.
+The [DECIMAL ABS measurements](../benchmarks/scalar-functions.md#decimal-abs) compare
+stock, previous callback and native execution at prepared and complete-job boundaries.
+
+DECIMAL unary minus and SIGN execute Flink's generated expression code through
 the existing batch JVM bridge. Unverified integer rounding producers and explicit-scale
 INT/BIGINT TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
 retains the host compilation

@@ -1,6 +1,6 @@
 # Host-exact builtins and verified Rust replacements
 
-**Applies to:** integral ABS, REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
+**Applies to:** exact ABS, REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
 
 ## Removing the callback for integral ABS
 
@@ -17,6 +17,21 @@ RowData, the preceding production JVM callback, and the compiled Rust Calc. Defa
 over the old callback but remain slower than stock; the generic Calc still constructs input
 projections and output batches per call. This optimization replaces an existing native-Calc
 computation; the small-batch and complete-job results do not establish universal acceleration.
+
+## DECIMAL ABS without a JVM evaluator
+
+Verified decimal ABS now extends the same scalar/array dispatch. Following Comet's decimal
+ABS structure, Arrow transforms the unscaled i128 values and retains the input decimal
+precision and scale explicitly. Every legal Flink DECIMAL value has a representable absolute
+value; no double conversion, rescale, or per-row DecimalData/BigDecimal construction is needed.
+The values buffer is new, validity remains shared, and the input is untouched.
+
+Released Flink 1.18.1 and 2.2.1 preserve the operand's decimal metadata in both compact and
+noncompact ABS. Admission therefore starts from direct inputs/literals, nested admitted ABS,
+and precision widening without a scale change. Other producers keep their complete generated
+expression. Decimal rounding metadata guards remain in force. This changes computation inside
+an existing native Calc, without a new switch, expression opcode, JNI contract or operator.
+See [release measurements and limitations](../benchmarks/scalar-functions.md#decimal-abs).
 
 ## Existing host-exact paths
 
