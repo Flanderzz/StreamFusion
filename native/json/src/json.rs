@@ -1555,7 +1555,7 @@ pub(crate) struct JsonDecoder {
     /// Plain JSON retries through the parser-compatible walk; CDC keeps its envelope scan.
     retryable: bool,
     /// Report the null rows Flink 2.x collects for fanned-out array elements ([`NullRows`]), for a
-    /// keyed table's JSON key, whose merge trips over them.
+    /// keyed table's JSON key and strict JSON value, whose merge trips over them.
     null_rows: bool,
     /// Schema-compiled cursor-drift checks shared across all decoded batches.
     drift: StructDriftDetector,

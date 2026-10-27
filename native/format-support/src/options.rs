@@ -31,8 +31,9 @@ pub struct FormatOptions {
     pub csv: CsvOptions,
     pub timestamp_mode: flink_text::TimestampMode,
     pub json_reject_array_roots: bool,
-    /// A JSON key decode reports the null rows Flink 2.x collects for null array elements, which
-    /// its key/value merge trips over ([`crate::NullRows`]); set by the keyed composition.
+    /// A JSON decode reports the null rows Flink 2.x collects for null array elements, which its
+    /// key/value merge trips over ([`crate::NullRows`]); the keyed composition sets it for a JSON
+    /// key and for a strict JSON value.
     pub json_null_rows: bool,
     pub raw_little_endian: bool,
     /// An Avro key decoder's writer schema (a bare `avro` key, derived from the key's row type) and
