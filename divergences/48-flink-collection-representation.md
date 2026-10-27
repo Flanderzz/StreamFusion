@@ -141,21 +141,54 @@ existing admission gates. The release comparisons and two-pass investigation are
 [the benchmark ledger](../docs/benchmarks/scalar-functions.md#not-null-fixed-binary-map-leaves).
 
 
-## Represented Arrow kernel contracts
+## Native represented collection kernels
 
-Shared STRING views compare cached UTF-16 only when both values have caches and encoded bytes
-otherwise. That equality is potentially nontransitive, so stable set selection compares retained
-candidates directly. Arrow gathers retain the complete element and its validity. Explicit copy
-categories distinguish generic arrays from binary arrays without retaining borrowed Java objects.
+The same marked UTF-8/optional UTF-16 columns now feed native collection kernels. Equality
+uses Java UTF-16 only when both values have caches; otherwise it uses encoded bytes. This
+relation can be nontransitive for isolated surrogates and cold question marks, so STRING
+set operations scan retained candidates rather than pretending it is an ordinary Rust Eq key.
+Gathering retains the entire original element. Copy-category flags distinguish a new generic
+array from an unchanged binary array; empty/singleton reversal and complete slices retain
+the original category. Binary ROW/MAP constructors clear caches, while generic OBJECT
+construction retains them. Shared mutable OBJECT_UPDATE expressions keep Flink evaluation.
 
-The engine provides binary ROW/MAP constructors, generic OBJECT fields, UTF-16 empty-separator
-splitting, general index sorting and recursive container casts. Casts select visible children,
-reuse the existing exact scalar rules and carry parsing failures to the outer container. Map
-casts reuse Java HashMap iteration order, first-key identity and last-value replacement. Their
-independent JDK 17 fixture includes NULL keys in collision trees.
+Flink's ARRAY_SORT comparator returns -1 for equal non-NULL ascending values, and +1 descending.
+A total Arrow sort cannot preserve its result identities or invalid-comparator exceptions.
+The native index sort ports the Apache-licensed Android TimSort from
+[Apache Spark 4.0.1](https://github.com/apache/spark/blob/v4.0.1/core/src/main/java/org/apache/spark/util/collection/TimSort.java).
+An independent JDK 17 Arrays.sort oracle covers 480 index-order cases, including 107 comparator
+failures. Runtime Boolean options and NULL ordering stay inside the same native kernel.
 
-A separate MAP input snapshot operation mirrors MapDataSerializer.copy by clearing nested string
-caches and marking binary row/array categories, while sharing owned Arrow value/offset buffers.
-Computed maps can retain their own caches. The nullable-key map-list carrier follows the existing
-Comet-style owned-view boundary; no additional JNI ownership protocol is introduced. The Calc
-coverage page defines which SQL contexts the planner wires to these engine capabilities.
+On Flink 1.18, independently compiling `MAP_KEYS(MAP['a',i,'b',j])` produces both `[a,b]` and
+`[b,a]`: generated-expression grouping hashes global generated variable names. Represented
+native constructors use input order for this inherently nondeterministic construction order.
+Flink 2.2's ordered grouping remains deterministic and is preserved. This does not relax
+expression deduplication, failure, STRING representation or ownership contracts.
+
+Container casts reuse the existing exact scalar conversions and shared Java HashMap order
+implementation. Both released lines construct HashMap() with the default initial capacity of
+sixteen; the newer development-source size-based constructor must not be substituted. Numeric
+tree-bin order, including NULL keys, has an independent JDK 17 oracle. BinaryStringData is not
+Comparable to its own class, so its equal-hash tree tie order depends on JVM identityHashCode;
+native STRING tree ties use first-input identity order for that inherently nondeterministic case. They select visible child ranges before conversion, propagate element parsing
+failures to the complete outer container for TRY_CAST/legacy CAST, and preserve the original
+first key object with the final equal-key value. No JNI callback or borrowed-buffer lifetime
+is added. Numeric ARRAY formatting creates the same cached Java UTF-16 result as Flink.
+
+
+Generated MAP field reads call MapDataSerializer.copy before invoking a collection function or
+cast. On GenericMapData this produces binary key/value arrays, clearing nested Java caches.
+Native MAP-reference operands mirror that copy category recursively without mutating the input
+batch. The resulting nullable-key entry-list carrier shares values/offset buffers and replaces
+only representation metadata. Computed MAP_FROM_ARRAYS and other MAP results retain their own
+caches: applying the input-field snapshot to computed results would change equality and duplicate
+keys. Tests distinguish both cases using cached isolated surrogates, cold strings, NULL keys,
+original binary maps, nested RowKinds and downstream key/value/entry projections.
+
+
+Empty-separator SPLIT can mutate a shared StringData cache. Independently evaluating Arrow
+expressions cannot update aliases to that original Java object. Programs combining such input
+materialization with cache-sensitive original-input comparisons retain one generated Calc.
+A cold GenericArrayData fixture demonstrates the ordering change after two SPLIT calls; binary
+and proxy arrays retain their independent copy behavior. Native comparisons of a newly produced
+SPLIT array remain admitted because they read its explicit result caches.
