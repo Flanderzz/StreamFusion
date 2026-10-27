@@ -1,5 +1,6 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -7,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Supplier;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.kafka.clients.admin.AdminClient;
@@ -30,8 +31,10 @@ import tech.streamfusion.planner.NativePlanner;
  * End-to-end parity for Kafka connector metadata read by the native decode: the same broker
  * records, read by stock Flink and natively, must produce the same rows. A collected header map
  * compares as a map; the entry order the decode reproduces is pinned record by record against
- * Flink's own deserializer by {@code KafkaMetadataParityTest}. Opt-in via
- * {@code SF_BENCHMARK=true} (Docker for Testcontainers Kafka); bounded scans so the runs terminate.
+ * Flink's own deserializer by {@code KafkaMetadataParityTest}. The native source's decode counter
+ * must account for every record it read, so a run that substituted only downstream operators
+ * cannot pass. Opt-in via {@code SF_BENCHMARK=true} (Docker for Testcontainers Kafka); bounded
+ * scans so the runs terminate.
  */
 @Tag("streamfusion-kafka")
 @EnabledIfEnvironmentVariable(named = "SF_BENCHMARK", matches = "true")
@@ -56,7 +59,8 @@ class NativeKafkaMetadataSqlHarnessTest {
   @Test
   void jsonConnectorMetadataMatchesFlink() throws Exception {
     try (KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       createTopic(brokers, "metadata-create-time", Map.of());
@@ -91,12 +95,14 @@ class NativeKafkaMetadataSqlHarnessTest {
                     topic, 2, 4_000L, null, bytes("{\"id\":4,\"name\":null}"), List.<Header>of())));
         Supplier<TableEnvironment> environment =
             environment(
+                metrics,
                 table(brokers, topic, "id BIGINT, name STRING, " + METADATA_COLUMNS, "json"));
 
         String plan = NativePlanner.explain(environment.get(), METADATA_QUERY);
         assertTrue(plan.contains("NativeKafkaDecode"), plan);
         NativeParity.assertParity(environment, METADATA_QUERY);
       }
+      assertEquals(8, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 
@@ -104,7 +110,8 @@ class NativeKafkaMetadataSqlHarnessTest {
   @Test
   void csvAndCanalConnectorMetadataMatchFlink() throws Exception {
     try (KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       createTopic(brokers, "metadata-csv", Map.of());
@@ -117,6 +124,7 @@ class NativeKafkaMetadataSqlHarnessTest {
                   "metadata-csv", 1, 2_000L, null, bytes("2,b"), List.<Header>of())));
       Supplier<TableEnvironment> csv =
           environment(
+              metrics,
               table(
                   brokers, "metadata-csv", "id BIGINT, name STRING, " + METADATA_COLUMNS, "csv"));
       assertTrue(NativePlanner.explain(csv.get(), METADATA_QUERY).contains("NativeKafkaDecode"));
@@ -147,6 +155,7 @@ class NativeKafkaMetadataSqlHarnessTest {
       String changes = "SELECT id, name, part, hdrs, off, ts, tst FROM t";
       Supplier<TableEnvironment> canal =
           environment(
+              metrics,
               table(
                   brokers,
                   "metadata-canal",
@@ -154,6 +163,7 @@ class NativeKafkaMetadataSqlHarnessTest {
                   "canal-json"));
       assertTrue(NativePlanner.explain(canal.get(), changes).contains("NativeKafkaDecode"));
       NativeParity.assertKindedParity(canal, changes);
+      assertEquals(4, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 
@@ -161,7 +171,8 @@ class NativeKafkaMetadataSqlHarnessTest {
   @Test
   void windowsOverTheRecordTimestampMatchFlink() throws Exception {
     try (KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
+        RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics()) {
       kafka.start();
       String brokers = kafka.getBootstrapServers();
       createTopic(brokers, "metadata-windows", Map.of());
@@ -178,6 +189,7 @@ class NativeKafkaMetadataSqlHarnessTest {
                   "metadata-windows", 0, 12_000L, null, bytes("{\"id\":4}"), List.<Header>of())));
       Supplier<TableEnvironment> environment =
           environment(
+              metrics,
               table(
                   brokers,
                   "metadata-windows",
@@ -193,14 +205,15 @@ class NativeKafkaMetadataSqlHarnessTest {
       assertTrue(
           plan.contains("NativeKafkaDecode") && plan.contains("watermarkColumn=[ts]"), plan);
       NativeParity.assertParity(environment, windows);
+      assertEquals(4, metrics.counterValue("nativeKafkaDecodeRecords"));
     }
   }
 
-  private static Supplier<TableEnvironment> environment(String ddl) {
+  private static Supplier<TableEnvironment> environment(
+      RecoveryExecutionMetrics metrics, String ddl) {
     return () -> {
-      StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-      env.setParallelism(1);
-      StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+      StreamTableEnvironment tEnv =
+          StreamTableEnvironment.create(metrics.environment(new Configuration(), 1, 0));
       tEnv.getConfig().set("table.local-time-zone", "UTC");
       tEnv.executeSql(ddl);
       return tEnv;

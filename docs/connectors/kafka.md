@@ -57,6 +57,12 @@ export, or re-import Arrow binary input vectors. The decoded output still crosse
 Interface, while the parser buffers, schema lookup plan, and recursive appenders remain attached to
 the decoder handle across polls.
 
+Each native source reader reports its decode work beside Flink's own source metrics, the source-side
+twin of the sink's `nativeKafkaSerialization*` counters: `nativeKafkaDecodeBatches`,
+`nativeKafkaDecodeRecords` (the Kafka records decoded), `nativeKafkaDecodeRows` (the rows they
+produced) and `nativeKafkaDecodeNanos`. The end-to-end Kafka tests require them to account for every
+record read, so a job that substituted only downstream operators can't pass as a native decode.
+
 Native value decoding covers insert-only [JSON](formats/json.md), [CSV](formats/csv.md),
 [raw](formats/raw.md), bare [Avro](formats/avro.md), [Avro Confluent](formats/avro-confluent.md),
 and [Protobuf](formats/protobuf.md), plus the supported [CDC JSON](formats/cdc-json.md) envelopes

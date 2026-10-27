@@ -34,11 +34,13 @@ final class NativeKafkaSplitReader
 
   private final KafkaPartitionSplitReader delegate;
   private final NativeKafkaBatchDecoder batches;
+  private final NativeKafkaDecodeMetrics decodeMetrics;
 
   NativeKafkaSplitReader(
       java.util.Properties properties,
       SourceReaderContext context,
       KafkaSourceReaderMetrics metrics,
+      NativeKafkaDecodeMetrics decodeMetrics,
       RowType outputType,
       NativeMessageDecoderFactory decoderFactory,
       boolean keyed,
@@ -46,6 +48,7 @@ final class NativeKafkaSplitReader
       int rowtimeIndex,
       WatermarkExpression watermarkExpression) {
     this.delegate = new KafkaPartitionSplitReader(properties, context, metrics);
+    this.decodeMetrics = decodeMetrics;
     this.batches =
         new NativeKafkaBatchDecoder(
             outputType, decoderFactory, keyed, metadataKeys, rowtimeIndex, watermarkExpression);
@@ -53,7 +56,18 @@ final class NativeKafkaSplitReader
 
   @Override
   public RecordsWithSplitIds<NativeSourceRecord> fetch() throws IOException {
-    return decodeFetched(delegate.fetch(), batches::decode);
+    return decodeFetched(delegate.fetch(), this::decodeCounted);
+  }
+
+  private NativeSourceRecord decodeCounted(List<ConsumerRecord<byte[], byte[]>> records)
+      throws Exception {
+    long start = System.nanoTime();
+    NativeSourceRecord decoded = batches.decode(records);
+    decodeMetrics.decoded(
+        records.size(),
+        decoded.batch() == null ? 0 : decoded.batch().rowCount(),
+        System.nanoTime() - start);
+    return decoded;
   }
 
   @FunctionalInterface

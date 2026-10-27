@@ -70,12 +70,14 @@ public final class NativeKafkaSource
   @Override
   public SourceReader<ArrowBatch, KafkaPartitionSplit> createReader(SourceReaderContext context) {
     KafkaSourceReaderMetrics metrics = new KafkaSourceReaderMetrics(context.metricGroup());
+    NativeKafkaDecodeMetrics decodeMetrics = new NativeKafkaDecodeMetrics(context.metricGroup());
     Supplier<SplitReader<NativeSourceRecord, KafkaPartitionSplit>> reader =
         () ->
             new NativeKafkaSplitReader(
                 properties,
                 context,
                 metrics,
+                decodeMetrics,
                 outputType,
                 decoderFactory,
                 keyed,
