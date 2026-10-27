@@ -1379,6 +1379,19 @@ release controls beat stock and the preceding callback; 16-row and complete row-
 jobs retain the measured limits in [Integer FLOOR](../benchmarks/scalar-functions.md#integer-floor)
 and [Integer CEIL / CEILING](../benchmarks/scalar-functions.md#integer-ceil-ceiling).
 
+### Single-argument integer ROUND
+
+`ROUND(value)` over TINYINT, SMALLINT, INT and BIGINT also returns the integer unchanged.
+Verified direct inputs, typed literals, recursive lossless widening and nested admitted
+FLOOR/CEIL/ROUND reuse the native operand expression without a JVM evaluator, a floating
+conversion or a new values buffer. Signed minima, exact BIGINTs, NULLs and resolved widths
+are preserved. Arithmetic, narrowing and other unverified producers retain their complete
+generated rounding program. Every explicit scale, including zero, retains the existing
+generated path: negative positions can overflow and wrap, and extreme positions can fail
+inside released Flink's decimal rounding. DECIMAL and floating ROUND are unchanged.
+[Release measurements](../benchmarks/scalar-functions.md#single-argument-integer-round)
+retain the slower small-batch and complete-job controls as well as the bulk-batch gains.
+
 ### Exact unary and integral functions
 
 TINYINT, SMALLINT, INT and BIGINT ABS use a Rust Arrow unary kernel for direct inputs,
@@ -2709,8 +2722,9 @@ overloads, including integer and DECIMAL operands, use the selected released Fli
 own conversions and math functions. This preserves deterministic last-bit results, signed
 zero, NaN, infinities, domain results and NULL behavior.
 
-Non-DECIMAL ROUND and INT/BIGINT/FLOAT TRUNCATE use the same generated path,
-including runtime INT scales. Independently emitted DOUBLE TRUNCATE uses an exact
+Non-DECIMAL ROUND, except the verified single-argument integer path above, and
+INT/BIGINT/FLOAT TRUNCATE use the same generated path, including runtime INT scales.
+Independently emitted DOUBLE TRUNCATE uses an exact
 [bounded shortcut](../optimizations/host-exact-builtins-upcall.md#bounded-double-truncate):
 for magnitudes from 1 through 1e9 and scales -6 through 6, outward-rounded bounds must
 prove the same truncated decimal integer before arithmetic replaces decimal conversion.

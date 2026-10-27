@@ -45,7 +45,10 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     let function =
         std::env::var("SF_INTEGRAL_ROUNDING_FUNCTION").unwrap_or_else(|_| "FLOOR".into());
-    assert!(matches!(function.as_str(), "FLOOR" | "CEIL" | "CEILING"));
+    assert!(matches!(
+        function.as_str(),
+        "FLOOR" | "CEIL" | "CEILING" | "ROUND"
+    ));
     let function_option = format!("-Dsf.integral.rounding.function={function}");
     let element = args.get(1).map_or("INT", String::as_str);
     let nullable = args.get(2).is_some_and(|s| s == "true");

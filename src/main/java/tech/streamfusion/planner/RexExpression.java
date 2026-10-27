@@ -2613,6 +2613,7 @@ final class RexExpression {
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND
         || call.getOperator()
             == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRUNCATE) {
+      if (nativeIntegralRounding(call)) return emit(call.getOperands().get(0));
       if (!call.getOperands().isEmpty()
           && call.getOperands().get(0).getType().getSqlTypeName() == SqlTypeName.DECIMAL) {
         return emitDecimalRound(call);
@@ -4048,6 +4049,7 @@ final class RexExpression {
       case "ROUND":
         return input != SqlTypeName.DECIMAL
             && SqlTypeFamily.NUMERIC.contains(call.getOperands().get(0).getType())
+            && !nativeIntegralRounding(call)
             && !NativeConfig.allowsIncompatible("ROUND");
       case "EXP":
       case "LN":
@@ -4125,7 +4127,9 @@ final class RexExpression {
     return (call.getOperator()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.FLOOR
             || call.getOperator()
-                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.CEIL)
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.CEIL
+            || call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ROUND)
         && call.getOperands().size() == 1
         && SqlTypeFamily.INTEGER.contains(call.getOperands().get(0).getType())
         && call.getType().getSqlTypeName() == call.getOperands().get(0).getType().getSqlTypeName()

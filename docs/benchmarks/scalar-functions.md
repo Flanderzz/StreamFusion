@@ -2952,3 +2952,81 @@ Use the shared `integral_rounding` release example and `IntegralRoundingPipeline
 from the FLOOR instructions, selecting `SF_INTEGRAL_ROUNDING_FUNCTION=CEIL` for prepared
 controls or `-Drounding.pipeline.function=CEIL` for complete jobs. The explicit previous
 encoder and route checks apply to both functions.
+
+## Single-argument integer ROUND
+
+Measured on 2026-10-27 against canonical main `d98dc2f2`, on Apple M4 Pro, JDK 17.0.12,
+Rust 1.94.0 release without default features. Both released Flink 1.18.1 and 2.2.1 are
+measured independently. Only `ROUND(value)` on verified integer operands is changed;
+explicit scale arguments and unverified producers retain generated evaluation.
+
+Equal prepared values, resolved widths and NULL patterns start on RowData for stock Flink
+and Arrow RecordBatch for previous/candidate native Calc. Stock executes its released
+generated expression on prepared GenericRowData/BinaryRowData. Native timers start and
+stop inside Rust around production Calc and equivalent checksum consumption; preceding
+JVM computation and its intrinsic conversions remain timed. Setup, initial JNI entry,
+Arrow import/export and perimeter transposes are excluded from prepared measurements.
+Exact output schema/Arrow equality is checked before timing, and every timed output
+contributes to matching checksums. All schemas are nullable; the NULL flag denotes actual
+NULL values every seventh row. Stock/previous/native order rotates for 16 warmups and
+11 measured trials of 131,072 rows each. Values are median [min, max] ns/row.
+
+| Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1, BIGINT, false, binary, 1024 | 8.986 [6.941, 18.408] | 54.478 [47.632, 64.772] | 0.348 [0.306, 0.363] | 25.79x | 156.36x |
+| 1.18.1, BIGINT, true, generic, 1024 | 6.400 [5.808, 16.941] | 47.064 [42.686, 50.074] | 0.701 [0.681, 0.875] | 9.13x | 67.11x |
+| 1.18.1, BIGINT, true, binary, 16 | 5.628 [5.491, 6.113] | 768.974 [761.583, 784.511] | 14.967 [14.371, 15.448] | 0.38x | 51.38x |
+| 1.18.1, INT, false, binary, 1024 | 5.838 [5.432, 5.972] | 42.728 [40.682, 57.784] | 0.305 [0.292, 0.317] | 19.17x | 140.30x |
+| 1.18.1, INT, true, generic, 1024 | 4.519 [4.452, 18.006] | 37.391 [35.634, 39.007] | 0.717 [0.693, 0.829] | 6.30x | 52.14x |
+| 1.18.1, INT, true, binary, 16 | 5.409 [5.286, 5.889] | 762.968 [757.441, 772.750] | 14.406 [14.010, 14.858] | 0.38x | 52.96x |
+| 1.18.1, SMALLINT, false, binary, 1024 | 5.689 [5.467, 5.932] | 41.973 [39.931, 59.374] | 0.328 [0.315, 0.346] | 17.33x | 127.82x |
+| 1.18.1, SMALLINT, true, generic, 1024 | 5.853 [5.665, 6.021] | 42.039 [40.251, 62.638] | 0.693 [0.672, 0.741] | 8.44x | 60.63x |
+| 1.18.1, SMALLINT, true, binary, 16 | 5.446 [5.280, 5.825] | 742.352 [737.850, 752.496] | 14.085 [13.723, 14.905] | 0.39x | 52.71x |
+| 1.18.1, TINYINT, false, binary, 1024 | 7.581 [7.238, 17.433] | 42.084 [41.233, 57.969] | 0.336 [0.313, 0.375] | 22.56x | 125.25x |
+| 1.18.1, TINYINT, true, generic, 1024 | 8.117 [5.692, 8.867] | 43.509 [38.539, 50.779] | 0.745 [0.706, 0.932] | 10.90x | 58.41x |
+| 1.18.1, TINYINT, true, binary, 16 | 5.629 [5.530, 5.820] | 772.427 [763.950, 783.090] | 14.762 [13.350, 15.756] | 0.38x | 52.33x |
+| 2.2.1, BIGINT, false, binary, 1024 | 10.198 [8.557, 20.903] | 50.490 [45.352, 60.357] | 0.346 [0.334, 0.364] | 29.46x | 145.85x |
+| 2.2.1, BIGINT, true, generic, 1024 | 6.886 [6.348, 18.278] | 55.496 [48.014, 63.099] | 0.696 [0.677, 0.750] | 9.89x | 79.75x |
+| 2.2.1, BIGINT, true, binary, 16 | 6.246 [6.150, 6.558] | 773.582 [756.754, 793.155] | 14.002 [13.630, 16.256] | 0.45x | 55.25x |
+| 2.2.1, INT, false, binary, 1024 | 7.436 [6.917, 14.206] | 56.088 [49.785, 72.955] | 0.330 [0.317, 0.359] | 22.53x | 169.98x |
+| 2.2.1, INT, true, generic, 1024 | 4.766 [4.670, 4.946] | 48.693 [44.799, 61.810] | 0.692 [0.672, 0.851] | 6.88x | 70.33x |
+| 2.2.1, INT, true, binary, 16 | 6.060 [6.009, 6.960] | 781.974 [769.627, 816.086] | 15.437 [13.803, 18.351] | 0.39x | 50.66x |
+| 2.2.1, SMALLINT, false, binary, 1024 | 6.265 [6.026, 6.478] | 48.445 [43.458, 62.665] | 0.338 [0.329, 0.347] | 18.52x | 143.23x |
+| 2.2.1, SMALLINT, true, generic, 1024 | 4.925 [4.675, 5.293] | 41.861 [40.380, 56.673] | 0.710 [0.676, 0.787] | 6.93x | 58.94x |
+| 2.2.1, SMALLINT, true, binary, 16 | 5.575 [5.347, 5.802] | 773.666 [761.840, 789.940] | 14.704 [14.331, 15.127] | 0.38x | 52.62x |
+| 2.2.1, TINYINT, false, binary, 1024 | 8.385 [7.735, 19.151] | 44.980 [41.002, 64.401] | 0.343 [0.319, 0.370] | 24.47x | 131.26x |
+| 2.2.1, TINYINT, true, generic, 1024 | 6.457 [5.727, 15.747] | 42.013 [39.691, 56.503] | 0.696 [0.676, 0.845] | 9.28x | 60.37x |
+| 2.2.1, TINYINT, true, binary, 16 | 6.280 [6.077, 6.752] | 732.857 [728.134, 750.648] | 15.533 [14.994, 16.240] | 0.40x | 47.18x |
+
+At 1,024 rows this shared-operand path improves 6.30-29.46x over stock and 52.14-169.98x
+over the preceding callback. Sixteen-row controls remain slower than stock, despite
+removing most callback overhead. The candidate has the same input-expression Calc path
+as FLOOR/CEIL, without a rounding loop to optimize. Its allocation probe requests
+13 allocations / 606 bytes per batch and shares all output value/validity buffers;
+generic Calc/RecordBatch ownership, result handling and checksum consumption retain the
+fixed costs identified in the FLOOR profile. These are sampled batch improvements,
+not a universal small-batch acceleration claim.
+
+The independent complete job uses 1M INT rows, parallelism one, a row source and a rowwise
+blackhole sink. Native plans retain both transposes, require consumed NativeCalc work
+and distinguish the old JVM route from candidate `jvm=[]`. The previous encoder comes
+from `d98dc2f2`; relabeling an unchanged candidate is rejected. Separate sequential JVMs
+run two warmups and five measured jobs per engine. Seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.138810 [0.133661, 0.148813] | 0.162969 [0.156567, 0.183940] | 0.141323 [0.134961, 0.155040] |
+
+The complete candidate improves previous StreamFusion but remains slightly slower than
+stock by median, with overlapping ranges. Submission, startup and JIT remain included;
+this does not establish sustained full-job acceleration. All raw trials, checksums,
+configuration and allocation observations are in the
+[result record](results/integral-round-2026-10-27.json).
+
+Use the shared `integral_rounding` release example from the FLOOR instructions, selecting
+`SF_INTEGRAL_ROUNDING_FUNCTION=ROUND`. For the complete job, select
+`-Drounding.pipeline.function=ROUND` with `-Drounding.pipeline.engine=flink|previous|native`;
+the previous control requires the preceding encoder first on the classpath. Runtime
+parity/route tests cover all four integer widths on both supported Flink lines and JDK
+11/17, including NULLs, signed minima, nested/widened calls and failing unselected
+branches. The unchanged released `testRound` fixtures pass on both lines.

@@ -734,3 +734,16 @@ stock/previous/candidate medians are 0.127985/0.154719/0.139331s, retaining both
 The allocation probe again requests 13 allocations / 606 bytes with shared result buffers.
 These limits and [the full CEIL measurements](../benchmarks/scalar-functions.md#integer-ceil-ceiling)
 remain explicit; the common operand path introduces no separate rounding loop to optimize.
+
+
+Single-argument integer ROUND uses this same shared-operand production path. Released
+Flink rounds through BigDecimal but retains every integer exactly at its default zero
+scale. The native admission covers direct inputs, typed literals, recursive lossless
+widening and nested admitted FLOOR/CEIL/ROUND; explicit scales and unverified producers
+keep the complete generated expression. No new kernel, opcode or option is needed.
+Independent release controls on Flink 1.18.1 and 2.2.1 improve 6.30-29.46x over stock and
+52.14-169.98x over the preceding callback at 1,024 rows. Sixteen-row controls still lose
+to stock. The complete 1M-row stock/previous/native medians are
+0.138810/0.162969/0.141323 seconds with both transposes; no standalone stock speedup is
+claimed. The [full ROUND results](../benchmarks/scalar-functions.md#single-argument-integer-round)
+retain all measured variability and common Calc/perimeter limits.
