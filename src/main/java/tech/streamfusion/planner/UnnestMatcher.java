@@ -57,7 +57,13 @@ final class UnnestMatcher {
     RexCall unnest = (RexCall) call;
     if (unnest.getOperands().size() != 1) return false;
     if (unverifiedNullableRowOrdinality(correlate)) return false;
-    if (GeneratedUnnestMatcher.preservedInput(correlate.getInput())) return false;
+    if (GeneratedUnnestMatcher.preservedInput(correlate.getInput())
+        && !(CollectionValueIdentity.scalarArrayProducer(correlate.getInput())
+            && collectionType(correlate).getSqlTypeName() == SqlTypeName.ARRAY
+            && collectionType(correlate).getComponentType().isNullable())) return false;
+    if (correlate.condition().isDefined()
+        && CollectionValueIdentity.stringCarrierProducer(correlate.getInput())
+        && CollectionValueIdentity.readsStringValue(correlate.condition().get())) return false;
     if (arrayColumn(correlate) < 0 && computedOperand(correlate) == null) return false;
     int inputArity = correlate.getInput().getRowType().getFieldCount();
     RelDataType collType = collectionType(correlate);
@@ -131,7 +137,8 @@ final class UnnestMatcher {
     }
     int inputArity = correlate.getInput().getRowType().getFieldCount();
     RexNode shifted = RexUtil.shift(correlate.condition().get(), inputArity);
-    RexNode expanded = SearchArguments.expandSearch(correlate.getCluster().getRexBuilder(), null, shifted);
+    RexNode expanded =
+        SearchArguments.expandSearch(correlate.getCluster().getRexBuilder(), null, shifted);
     return RexExpression.encode(expanded, correlate);
   }
 

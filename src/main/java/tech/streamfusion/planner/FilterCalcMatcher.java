@@ -22,7 +22,8 @@ final class FilterCalcMatcher {
   private FilterCalcMatcher() {}
 
   static boolean matches(Calc calc) {
-    if (CollectionValueIdentity.unverifiedInput(calc)) return false;
+    if (CollectionValueIdentity.unverifiedInput(calc)
+        || CollectionValueIdentity.requiresStringCarrierEvaluation(calc)) return false;
     if (!hasFilterShape(calc)) {
       return false;
     }

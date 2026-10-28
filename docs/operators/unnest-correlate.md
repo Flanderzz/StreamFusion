@@ -22,8 +22,8 @@ The operand may be a direct column, a nested array field, or an encodable comput
 `ON TRUE` followed by a separate encodable WHERE filter also composes; the WHERE remains a filter
 after expansion.
 
-Computed MAPs outside the verified native constructor signatures, STRING/ROW/MAP-bearing ARRAYs
-and LEFT element predicates use the released Flink correlate generator inside an
+Computed MAPs outside the verified native constructor signatures, unverified ROW/MAP-bearing
+ARRAYs and LEFT element predicates use the released Flink correlate generator inside an
 Arrow-input/Arrow-output operator. This preserves the host's map
 constructor ordering, duplicate-key policy, generic/binary container behavior and LEFT padding
 after predicate evaluation. It covers verified builtin expressions; it does not expand admission
@@ -53,10 +53,10 @@ generated expansion. Generated collection Calc results and other generated expan
 inputs; DropUpdateBefore, mini-batch assignment and watermark assignment preserve that contract.
 On Flink 2.2, verified scalar ARRAY_AGG results with NOT NULL elements also use this preserving
 consumer, from either native collection state or the explicit legacy JVM handler. A structural
-check admits nonsensitive grouping fields and arrays of nonsensitive scalar elements together;
+check admits verified scalar grouping fields and scalar arrays together;
 the grouping fields include the [verified nullable-element array keys](group-by.md#collection-aggregate-array-inputs).
-Character grouping keys, character/nested aggregate element values and MAP/MULTISET-bearing producer rows retain
-their guards. Nullable
+Character keys and scalar string arrays use the preserved native boundary below. Nested
+character arrays and MAP/MULTISET-bearing producer rows retain their guards. Nullable
 scalar arrays keep ordinary Arrow UNNEST. The [collection aggregate boundary](group-by.md#scalar-array-results-through-generated-unnest)
 describes the exact routes, unchecked-NULL behavior, recovery and released submission failures.
 Complex nested outputs require a verified preserving consumer or a final row boundary. Flink
@@ -864,3 +864,118 @@ interval ARRAY_AGG families on 2.2. Nullable results keep Arrow UNNEST; NOT NULL
 reuse the preserving generated consumer, including ordinality and heap/native RocksDB recovery.
 [Aggregate coverage](group-by.md#timestamp-and-interval-collection-elements) specifies the same
 source-hint, representation, state/order and writer gates. ARRAY_AGG is N/A on 1.18.
+
+### Preserved scalar-array expansion
+
+Nullable scalar arrays from verified collection-preserving Calcs and collection aggregates
+can feed Rust UNNEST while retaining their original array columns. This includes STRING/CHAR
+arrays, constructors, matching-container casts, map-value arrays and split results (SPLIT
+is absent from released Flink 1.18). The
+structural check admits scalar fields and verified scalar arrays without opening ROW/MAP/
+MULTISET-bearing producer rows or nested character arrays. The explicit JVM aggregate state
+route uses the same boundary. NOT NULL element arrays retain generated expansion and its
+released unchecked-getter behavior.
+
+A string's UTF-8/cache/copy-category carrier is a scalar despite its Arrow struct layout.
+Native fan-out takes it as one column, preserving Java UTF-16 caches, parent validity, array
+metadata, ordering and RowKinds. Native filters preserve those fields. Computed scalar Calcs
+can push unused whole columns into UNNEST's projection, avoiding repeated copies of discarded
+source arrays. Cached-string value consumers use the existing generated Calc/correlate when
+needed; direct projections and NULL checks remain native. This is not a claim that all string
+scalar expressions execute in Rust.
+
+Flink ARRAY construction serializes string elements through BinaryArrayWriter. The native
+constructor now uses the shared binary-element conversion too: caches become cold and the
+binary-array marker remains present even under NULL elements. Retaining a warm cache here
+can change comparisons between supplementary Unicode and BMP values after expansion.
+
+`FlinkStringCollectionSqlHarnessTest` checks retained arrays, aliases, character grouping keys,
+CROSS/LEFT expansion, predicates, ordinality, chained native/generated expansion, both aggregate
+state routes and repeated heap/RocksDB recovery. Runtime fixtures include NULLs, all RowKinds,
+wide payloads and malformed UTF-16. The large split case selects expanded elements without
+collecting a quadratic repeated copy of the whole source array. Existing state/order/writer
+guards and the deferred updating MAP/MULTISET extension in #437 remain unchanged.
+
+### Release comparison for preserved arrays (2026-10-28)
+
+The frozen previous revision is `37d8964f`; the candidate uses the same benchmark
+sources with a separate release/mimalloc DSO. JDK 17.0.20.1, parallelism one,
+8 GiB test heap, Intel i7-12650H and Linux x86-64 are shared. Each engine/revision
+has two warmups and three alternating measured trials. The 200 complete jobs
+include 80 warmups and 120 measured jobs. Timers retain execution-time planning,
+submission, runtime row sources, row blackhole sinks, production JNI, aggregate
+state where intrinsic and both transposes on admitted native paths. Cluster
+construction and the initial explain are outside timing. These short jobs remain
+startup-sensitive; no sustained-throughput or isolated-kernel gain is claimed.
+
+Cells show median seconds and [minimum–maximum]. Previous paired stock controls,
+every trial, sanitized Maven arguments, harness/native hashes and positive
+operator witnesses are retained in the
+[raw comparison](../benchmarks/results/preserved-scalar-array-expansion-2026-10-28.json).
+No competing Java/Rust build or test process was observed in the retained cohorts.
+
+ARRAY_AGG uses INT keys, eight logical values, a NULL every eighth input and
+STRING values with a Unicode prefix and 32 ASCII suffix bytes. The nullable
+cases require Rust UNNEST; the COALESCE/NOT NULL cases require generated UNNEST.
+Both also require consumed Rust aggregate records. Previous string queries fall
+back; the nullable BIGINT pipeline is an already-native control.
+
+| 2.2 workload | Rows / keys | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- | --- |
+| STRING / nullable | 5,000 / 64 | 0.429 [0.415–0.540] | 0.399 [0.393–0.429] | 0.157 [0.142–0.178] |
+| STRING / NOT NULL | 5,000 / 64 | 0.438 [0.413–0.469] | 0.423 [0.414–0.428] | 0.121 [0.120–0.128] |
+| BIGINT control | 5,000 / 64 | 0.135 [0.129–0.136] | 0.077 [0.075–0.090] | 0.078 [0.077–0.083] |
+| STRING / nullable | 50,000 / 4,096 | 0.414 [0.324–0.489] | 0.347 [0.325–0.462] | 0.219 [0.141–0.222] |
+| STRING / NOT NULL | 50,000 / 4,096 | 0.378 [0.378–0.380] | 0.347 [0.257–0.359] | 0.235 [0.194–0.362] |
+| BIGINT control | 50,000 / 4,096 | 0.166 [0.162–0.167] | 0.123 [0.111–0.128] | 0.115 [0.107–0.128] |
+
+All four STRING medians beat both stock and previous StreamFusion. Their ranges
+are below stock; three are also below previous StreamFusion, while the
+4,096-key NOT NULL case overlaps its previous range. The existing BIGINT control has overlapping
+previous/current ranges; no BIGINT improvement is attributed to this change.
+The initial 50,000-row/64-key fixture was stopped during its first stock warmup:
+a thread snapshot showed ArrayDataSerializer copying the retained full array
+for every expanded row. No timing from that oversized fixture is counted. All
+engines use 5,000 rows at 64 keys and 50,000 rows at 4,096 keys in the retained
+comparison; the production Flink path is unchanged.
+
+The Calc comparison casts runtime `ARRAY<STRING>` to `ARRAY<CHAR(8)>` and expands
+it, with 50,000 rows, widths 3/16, domain 16 and the same NULL/wide-string fixture
+on both lines. Candidate runs require consumed NativeCalc and Rust UNNEST
+records. Previous 2.2 uses its actual whole-query fallback; previous 1.18 requires
+its existing generated UNNEST and NativeCalc. Both native boundaries remain timed.
+
+| Flink / width | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- |
+| 2.2 / 3 | 0.179 [0.175–0.223] | 0.248 [0.218–0.250] | 0.220 [0.213–0.243] |
+| 2.2 / 16 | 0.450 [0.445–0.484] | 0.521 [0.451–0.525] | 0.404 [0.316–0.469] |
+| 1.18 / 3 | 0.155 [0.144–0.227] | 0.192 [0.168–0.238] | 0.248 [0.192–0.265] |
+| 1.18 / 16 | 0.439 [0.433–0.446] | 0.375 [0.357–0.436] | 0.322 [0.321–0.448] |
+
+The width-16 medians improve on both lines, but their ranges overlap stock and
+previous results. Width 3 remains slower than stock on both lines; its 1.18
+median also regresses against previous StreamFusion. This narrower case is
+accepted collection groundwork, not a blanket acceleration claim.
+
+The optimization timebox closes after exactly two eight-second CPU captures of
+the Calc workloads, one per width, following an unprofiled native warmup. Captures
+include all threads, JIT, repeated job setup and production processing; profiled
+jobs are excluded from the timing tables. Width 3 has 20,498 samples, including
+1,904 in NativeCalc scopes, 2,159 in row/Arrow conversion scopes, 598 in native
+UNNEST/take scopes and 13,859 in JIT scopes. Width 16 has 16,349 samples, with
+3,369 / 4,303 / 1,150 / 9,213 in those respective scopes. These inclusive counts
+overlap and do not measure copied bytes, allocations or isolated transition
+costs. Generated cast/materialization and perimeter conversion remain visible;
+the JIT-heavy captures do not establish the entire cause of the timing gap.
+Further tuning stays in [#392](https://github.com/datafusion-contrib/StreamFusion/issues/392)
+and generated-expression replacement work in
+[#505](https://github.com/datafusion-contrib/StreamFusion/issues/505).
+
+Correctness evidence includes the full 72-case 2.2 string suite before SPLIT test
+separation, four isolated SPLIT checks afterward, 719 broader 2.2 checks (including
+those four), and 24 passing / 52 explicit capability-N/A cases on 1.18. Eight
+focused Rust tests cover represented strings, constructor cache reset, NULLs,
+slices, ownership and an ordinary ROW control. The unchanged released COLLECT
+fixtures pass 7/6 cases and UNNEST passes four cases per line with positive
+native consumption contracts. Repeated heap/RocksDB checkpoint recovery remains
+part of the 2.2 string suite. SPLIT and ARRAY_AGG are explicitly N/A on 1.18.

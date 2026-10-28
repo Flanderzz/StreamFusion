@@ -474,6 +474,10 @@ final class RexExpression {
               : "ROW metadata requires Flink's whole-Calc evaluation";
       return new CalcEncoding(encoder, encoder.emitRowCalc(calc));
     }
+    if (CollectionValueIdentity.requiresStringCarrierEvaluation(calc)) {
+      encoder.jvmExecutionReason = "owned string carriers require generated scalar evaluation";
+      return new CalcEncoding(encoder, encoder.emitRowCalc(calc));
+    }
     boolean supported = encoder.emitCalc(calc);
     boolean metadataTypeMismatch = false;
     boolean representation = CollectionValueIdentity.requiresGeneratedEvaluation(calc.getProgram());
@@ -1132,7 +1136,8 @@ final class RexExpression {
     rowFusion = true;
     RexProgram program = calc.getProgram();
     preserveCollections =
-        (usesCollectionFunctions(program) || usesCollectionScalarUdf(program))
+        CollectionValueIdentity.requiresStringCarrierEvaluation(calc)
+            || (usesCollectionFunctions(program) || usesCollectionScalarUdf(program))
             && program.getExprList().stream()
                 .anyMatch(expression -> CollectionValueIdentity.sensitive(expression.getType()));
     List<RexNode> arguments = new ArrayList<>();

@@ -66,6 +66,10 @@ public class StreamPhysicalNativeUnnest extends StreamPhysicalNativeSingleRel
     this.projection = projection;
   }
 
+  boolean preservesCollections() {
+    return CollectionValueIdentity.scalarArrayProducer(getInput());
+  }
+
   @Override
   public boolean requireWatermark() {
     return false;

@@ -107,6 +107,8 @@ class DynamicCollectionBenchmark {
 
   private static String prepare(TableEnvironment table, String expression) {
     String select = "SELECT " + expression + " AS v, TRUE AS anchor FROM inputs";
+    if (Boolean.getBoolean("collection.expand"))
+      select = "SELECT x AS v,anchor FROM (" + select + ") s CROSS JOIN UNNEST(v) AS u(x)";
     String type =
         table
             .sqlQuery(select)
@@ -155,6 +157,9 @@ class DynamicCollectionBenchmark {
         if (EXPECT_NATIVE) {
           var observations = metrics.nativeOperators();
           RecoveryExecutionMetrics.assertConsumed(observations, "NativeCalc");
+          if (Boolean.getBoolean("collection.expand"))
+            RecoveryExecutionMetrics.assertConsumed(
+                observations, System.getProperty("collection.expansionOperator", "NativeUnnest"));
           System.out.println("[collection-route] " + observations);
         }
       }

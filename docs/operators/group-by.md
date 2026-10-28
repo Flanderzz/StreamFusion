@@ -2771,8 +2771,9 @@ profiles remain documented groundwork, not a universal acceleration claim.
 On Flink 2.2, NOT NULL-element ARRAY_AGG results over every verified scalar element family
 can feed the existing Arrow-input/Arrow-output generated UNNEST operator. The same structural
 producer check covers native collection state and the explicit legacy JVM aggregate handler:
-all input fields must be ordinary nonsensitive scalars or arrays whose element representation
-is nonsensitive. It adds no per-type list and retains the aggregate's generic array-copy
+all input fields must be verified scalars or scalar arrays without ROW/MAP/MULTISET payloads.
+Character fields use the preserved boundary linked below. It adds no per-type list and retains
+the aggregate's generic array-copy
 metadata through the existing generated argument frame. Nullable arrays retain ordinary Arrow
 UNNEST; mixed nullable/NOT NULL scalar arrays use the preserving consumer when necessary.
 
@@ -2786,9 +2787,10 @@ nonempty prefixes and require consumed group and generated-expansion work.
 
 This reuses the released Java correlate generator inside the columnar operator. Collection
 state remains native; expansion is JVM work and is not described as a Rust UNNEST kernel.
-ARRAY_AGG is N/A on 1.18. Character grouping keys, sensitive character/nested arrays,
-MAP/MULTISET-bearing input rows and unverified stateful/order and writer consumers retain
-fallback. This does not extend #437.
+ARRAY_AGG is N/A on 1.18. Character keys and scalar string arrays now use the
+[preserved expansion boundary](unnest-correlate.md#preserved-scalar-array-expansion).
+Nested character arrays, MAP/MULTISET-bearing input rows and unverified stateful/order and
+writer consumers retain fallback. This does not extend #437.
 
 
 The focused consolidated set passes 180 checks on Flink 2.2.1. Flink 1.18.1 passes 174 with
@@ -2893,8 +2895,8 @@ can depend on JVM object identities. A Rust lexical comparator would not reprodu
 This route retains Flink's signed counts, MapViews and fresh result copies; it is not Rust COLLECT.
 Mixed groups containing character COLLECT use this verified JVM route and its scalar-input limit.
 Character scalar coresults, richer aggregate elements, unverified state/order/native-writer
-consumers and updating retained MULTISET payloads remain guarded. This does not enable character
-array UNNEST consumers.
+consumers and updating retained MULTISET payloads remain guarded. Character arrays can feed the
+[preserved UNNEST boundary](unnest-correlate.md#preserved-scalar-array-expansion).
 
 Native ARRAY_AGG snapshots include the owned string payload and typed versioned envelope in the
 existing heap/RocksDB state store. Already emitted arrays own their buffers. Set

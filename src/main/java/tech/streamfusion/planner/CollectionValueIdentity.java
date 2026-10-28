@@ -192,8 +192,41 @@ final class CollectionValueIdentity {
         && call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);
   }
 
+  static boolean stringCarrierProducer(RelNode node) {
+    if (node instanceof StreamPhysicalNativeUnnest || node instanceof StreamPhysicalNativeFilter)
+      return stringCarrierProducer(node.getInput(0));
+    return node instanceof StreamPhysicalNativeCalc
+            && ((StreamPhysicalNativeCalc) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeJvmGroup
+            && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeGeneratedUnnest;
+  }
+
+  static boolean readsStringValue(RexNode expression) {
+    if (expression instanceof RexInputRef || expression instanceof RexFieldAccess)
+      return org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(expression.getType());
+    if (!(expression instanceof RexCall)) return false;
+    var call = (RexCall) expression;
+    if ((call.getKind() == SqlKind.IS_NULL || call.getKind() == SqlKind.IS_NOT_NULL)
+        && call.getOperands().size() == 1
+        && (call.getOperands().get(0) instanceof RexInputRef
+            || call.getOperands().get(0) instanceof RexFieldAccess)) return false;
+    return call.getOperands().stream().anyMatch(CollectionValueIdentity::readsStringValue);
+  }
+
+  static boolean requiresStringCarrierEvaluation(Calc calc) {
+    if (!stringCarrierProducer(calc.getInput())) return false;
+    var program = calc.getProgram();
+    return program.getProjectList().stream()
+            .map(program::expandLocalRef)
+            .anyMatch(value -> !(value instanceof RexInputRef) && readsStringValue(value))
+        || program.getCondition() != null
+            && readsStringValue(program.expandLocalRef(program.getCondition()));
+  }
+
   private static boolean unverifiedColumnarProducer(RelNode node) {
     if (!(node instanceof ColumnarOutput)) return false;
+    if (scalarArrayProducer(node)) return false;
     if (node instanceof StreamPhysicalRowDataToArrow)
       return !((StreamPhysicalRowDataToArrow) node).preservesCollections();
     if (node instanceof StreamPhysicalNativeGeneratedUnnest) return false;
@@ -259,6 +292,10 @@ final class CollectionValueIdentity {
   private static boolean preservingCollectionProducer(RelNode node) {
     return node instanceof StreamPhysicalNativeColumnarGroupAggregate
             && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeUnnest
+            && ((StreamPhysicalNativeUnnest) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeFilter
+            && ((StreamPhysicalNativeFilter) node).preservesCollections()
         || node instanceof StreamPhysicalNativeGeneratedUnnest
         || node instanceof StreamPhysicalNativeJvmGroup
             && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
@@ -267,7 +304,13 @@ final class CollectionValueIdentity {
   }
 
   static boolean scalarArrayProducer(RelNode node) {
-    return (node instanceof StreamPhysicalNativeColumnarGroupAggregate
+    return (node instanceof StreamPhysicalNativeUnnest
+                && ((StreamPhysicalNativeUnnest) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeFilter
+                && ((StreamPhysicalNativeFilter) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeCalc
+                && ((StreamPhysicalNativeCalc) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeColumnarGroupAggregate
                 && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
             || node instanceof StreamPhysicalNativeJvmGroup
                 && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults())
@@ -276,8 +319,11 @@ final class CollectionValueIdentity {
             .allMatch(
                 field ->
                     !sensitive(field.getType())
+                        || org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(
+                            field.getType())
                         || field.getType().getSqlTypeName() == SqlTypeName.ARRAY
-                            && !sensitive(field.getType().getComponentType()));
+                            && field.getType().getComponentType().getComponentType() == null
+                            && !requiresCopySemantics(field.getType().getComponentType()));
   }
 
   private static boolean verifiedCorrelate(

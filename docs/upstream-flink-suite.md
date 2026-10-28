@@ -1314,3 +1314,9 @@ contract still requires consumed native input. Flink 1.18 changelog-state varian
 explicit full fallback. DataStream `InputConversionOperator` is counted as source conversion
 only when its graph inputs lead directly to a verified source boundary. The same class
 inside computation remains host work; no native-work or local/global requirement is relaxed.
+
+The primitive-array and filtered object-array stream UNNEST fixtures now require
+positive input consumption by `NativeColumnarUnnestOperator` on both released
+lines, including the 1.18 state contract inventory. These unchanged upstream
+fixtures complement runtime-source regressions for preserved string carriers
+and collection aggregate recovery.

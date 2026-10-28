@@ -270,6 +270,216 @@ class FlinkStringCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
+  @CsvSource({
+    "STRING,false,1",
+    "STRING,true,1",
+    "CHAR(8),false,1",
+    "CHAR(8),true,1",
+    "STRING,false,3",
+    "STRING,true,3",
+    "CHAR(8),false,3",
+    "CHAR(8),true,3"
+  })
+  void scalarArrayExpansionPreservesOriginalValuesAndChanges(
+      String type, boolean nonNull, int parallelism) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    String argument = nonNull ? "COALESCE(v,CAST('fallback' AS " + type + "))" : "v";
+    String producer = "(SELECT k,ARRAY_AGG(" + argument + ") AS a FROM src GROUP BY k) s ";
+    String expansion = nonNull ? "NativeGeneratedUnnest" : "NativeUnnest";
+    for (String join :
+        List.of("CROSS JOIN UNNEST(a) AS u(x)", "LEFT JOIN UNNEST(a) AS u(x) ON TRUE"))
+      check(
+          "ARRAY_AGG",
+          () -> environment(type, parallelism),
+          "SELECT k,a,x FROM " + producer + join,
+          true,
+          "NativeColumnarGroupAggregate",
+          expansion);
+    check(
+        "ARRAY_AGG",
+        () -> environment(type, parallelism),
+        "SELECT k,a,x FROM " + producer + "CROSS JOIN UNNEST(a) AS u(x) WHERE x IS NOT NULL",
+        true,
+        "NativeColumnarGroupAggregate",
+        expansion);
+    if (tech.streamfusion.compat.FlinkTestCapabilities.UNNEST_ORDINALITY)
+      check(
+          "ARRAY_AGG",
+          () -> environment(type, parallelism),
+          "SELECT k,a,x,o FROM " + producer + "CROSS JOIN UNNEST(a) WITH ORDINALITY AS u(x,o)",
+          true,
+          "NativeColumnarGroupAggregate",
+          expansion);
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING,false", "STRING,true", "CHAR(8),false", "CHAR(8),true"})
+  void legacyArraysUseTheSameExpansionBoundary(String type, boolean nonNull) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    String property = "streamfusion.experimental.rustCollectionAggregates";
+    String previous = System.getProperty(property);
+    try {
+      System.setProperty(property, "false");
+      String argument = nonNull ? "COALESCE(v,CAST('fallback' AS " + type + "))" : "v";
+      check(
+          "ARRAY_AGG",
+          () -> environment(type, 3),
+          "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+              + argument
+              + ") AS a FROM src GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)",
+          true,
+          "NativeJvmGroup",
+          nonNull ? "NativeGeneratedUnnest" : "NativeUnnest");
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING,STRING", "STRING,CHAR(4)", "CHAR(8),STRING", "CHAR(8),CHAR(4)"})
+  void expansionKeepsCharacterKeysAndScalarConsumers(String type, String keyType) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    String key = "CAST(k AS " + keyType + ")";
+    String producer =
+        "(SELECT " + key + " AS k,ARRAY_AGG(v) AS a FROM src GROUP BY " + key + ") s ";
+    check(
+        "ARRAY_AGG",
+        () -> environment(type, 3),
+        "SELECT k,a,x,CHAR_LENGTH(x),CAST(a AS STRING) FROM "
+            + producer
+            + "CROSS JOIN UNNEST(a) AS u(x)",
+        true,
+        "NativeColumnarGroupAggregate",
+        "NativeUnnest",
+        "NativeCalc");
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING", "CHAR(8)"})
+  void mixedArrayExpansionRetainsBothNativeAndGeneratedStages(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    check(
+        "ARRAY_AGG",
+        () -> environment(type, 3),
+        "SELECT k,a,b,x,y FROM (SELECT k,ARRAY_AGG(v) AS a,ARRAY_AGG(COALESCE(v,CAST('fallback' AS "
+            + type
+            + "))) AS b FROM src WHERE v IN (CAST('' AS "
+            + type
+            + "),CAST('a' AS "
+            + type
+            + ")) GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)"
+            + " CROSS JOIN UNNEST(b) AS t(y)",
+        true,
+        "NativeColumnarGroupAggregate",
+        "NativeUnnest",
+        "NativeGeneratedUnnest");
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "STRING,false,hashmap",
+    "STRING,true,hashmap",
+    "CHAR(8),false,hashmap",
+    "CHAR(8),true,hashmap",
+    "STRING,false,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
+    "STRING,true,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
+    "CHAR(8),false,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
+    "CHAR(8),true,tech.streamfusion.state.RocksDBNativeStateBackendFactory"
+  })
+  void expandedArraysRecoverAcrossTwoNonemptyPrefixes(String type, boolean nonNull, String backend)
+      throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    try (var recovery =
+        new PortableSqlRecovery(
+                backend,
+                rows(),
+                Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, Types.STRING),
+                schema(),
+                true,
+                33,
+                132)
+            .withExecutionMetrics()) {
+      String argument = nonNull ? "COALESCE(v,CAST('fallback' AS " + type + "))" : "v";
+      String sql =
+          "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+              + argument
+              + ") AS a FROM src GROUP BY k) s LEFT JOIN UNNEST(a) AS u(x) ON TRUE";
+      var runs =
+          NativeFailureParity.runRecovery(
+              () -> recoveryInput(recovery.uninterrupted(), type),
+              () -> recoveryInput(recovery.get(), type),
+              sql);
+      runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+      assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+      assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
+      recovery.verifyRepeatedRecovery();
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), "NativeColumnarGroupAggregate");
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), nonNull ? "NativeGeneratedUnnest" : "NativeUnnest");
+      SharedFlinkCluster.assertNativeMemoryReleased("expanded-string-collection-recovery");
+    }
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING,1", "STRING,3", "CHAR(8),1", "CHAR(8),3"})
+  void preservedCalcArraysUseNativeExpansion(String type, int parallelism) {
+    String array = "ARRAY[v,CAST(NULL AS " + type + ")]";
+    for (String expression :
+        List.of(array, "CAST(" + array + " AS ARRAY<CHAR(4)>)", "MAP_VALUES(MAP['key',v])"))
+      check(
+          "COLLECT",
+          () -> environment(type, parallelism),
+          "SELECT k,a,x FROM (SELECT k,"
+              + expression
+              + " AS a FROM src) s CROSS JOIN UNNEST(a) AS u(x)",
+          true,
+          "NativeCalc",
+          "NativeUnnest");
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING,1", "STRING,3", "CHAR(8),1", "CHAR(8),3"})
+  void preservedSplitArraysUseNativeExpansion(String type, int parallelism) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("SPLIT");
+    check(
+        "COLLECT",
+        () -> environment(type, parallelism),
+        "SELECT k,x FROM (SELECT k,CAST(SPLIT(v,'') AS ARRAY<STRING>) AS a FROM src) s CROSS JOIN"
+            + " UNNEST(a) AS u(x)",
+        true,
+        "NativeCalc",
+        "NativeUnnest");
+  }
+
+  @ParameterizedTest
+  @CsvSource({"STRING", "CHAR(8)"})
+  void scalarConsumersReadExpandedStringCarriers(String type) {
+    String producer =
+        "(SELECT k,ARRAY[v,CAST(NULL AS "
+            + type
+            + ")] AS a FROM src) s CROSS JOIN UNNEST(a) AS u(x)";
+    check(
+        "COLLECT",
+        () -> environment(type, 1),
+        "SELECT k,x,COALESCE(x,CAST('fallback' AS "
+            + type
+            + ")),CHAR_LENGTH(x),CAST(x AS CHAR(4)) FROM "
+            + producer,
+        true,
+        "NativeCalc",
+        "NativeUnnest");
+    check(
+        "COLLECT",
+        () -> environment(type, 1),
+        "SELECT k,a,x FROM " + producer + " WHERE x<'\ue000'",
+        true,
+        "NativeCalc",
+        "NativeGeneratedUnnest");
+  }
+
+  @ParameterizedTest
   @CsvSource({"STRING", "CHAR(8)"})
   void typedCharacterLiteralsKeepPaddingInProjectionsAndSearchFilters(String type) {
     check(
@@ -315,7 +525,7 @@ class FlinkStringCollectionSqlHarnessTest {
       java.util.function.Supplier<TableEnvironment> factory,
       String sql,
       boolean keyed,
-      String expectedOperator) {
+      String... expectedOperators) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     var previous =
         METRICS.nativeOperators().stream()
@@ -326,11 +536,12 @@ class FlinkStringCollectionSqlHarnessTest {
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
     if (keyed) assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
     else assertEquals(runs.host().rows(), runs.nativeRun().rows());
-    RecoveryExecutionMetrics.assertConsumed(
+    var observations =
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
-            .collect(java.util.stream.Collectors.toList()),
-        expectedOperator);
+            .collect(java.util.stream.Collectors.toList());
+    for (String expectedOperator : expectedOperators)
+      RecoveryExecutionMetrics.assertConsumed(observations, expectedOperator);
   }
 
   private static java.util.Map<Object, List<List<Object>>> perKey(List<List<Object>> rows) {

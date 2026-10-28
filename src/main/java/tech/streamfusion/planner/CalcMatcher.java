@@ -105,6 +105,19 @@ final class CalcMatcher {
     }
     RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
     ctx.functionExecution("NativeCalc", encoded);
+    if (input instanceof StreamPhysicalNativeUnnest) {
+      var used = CalcProjectionPruner.wholeFields(calc, encoded);
+      if (used != null) {
+        int[] kept =
+            java.util.stream.IntStream.range(0, used.remap.length)
+                .filter(index -> used.remap[index] >= 0)
+                .toArray();
+        var projected =
+            ((StreamPhysicalNativeUnnest) input)
+                .withProjection(input.getTraitSet(), used.inputType, kept);
+        return new StreamPhysicalNativeCalc(calc, projected, encoded.remapInputs(used.remap));
+      }
+    }
     // Nested projection pushdown: when the input is rowwise (about to be transposed) and the calc
     // reads only some of its columns / struct sub-fields, prune the entry transpose to just those
     // and remap the calc's top-level column references to the compacted positions. The transpose

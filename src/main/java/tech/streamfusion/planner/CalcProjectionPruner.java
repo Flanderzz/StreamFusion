@@ -59,6 +59,10 @@ final class CalcProjectionPruner {
     return compute(calc, encoded.requiresWholeStructInputs(), encoded.referencedInputs());
   }
 
+  static Pruned wholeFields(Calc calc, RexExpression encoded) {
+    return compute(calc, true, encoded.referencedInputs());
+  }
+
   private static Pruned compute(
       Calc calc, boolean wholeStructInputs, Set<Integer> referencedInputs) {
     RexProgram program = calc.getProgram();

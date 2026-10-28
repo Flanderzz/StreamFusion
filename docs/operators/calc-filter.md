@@ -3469,6 +3469,16 @@ these are not counted as positive evidence for the new source boundary.
 retain the slower stock/previous/native results and production conversion costs under the
 accepted collection-extension tradeoff. Further standalone performance work stays in #392.
 
+### Scalar arrays across native expansion
+
+Verified collection-preserving Calc outputs can feed the
+[preserved scalar-array UNNEST boundary](unnest-correlate.md#preserved-scalar-array-expansion).
+Nullable STRING/CHAR arrays retain their Arrow representation through Rust fan-out and native
+NULL filters. Cache-sensitive scalar consumers use the existing generated evaluator, preserving
+UTF-16 behavior rather than treating a string carrier as a logical ROW or discarding its cache.
+Native ARRAY construction matches BinaryArrayWriter by clearing string caches and retaining its
+binary-copy marker under NULL elements. Unverified nested/state/writer boundaries remain guarded.
+
 ### Character search endpoints
 
 Native expansion of `IN` and `NOT IN` search predicates preserves the exact

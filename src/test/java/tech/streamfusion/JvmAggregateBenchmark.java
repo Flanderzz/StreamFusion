@@ -39,7 +39,8 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean expectedUdf = expectedAllNative || expectedNativeCases.contains(shape);
       boolean legacy = shape.startsWith("legacy_");
-      boolean expanded = shape.startsWith("expanded_");
+      boolean nullableExpanded = shape.startsWith("nullable_expanded_");
+      boolean expanded = nullableExpanded || shape.startsWith("expanded_");
       String collectionShape = collectionShape(shape);
       boolean stringElement =
           collectionShape.endsWith("_string") || collectionShape.endsWith("_char");
@@ -90,7 +91,8 @@ class JvmAggregateBenchmark {
                               : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       if (expanded) {
         assertTrue(arrayAgg, "Expansion requires an ARRAY_AGG case");
-        argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
+        if (!nullableExpanded)
+          argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
       }
       if (legacy && !collect && !arrayAgg)
         throw new IllegalArgumentException("Legacy collection case required: " + shape);
@@ -269,7 +271,8 @@ class JvmAggregateBenchmark {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
               if (expanded)
                 RecoveryExecutionMetrics.assertConsumed(
-                    metrics.nativeOperators(), "NativeGeneratedUnnest");
+                    metrics.nativeOperators(),
+                    nullableExpanded ? "NativeUnnest" : "NativeGeneratedUnnest");
               for (var observation : metrics.nativeOperators())
                 System.out.printf(
                     Locale.ROOT,
@@ -453,6 +456,8 @@ class JvmAggregateBenchmark {
   }
 
   private static String collectionZero(String shape) {
+    if (shape.endsWith("_string")) return "''";
+    if (shape.endsWith("_char")) return "CAST('' AS CHAR(8))";
     if (shape.contains("_timestamp") || shape.contains("_ltz"))
       return "CAST(TIMESTAMP '1970-01-01 00:00:00' AS "
           + declaredCollectionType(shape).getLogicalType().asSerializableString()
@@ -482,6 +487,8 @@ class JvmAggregateBenchmark {
   }
 
   private static String collectionShape(String shape) {
+    if (shape.startsWith("nullable_expanded_"))
+      return shape.substring("nullable_expanded_".length());
     return shape.startsWith("legacy_")
         ? shape.substring("legacy_".length())
         : shape.startsWith("expanded_") ? shape.substring("expanded_".length()) : shape;
