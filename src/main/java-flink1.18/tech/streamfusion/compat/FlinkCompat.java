@@ -214,4 +214,8 @@ public final class FlinkCompat {
     return org.apache.flink.table.planner.functions.casting.CastRule.Context.create(
         false, legacyBehaviour, java.time.ZoneId.of("UTC"), classLoader);
   }
+
+  public static boolean binaryCastPadsVariable(int sourceLength, int targetLength) {
+    return sourceLength > targetLength && targetLength < Integer.MAX_VALUE;
+  }
 }

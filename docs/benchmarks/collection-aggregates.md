@@ -974,3 +974,96 @@ The raw artifact retains category patterns, leaf counts and recording hashes. Re
 `profile.asprof=<async-profiler executable>` and `profile.outputDir=<recording directory>`.
 The two captures include all JVM/native threads, JIT and repeated complete-job setup. No
 stock jobs run in the profiled process, and no further optimization passes are claimed.
+
+## Binary collection elements
+
+Binary collections retain the released JVM handler inside the columnar island;
+these are not Rust value-equality accumulators. The shared native projection
+contract also passes collections through by reference beside unrelated numeric
+expressions. [Coverage and identity gates](../operators/group-by.md#binary-collection-elements)
+include the whole-stock boundary for COLLECT-to-character formatting and the
+unchanged retained-MULTISET restriction.
+
+The frozen previous revision is `ce38857f`. Both revisions use the same frozen
+release/mimalloc native library; the code change is Java planning/handler admission.
+Flink 1.18 padding composes existing native kernels, without a new JNI protocol.
+JDK 17.0.20.1, parallelism one, 8 GiB heap, Intel i7-12650H and Linux x86-64 are
+shared. Each engine/revision has two warmups and three alternating measured trials.
+Timers retain execution-time planning/submission, keyed managed state, row sources,
+row blackhole sinks, production JNI and both transposes on native paths. Previous
+queries use their actual whole-plan fallback. Cluster setup and the initial explain
+are outside timing. No competing Java/Rust process was observed in retained cohorts.
+
+Both initial bare-result and final projection matrices contain 240 complete jobs:
+480 total, with 192 warmups and 288 measured jobs. Initial queries emit the key and
+collection; final queries additionally emit `SUM(k)+1`, requiring the shared pure
+native projection. All admitted runs require consumed JVM group records; final
+runs also require consumed NativeCalc work. There are 5,000 rows/64 keys and
+50,000 rows/4,096 keys. Inputs contain eight byte payloads with NULL every eighth
+input; non-NULL arrays contain a value byte, ff/00 and 37 x bytes. Fixed BINARY(8)
+uses a cast of those same 40 bytes. Source rows create fresh byte arrays even when
+the payload contents match. ARRAY_AGG is explicitly N/A on 1.18.
+
+The table shows final-query median seconds and [minimum–maximum]. Every initial
+and final trial, previous paired stock control, sanitized Maven arguments, native
+witness, binary/source hash and exact initial-harness reconstruction is retained
+in the [raw report](results/binary-collection-elements-2026-10-28.json).
+
+| Flink / aggregate / type | Rows / keys | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- | --- |
+| 2.2 / COLLECT / VARBINARY | 5,000 / 64 | 0.196 [0.189–0.246] | 0.205 [0.193–0.213] | 0.214 [0.194–0.221] |
+| 2.2 / COLLECT / BINARY(8) | 5,000 / 64 | 0.158 [0.154–0.174] | 0.171 [0.159–0.180] | 0.172 [0.093–0.215] |
+| 2.2 / ARRAY_AGG / VARBINARY | 5,000 / 64 | 0.081 [0.077–0.180] | 0.076 [0.072–0.135] | 0.082 [0.077–0.157] |
+| 2.2 / ARRAY_AGG / BINARY(8) | 5,000 / 64 | 0.075 [0.075–0.084] | 0.074 [0.074–0.145] | 0.074 [0.068–0.079] |
+| 2.2 / COLLECT / VARBINARY | 50,000 / 4,096 | 0.288 [0.259–0.315] | 0.254 [0.249–0.295] | 0.286 [0.250–0.299] |
+| 2.2 / COLLECT / BINARY(8) | 50,000 / 4,096 | 0.260 [0.230–0.261] | 0.242 [0.230–0.283] | 0.239 [0.167–0.247] |
+| 2.2 / ARRAY_AGG / VARBINARY | 50,000 / 4,096 | 0.141 [0.129–0.192] | 0.124 [0.121–0.196] | 0.111 [0.105–0.126] |
+| 2.2 / ARRAY_AGG / BINARY(8) | 50,000 / 4,096 | 0.127 [0.115–0.129] | 0.127 [0.124–0.134] | 0.109 [0.105–0.113] |
+| 1.18 / COLLECT / VARBINARY | 5,000 / 64 | 0.191 [0.175–0.200] | 0.193 [0.191–0.231] | 0.217 [0.187–0.217] |
+| 1.18 / COLLECT / BINARY(8) | 5,000 / 64 | 0.159 [0.091–0.165] | 0.162 [0.147–0.174] | 0.096 [0.091–0.181] |
+| 1.18 / COLLECT / VARBINARY | 50,000 / 4,096 | 0.268 [0.247–0.320] | 0.278 [0.265–0.286] | 0.296 [0.259–0.305] |
+| 1.18 / COLLECT / BINARY(8) | 50,000 / 4,096 | 0.243 [0.241–0.258] | 0.154 [0.154–0.254] | 0.166 [0.161–0.274] |
+
+Results are mixed. At 50,000 rows the 2.2 ARRAY_AGG medians are 0.111/0.109 s
+versus 0.141/0.127 s stock for variable/fixed bytes. Small COLLECT jobs remain
+slower on 2.2, and variable-byte COLLECT remains slower on 1.18 at both sizes.
+Fixed-byte COLLECT improves the 1.18 paired medians. The ranges and previous stock
+controls expose startup/JIT drift; these short jobs do not establish sustained
+throughput or a blanket binary acceleration claim.
+
+The initial bare-result matrix is retained separately, not pooled with the final
+query. Most of its native medians lose to stock, including 2.2 fixed-byte COLLECT
+at 64 keys (0.170 s native / 0.094 s stock) and 1.18 variable-byte COLLECT at
+4,096 keys (0.251 / 0.158 s). No unfavorable initial cohort is discarded.
+
+The timebox closes after exactly two CPU captures, one per variable-byte aggregate
+on the initial bare-result query, following an unprofiled native warmup. Each has
+an eight-second target loop and finishes its current job. COLLECT has 24,295
+samples: 1,923 in JVM handler scopes, 967 in row/Arrow conversion, 698 in
+serialization and 17,536 in JIT. ARRAY_AGG has 23,178 samples, with
+1,297 / 718 / 639 / 16,768 in those respective scopes. Inclusive counts overlap;
+they do not measure copied bytes or isolated operator costs. Both include all
+threads, JIT and repeated job setup, and are excluded from elapsed-time tables.
+They do not isolate the final numeric projection. No extra captures or tuning
+passes follow. Remaining handler/state-emission and expression costs stay with
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239),
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392) and
+[#505](https://github.com/datafusion-contrib/StreamFusion/issues/505), under the
+accepted collection-groundwork tradeoff.
+
+The consolidated 2.2 suite passes 227 checks. On 1.18, 28 pass with 30 explicit
+capability skips. Cases include per-key ordered changes, duplicate byte-array keys,
+NULL/empty/wide bytes, fixed padding, FILTER, global/keyed and empty groups,
+binary grouping keys, numeric coresults, literal/shared byte-array inputs and
+heap/native RocksDB recovery across two nonempty prefixes. Source fixtures enable
+object reuse and use three-row batches. Negative checks retain binary DISTINCT
+and MIN/MAX planning errors, the MULTISET cardinality generator error and the
+formatting/retained-state boundaries. The unchanged released COLLECT variants pass
+7/6 cases with their native/fallback contracts; their existing scalar element types
+complement the binary-specific runtime-source evidence. Nineteen agent checks pass.
+
+Flink 1.18's padding makes the wide global result exceed the default 2 MiB result
+collector, so correctness fixtures give both engines a 16 MiB collector. Benchmark
+sinks remain blackholes. Initial failed assertions exhausted the reporter while
+printing the full wide changelog; final binary checks compare every ordered row
+and report the first difference compactly. Those failed runs are not timing data.

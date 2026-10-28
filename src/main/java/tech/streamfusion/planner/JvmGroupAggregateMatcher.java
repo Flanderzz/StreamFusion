@@ -16,6 +16,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
 final class JvmGroupAggregateMatcher {
   private static final Set<SqlTypeName> COLLECTION_ELEMENTS =
       Set.of(
+          SqlTypeName.BINARY,
+          SqlTypeName.VARBINARY,
           SqlTypeName.CHAR,
           SqlTypeName.VARCHAR,
           SqlTypeName.BOOLEAN,
@@ -175,7 +177,7 @@ final class JvmGroupAggregateMatcher {
 
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
     return "GROUP BY: JVM aggregates require verified scalar fields or verified COLLECT/ARRAY_AGG"
-               + " with verified character collections, non-character scalar coresults and"
+               + " with verified collection elements, non-character scalar coresults and"
                + " synchronous execution without mini-batching, specialization, approximate or"
                + " ordered calls";
   }

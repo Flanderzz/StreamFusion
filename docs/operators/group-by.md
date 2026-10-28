@@ -2915,3 +2915,40 @@ hints and two nonempty checkpoint recoveries with heap and native RocksDB state.
 inputs require a native plan and matching results without claiming consumed aggregate work.
 Release measurements and the bounded profiling record are retained in
 [collection benchmarks](../benchmarks/collection-aggregates.md#owned-string-collections).
+
+## Binary collection elements
+
+BINARY and VARBINARY elements use the released generated collection handler inside
+an Arrow-input/Arrow-output JVM group. This covers COLLECT on both supported Flink
+lines and ARRAY_AGG on 2.2. It does not route binary collections through the Rust
+value-equality codec: byte arrays use Java reference equality, and managed map state
+can distinguish equal payloads according to its backend. Duplicate byte-array keys,
+signed counts, NULL policies, retractions and state restore retain that handler.
+Fixed BINARY padding/truncation remains part of the resolved input type.
+
+The verified boundary includes scalar grouping keys (including binary keys), scalar
+numeric coresults, global/keyed groups, empty inputs, FILTER, parallelism one/three,
+object reuse, literal/reused byte arrays and repeated heap/native RocksDB recovery.
+Direct multiset comparisons retain every duplicate byte-array entry rather than
+collapsing keys by their normalized contents. ARRAY_AGG formatting and cardinality
+use the verified scalar consumer boundary. ARRAY_AGG is absent from Flink 1.18.
+Released binary DISTINCT aggregates and binary MIN/MAX keep their planning errors;
+CARDINALITY(MULTISET) retains the released generator error.
+
+COLLECT-to-character formatting, including nested binary multiset formatting, stays
+with the whole stock plan: byte-array identity affects HashMap iteration order, so
+an Arrow round trip cannot promise its character ordering. Inconsistent NOT NULL
+source materialization keeps the existing host boundary. Unverified retained state,
+ordering and writer consumers remain guarded; this does not extend #437.
+
+A pure native Calc can pass verified collection columns through by reference beside
+unrelated numeric expressions. It retains direct-column metadata and owned Arrow
+buffers, with no condition and no JVM calls; it does not construct or inspect the
+collection. This shared structural contract also applies to primitive and character
+collection results. Value-observing and generated consumers retain their existing
+representation requirements.
+
+`FlinkBinaryCollectionSqlHarnessTest` and the shared character projection regression
+require both released-result parity and consumed work in the intended operators.
+Release comparisons and the closed profiling timebox are recorded with the
+[collection aggregate measurements](../benchmarks/collection-aggregates.md#binary-collection-elements).

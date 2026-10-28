@@ -311,6 +311,10 @@ public final class NativeUdf {
       this.rowInputColumns = rowInputColumns == null ? null : rowInputColumns.clone();
     }
 
+    public boolean isEmpty() {
+      return descriptors.length == 0;
+    }
+
     int[] rowInputColumns() {
       return rowInputColumns == null ? null : rowInputColumns.clone();
     }

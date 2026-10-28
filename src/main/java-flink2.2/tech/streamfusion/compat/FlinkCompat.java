@@ -160,4 +160,8 @@ public final class FlinkCompat {
         new org.apache.flink.table.planner.codegen.CodeGeneratorContext(
             new org.apache.flink.configuration.Configuration(), classLoader));
   }
+
+  public static boolean binaryCastPadsVariable(int sourceLength, int targetLength) {
+    return false;
+  }
 }

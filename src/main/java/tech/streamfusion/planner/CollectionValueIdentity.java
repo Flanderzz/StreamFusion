@@ -36,6 +36,64 @@ final class CollectionValueIdentity {
         || type.getValueType() != null && requiresCopySemantics(type.getValueType());
   }
 
+  static boolean passesCollectionReferences(RelNode input, RexProgram program) {
+    if (!(input instanceof ColumnarOutput)
+        || program == null
+        || program.getCondition() != null
+        || unverifiedColumnarProducer(input)) return false;
+    return program.getProjectList().stream()
+        .map(program::expandLocalRef)
+        .allMatch(
+            value ->
+                value instanceof RexInputRef
+                    || !sensitive(value.getType()) && !readsSensitiveInput(value));
+  }
+
+  static boolean observesBinaryCollectOrder(RelNode node) {
+    if (node instanceof Calc && containsBinaryCollect(node.getInput(0))) {
+      var program = ((Calc) node).getProgram();
+      if (program.getProjectList().stream()
+              .map(program::expandLocalRef)
+              .anyMatch(CollectionValueIdentity::formatsBinaryMultiset)
+          || program.getCondition() != null
+              && formatsBinaryMultiset(program.expandLocalRef(program.getCondition()))) return true;
+    }
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::observesBinaryCollectOrder);
+  }
+
+  private static boolean containsBinaryCollect(RelNode node) {
+    if (node instanceof StreamPhysicalGroupAggregate) {
+      var aggregate = (StreamPhysicalGroupAggregate) node;
+      for (int i = 0; i < aggregate.aggCalls().size(); i++) {
+        var call = aggregate.aggCalls().apply(i);
+        if (call.getAggregation()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
+            && binaryMultiset(call.getType())) return true;
+      }
+    }
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::containsBinaryCollect);
+  }
+
+  private static boolean binaryMultiset(RelDataType type) {
+    if (type.getSqlTypeName() == SqlTypeName.MULTISET) {
+      var element = type.getComponentType().getSqlTypeName();
+      if (element == SqlTypeName.BINARY || element == SqlTypeName.VARBINARY) return true;
+    }
+    return type.getComponentType() != null && binaryMultiset(type.getComponentType())
+        || type.getKeyType() != null && binaryMultiset(type.getKeyType())
+        || type.getValueType() != null && binaryMultiset(type.getValueType())
+        || type.isStruct()
+            && type.getFieldList().stream().anyMatch(field -> binaryMultiset(field.getType()));
+  }
+
+  private static boolean formatsBinaryMultiset(RexNode expression) {
+    if (!(expression instanceof RexCall)) return false;
+    var call = (RexCall) expression;
+    return org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(call.getType())
+            && call.getOperands().stream().anyMatch(value -> binaryMultiset(value.getType()))
+        || call.getOperands().stream().anyMatch(CollectionValueIdentity::formatsBinaryMultiset);
+  }
+
   static boolean fixedBinary(RelDataType type) {
     return type.getSqlTypeName() == SqlTypeName.BINARY
         || type.getComponentType() != null && fixedBinary(type.getComponentType())
@@ -290,7 +348,9 @@ final class CollectionValueIdentity {
   }
 
   private static boolean preservingCollectionProducer(RelNode node) {
-    return node instanceof StreamPhysicalNativeColumnarGroupAggregate
+    return node instanceof StreamPhysicalNativeCalc
+            && ((StreamPhysicalNativeCalc) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeColumnarGroupAggregate
             && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
         || node instanceof StreamPhysicalNativeUnnest
             && ((StreamPhysicalNativeUnnest) node).preservesCollections()

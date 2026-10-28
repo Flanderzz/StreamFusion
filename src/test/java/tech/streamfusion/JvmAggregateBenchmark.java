@@ -44,8 +44,9 @@ class JvmAggregateBenchmark {
       String collectionShape = collectionShape(shape);
       boolean stringElement =
           collectionShape.endsWith("_string") || collectionShape.endsWith("_char");
+      boolean binaryElement = collectionShape.endsWith("_binary");
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
-          stringElement
+          binaryElement ? Types.PRIMITIVE_ARRAY(Types.BYTE) : stringElement
               ? Types.STRING
               : collectionShape.contains("_timestamp")
                   ? Types.LOCAL_DATE_TIME
@@ -71,6 +72,7 @@ class JvmAggregateBenchmark {
       boolean jvm = udf || collect || arrayAgg;
       String groupOperator =
           (collect || arrayAgg)
+                  && !binaryElement
                   && !(collect && stringElement)
                   && Boolean.parseBoolean(
                       System.getProperty(
@@ -78,7 +80,7 @@ class JvmAggregateBenchmark {
               ? "NativeColumnarGroupAggregate"
               : jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate";
       String argument =
-          collectionShape.endsWith("_char")
+          collectionShape.endsWith("_fixed_binary") ? "CAST(v AS BINARY(8))" : collectionShape.endsWith("_char")
               ? "CAST(v AS CHAR(8))"
               : collectionShape.equals("array_agg_not_null")
                   ? "COALESCE(v,CAST(0 AS BIGINT))"
@@ -106,6 +108,7 @@ class JvmAggregateBenchmark {
               + ")"
               + (expanded ? " AS a" : "")
               + (minTimestamp ? ",COUNT(*)" : "")
+              + (binaryElement ? ",(SUM(k)+1) AS score" : "")
               + " FROM src GROUP BY k";
       if (expanded) sql = "SELECT k,x FROM (" + sql + ") s CROSS JOIN UNNEST(a) AS u(x)";
       double[][] elapsed = new double[2][runs];
@@ -269,6 +272,8 @@ class JvmAggregateBenchmark {
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
+              if (binaryElement)
+                RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeCalc");
               if (expanded)
                 RecoveryExecutionMetrics.assertConsumed(
                     metrics.nativeOperators(),
@@ -333,6 +338,12 @@ class JvmAggregateBenchmark {
   private static Object inputValue(long row, int keys, int values, String shape) {
     Long value = value(row, keys, values);
     if (value == null) return null;
+    if (shape.endsWith("_binary")) {
+      byte[] bytes = new byte[40];
+      java.util.Arrays.fill(bytes, (byte) 0x78);
+      bytes[0] = value.byteValue(); bytes[1] = (byte) 0xff; bytes[2] = 0;
+      return bytes;
+    }
     if (shape.endsWith("_string") || shape.endsWith("_char"))
       return "v" + value + ":é🙂" + "x".repeat(32);
     if (shape.endsWith("_float") || shape.endsWith("_double")) {
@@ -404,6 +415,8 @@ class JvmAggregateBenchmark {
   private static boolean collectCase(String shape) {
     return java.util.Set.of(
             "collect",
+            "collect_binary",
+            "collect_fixed_binary",
             "collect_string",
             "collect_char",
             "collect_tinyint",
@@ -430,6 +443,8 @@ class JvmAggregateBenchmark {
   private static boolean arrayAggCase(String shape) {
     return java.util.Set.of(
             "array_agg",
+            "array_agg_binary",
+            "array_agg_fixed_binary",
             "array_agg_string",
             "array_agg_char",
             "array_agg_int",

@@ -3809,7 +3809,14 @@ final class RexExpression {
         return emitHostExpression(call, true);
       }
       int length = legacyCastBehaviour ? 0 : resultType.getPrecision();
-      add(KIND_BINARY_CAST, targetType == SqlTypeName.BINARY ? -length : length, 1);
+      boolean padVariable =
+          !legacyCastBehaviour
+              && targetType == SqlTypeName.VARBINARY
+              && SqlTypeFamily.BINARY.contains(sourceType)
+              && tech.streamfusion.compat.FlinkCompat.binaryCastPadsVariable(
+                  sourceType.getPrecision(), length);
+      if (padVariable) add(KIND_BINARY_CAST, 0, 1);
+      add(KIND_BINARY_CAST, targetType == SqlTypeName.BINARY || padVariable ? -length : length, 1);
       return emit(call.getOperands().get(0));
     }
     int sourceInteger = numericRank(source);

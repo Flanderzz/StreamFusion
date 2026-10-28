@@ -504,6 +504,14 @@ class FlinkStringCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
+  @ParameterizedTest
+  @CsvSource({"COLLECT,STRING", "COLLECT,CHAR(8)", "ARRAY_AGG,STRING", "ARRAY_AGG,CHAR(8)"})
+  void scalarProjectionsPassCollectionColumnsThroughNativeCalc(String function, String type) {
+    check(function, () -> environment(type, 3),
+        "SELECT k," + function + "(v),(SUM(k)+1),COUNT(*) FROM src GROUP BY k",
+        true, operator(function), "NativeCalc");
+  }
+
   private static TableEnvironment recoveryInput(TableEnvironment table, String type) {
     table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
     table.getConfig().set("streamfusion.transpose.batchRows", "3");

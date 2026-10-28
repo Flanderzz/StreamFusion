@@ -178,6 +178,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
+    if (CollectionValueIdentity.observesBinaryCollectOrder(root)) {
+      recordFallback("binary COLLECT formatting requires Flink's JVM key-identity order");
+      return root;
+    }
     if (JvmGroupAggregateMatcher.unverifiedCollectionInputMaterialization(root)) {
       recordFallback(
           "collection input materialization of NOT NULL hints requires Flink physical getters");

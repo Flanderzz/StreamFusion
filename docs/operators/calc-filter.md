@@ -1207,8 +1207,13 @@ The parser fast path does not establish a speedup for noncanonical formats or co
 CAST and TRY_CAST from STRING/VARCHAR/CHAR or BINARY/VARBINARY to BINARY/VARBINARY
 use a native byte-copy kernel when their operands do not require Flink's rowwise error handling.
 Default-mode BINARY(n) zero-pads or truncates
-raw bytes to exactly n bytes; VARBINARY(n) only truncates. Character inputs use their
-UTF-8 bytes, including embedded zeros and multibyte sequences cut at a byte boundary.
+raw bytes to exactly n bytes. VARBINARY(n) only truncates on Flink 2.2. Flink 1.18's
+binary-to-binary rule also pads a variable target when the declared input width is
+larger than that target. Native planning composes the existing padding kernel with
+its variable-binary output conversion to preserve that released behavior and the
+resolved VARBINARY type. Character-to-VARBINARY casts keep their truncation rule.
+Character inputs use their UTF-8 bytes, including embedded zeros and multibyte
+sequences cut at a byte boundary.
 NULLs and declared result types are preserved. Failures in the operand expression still
 propagate; CASE and filters suppress unselected failing expressions.
 
@@ -3486,3 +3491,13 @@ character endpoints stored by the released Flink planner, including the spaces
 in explicitly cast `CHAR` constants. This uses the same search normalization
 across filters, projections, UNNEST predicates and join conditions. It does not
 change string ordering admission or add unsupported comparison signatures.
+
+### Collection references beside native scalar expressions
+
+A pure native projection can pass a verified collection input column through beside
+unrelated scalar numeric expressions, retaining the input field metadata and Arrow
+buffers. The structural check requires a verified columnar producer, no condition,
+no JVM calls and direct references for sensitive fields. It does not widen generated
+collection evaluation or state/writer boundaries. Binary COLLECT formatting that
+observes JVM key-identity order retains the whole stock plan; see
+[binary collection elements](group-by.md#binary-collection-elements).

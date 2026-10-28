@@ -63,6 +63,10 @@ final class GroupAggregateMatcher {
                             || collectionArrayInput(field.getType()))
             || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
           return "GROUP BY: unverified native collection signature or context";
+        var collectionElement =
+            inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+        if (collectionElement == SqlTypeName.BINARY || collectionElement == SqlTypeName.VARBINARY)
+          return "GROUP BY: binary collections retain the JVM object-identity contract";
         if (collectionKind(call) <= 49
             && isStringType(
                 inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()))
