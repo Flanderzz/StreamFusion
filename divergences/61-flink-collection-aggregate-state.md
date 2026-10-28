@@ -67,3 +67,17 @@ component milliseconds, validity and schema metadata are retained through Arrow 
 the established Comet C Data transfer pattern. Without this boundary, compact COLLECT values/counts
 could match while subsequent formatted map iteration differed. This changes no key-group routing,
 checkpoint namespace or recovery protocol. Existing nested/state/writer guards and #437 remain.
+
+
+Owned string ARRAY_AGG reuses the same typed state with Arc<str> instead of copying the numeric
+algorithms. Inputs are detached from Arrow batches; outputs and checkpoints own their payloads.
+Comet's batch handoff/release pattern remains unchanged. Input and output representation
+requirements are separate: a preserved collection output does not force extended scalar string
+arguments through a preceding Calc.
+
+Character COLLECT deliberately remains on the generated JVM handler. BinaryStringData implements
+StringData, whose Comparable argument is StringData rather than BinaryStringData itself;
+HashMap collision-tree tie breaks can therefore use JVM object identity. Lexical Rust ordering
+would change an observable result-map contract. This extension admits verified character
+collection outputs without admitting unverified character scalar coresults or new state/writer
+consumers. The broader native arbitrary-value collection goal remains incomplete.

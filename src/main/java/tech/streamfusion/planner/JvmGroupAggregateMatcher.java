@@ -16,6 +16,8 @@ import org.apache.flink.table.planner.utils.ShortcutUtils;
 final class JvmGroupAggregateMatcher {
   private static final Set<SqlTypeName> COLLECTION_ELEMENTS =
       Set.of(
+          SqlTypeName.CHAR,
+          SqlTypeName.VARCHAR,
           SqlTypeName.BOOLEAN,
           SqlTypeName.TINYINT,
           SqlTypeName.SMALLINT,
@@ -147,11 +149,7 @@ final class JvmGroupAggregateMatcher {
       var call = node.aggCalls().apply(i);
       if (!JvmFunctionTypes.scalar(call.getType()) && !verifiedCollectionAggregate(node, call))
         return false;
-      if (verifiedCollectionAggregate(node, call)
-          && node.getRowType().getFieldList().stream()
-              .skip(node.grouping().length)
-              .anyMatch(field -> JsonStringIdentity.containsCharacter(field.getType())))
-        return false;
+      if (verifiedCollectionAggregate(node, call) && unverifiedCharacterResult(node)) return false;
       if (call.isApproximate() || !call.getCollation().getFieldCollations().isEmpty()) return false;
       var aggregation = call.getAggregation();
       if (aggregation instanceof AggSqlFunction && aggregation.getClass() != AggSqlFunction.class)
@@ -166,10 +164,20 @@ final class JvmGroupAggregateMatcher {
     return true;
   }
 
+  private static boolean unverifiedCharacterResult(StreamPhysicalGroupAggregate node) {
+    for (int i = 0; i < node.aggCalls().size(); i++) {
+      var call = node.aggCalls().apply(i);
+      if (JsonStringIdentity.containsCharacter(call.getType())
+          && !verifiedCollectionAggregate(node, call)) return true;
+    }
+    return false;
+  }
+
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
     return "GROUP BY: JVM aggregates require verified scalar fields or verified COLLECT/ARRAY_AGG"
-        + " with non-character aggregate results and synchronous single-phase execution without"
-        + " mini-batching, specialization, approximate or ordered calls";
+               + " with verified character collections, non-character scalar coresults and"
+               + " synchronous execution without mini-batching, specialization, approximate or"
+               + " ordered calls";
   }
 
   static RelNode substitute(StreamPhysicalGroupAggregate node, PlanContext context) {

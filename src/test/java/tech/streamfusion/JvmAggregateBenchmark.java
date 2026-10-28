@@ -41,24 +41,28 @@ class JvmAggregateBenchmark {
       boolean legacy = shape.startsWith("legacy_");
       boolean expanded = shape.startsWith("expanded_");
       String collectionShape = collectionShape(shape);
+      boolean stringElement =
+          collectionShape.endsWith("_string") || collectionShape.endsWith("_char");
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
-          collectionShape.contains("_timestamp")
-              ? Types.LOCAL_DATE_TIME
-              : collectionShape.contains("_ltz")
-                  ? Types.INSTANT
-                  : collectionShape.endsWith("_interval_month")
-                      ? Types.INT
-                      : collectionShape.endsWith("_date")
-                          ? Types.LOCAL_DATE
-                          : collectionShape.endsWith("_time")
-                              ? Types.LOCAL_TIME
-                              : collectionShape.endsWith("_float")
-                                  ? Types.FLOAT
-                                  : collectionShape.endsWith("_double")
-                                      ? Types.DOUBLE
-                                      : collectionShape.contains("_decimal")
-                                          ? Types.BIG_DEC
-                                          : Types.LONG;
+          stringElement
+              ? Types.STRING
+              : collectionShape.contains("_timestamp")
+                  ? Types.LOCAL_DATE_TIME
+                  : collectionShape.contains("_ltz")
+                      ? Types.INSTANT
+                      : collectionShape.endsWith("_interval_month")
+                          ? Types.INT
+                          : collectionShape.endsWith("_date")
+                              ? Types.LOCAL_DATE
+                              : collectionShape.endsWith("_time")
+                                  ? Types.LOCAL_TIME
+                                  : collectionShape.endsWith("_float")
+                                      ? Types.FLOAT
+                                      : collectionShape.endsWith("_double")
+                                          ? Types.DOUBLE
+                                          : collectionShape.contains("_decimal")
+                                              ? Types.BIG_DEC
+                                              : Types.LONG;
       boolean udf = shape.equals("udaf");
       boolean minTimestamp = shape.equals("min_timestamp3");
       boolean collect = collectCase(shape);
@@ -66,21 +70,24 @@ class JvmAggregateBenchmark {
       boolean jvm = udf || collect || arrayAgg;
       String groupOperator =
           (collect || arrayAgg)
+                  && !(collect && stringElement)
                   && Boolean.parseBoolean(
                       System.getProperty(
                           "streamfusion.experimental.rustCollectionAggregates", "true"))
               ? "NativeColumnarGroupAggregate"
               : jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate";
       String argument =
-          collectionShape.equals("array_agg_not_null")
-              ? "COALESCE(v,CAST(0 AS BIGINT))"
-              : collectionShape.endsWith("_boolean")
-                  ? "(v>3)"
-                  : collectionShape.endsWith("_tinyint")
-                      ? "CAST(v AS TINYINT)"
-                      : collectionShape.endsWith("_smallint")
-                          ? "CAST(v AS SMALLINT)"
-                          : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+          collectionShape.endsWith("_char")
+              ? "CAST(v AS CHAR(8))"
+              : collectionShape.equals("array_agg_not_null")
+                  ? "COALESCE(v,CAST(0 AS BIGINT))"
+                  : collectionShape.endsWith("_boolean")
+                      ? "(v>3)"
+                      : collectionShape.endsWith("_tinyint")
+                          ? "CAST(v AS TINYINT)"
+                          : collectionShape.endsWith("_smallint")
+                              ? "CAST(v AS SMALLINT)"
+                              : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       if (expanded) {
         assertTrue(arrayAgg, "Expansion requires an ARRAY_AGG case");
         argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
@@ -91,9 +98,7 @@ class JvmAggregateBenchmark {
           "SELECT k, "
               + (udf
                   ? "test_aggregate"
-                  : collect
-                      ? "COLLECT"
-                      : arrayAgg ? "ARRAY_AGG" : minTimestamp ? "MIN" : "SUM")
+                  : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : minTimestamp ? "MIN" : "SUM")
               + "("
               + argument
               + ")"
@@ -325,6 +330,8 @@ class JvmAggregateBenchmark {
   private static Object inputValue(long row, int keys, int values, String shape) {
     Long value = value(row, keys, values);
     if (value == null) return null;
+    if (shape.endsWith("_string") || shape.endsWith("_char"))
+      return "v" + value + ":é🙂" + "x".repeat(32);
     if (shape.endsWith("_float") || shape.endsWith("_double")) {
       double number = value == 0 ? -0.0 : value == 1 ? 0.0 : value - 1.5;
       return shape.endsWith("_float")
@@ -394,6 +401,8 @@ class JvmAggregateBenchmark {
   private static boolean collectCase(String shape) {
     return java.util.Set.of(
             "collect",
+            "collect_string",
+            "collect_char",
             "collect_tinyint",
             "collect_smallint",
             "collect_boolean",
@@ -418,6 +427,8 @@ class JvmAggregateBenchmark {
   private static boolean arrayAggCase(String shape) {
     return java.util.Set.of(
             "array_agg",
+            "array_agg_string",
+            "array_agg_char",
             "array_agg_int",
             "array_agg_tinyint",
             "array_agg_smallint",

@@ -29,7 +29,7 @@ impl CollectionElement for FloatElement {
             _ => unreachable!("floating collection scalar"),
         }
     }
-    fn hash(&self, value: FloatingKey) -> i32 {
+    fn hash(&self, value: &FloatingKey) -> i32 {
         let canonical = value.value.canonical();
         let hash = match self {
             Self::Float32 => (canonical as f32).to_bits(),
@@ -88,8 +88,8 @@ impl CollectionElement for DecimalElement {
         };
         *value
     }
-    fn hash(&self, value: i128) -> i32 {
-        super::super::decimal_map_order::decimal_hash(value, self.scale)
+    fn hash(&self, value: &i128) -> i32 {
+        super::super::decimal_map_order::decimal_hash(*value, self.scale)
     }
     fn array(&self, values: impl IntoIterator<Item = Option<i128>>, _: &DataType) -> ArrayRef {
         Arc::new(
@@ -121,7 +121,7 @@ impl CollectionElement for TimestampElement {
             _ => unreachable!("timestamp collection membership"),
         }
     }
-    fn hash(&self, value: i128) -> i32 {
+    fn hash(&self, value: &i128) -> i32 {
         let millis = value.div_euclid(1_000_000) as i64;
         let hash = (millis ^ (millis >> 32)) as u32;
         let hash = hash
@@ -140,5 +140,37 @@ impl CollectionElement for TimestampElement {
         ));
         streamfusion_bridge::timestamp::cast_timestamp(&array, ty)
             .expect("verified timestamp collection output")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum StringElement {
+    Utf8,
+}
+
+impl CollectionElement for StringElement {
+    type Value = Arc<str>;
+    const VARIABLE_SIZE: bool = true;
+    fn payload_bytes(value: &Arc<str>) -> usize {
+        value.len() + 2 * std::mem::size_of::<usize>()
+    }
+    fn from_type(ty: &DataType) -> Self {
+        assert_eq!(ty, &DataType::Utf8);
+        Self::Utf8
+    }
+    fn scalar(&self, value: Option<Arc<str>>) -> ScalarValue {
+        ScalarValue::Utf8(value.map(|value| value.to_string()))
+    }
+    fn value(&self, value: &ScalarValue) -> Option<Arc<str>> {
+        let ScalarValue::Utf8(value) = value else {
+            unreachable!("string collection membership")
+        };
+        value.as_deref().map(Arc::from)
+    }
+    fn hash(&self, value: &Arc<str>) -> i32 {
+        crate::flink_key::string_distinct_map_hash(Some(value), None)
+    }
+    fn array(&self, values: impl IntoIterator<Item = Option<Arc<str>>>, _: &DataType) -> ArrayRef {
+        Arc::new(values.into_iter().collect::<StringArray>())
     }
 }

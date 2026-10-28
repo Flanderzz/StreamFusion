@@ -63,6 +63,10 @@ final class GroupAggregateMatcher {
                             || collectionArrayInput(field.getType()))
             || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
           return "GROUP BY: unverified native collection signature or context";
+        if (collectionKind(call) <= 49
+            && isStringType(
+                inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()))
+          return "GROUP BY: character COLLECT retains the JVM map-identity contract";
         continue;
       }
       if (call.isApproximate()) {

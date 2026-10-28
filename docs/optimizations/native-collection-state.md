@@ -72,3 +72,23 @@ redundant buffer/field wrapper reconstruction from owned collection emission, wh
 target types continue through the existing conversion and range checks. The bounded timestamp
 investigation retains its before/after timings and two CPU captures with the aggregate benchmark
 results. This does not change the original primitive checkpoint envelope or ownership model.
+
+
+## Owned collection values
+
+Element codecs now require Clone rather than Copy. Primitive codecs retain their compact
+values and existing snapshot bytes; STRING/CHAR ARRAY_AGG uses Arc<str> to own each UTF-8
+payload independently of the input Arrow batch. Clones retain that payload across DISTINCT
+membership and output construction without pinning an entire input batch. Output StringArray
+buffers and serialized snapshots own their data. Arrow readers remain selected once per batch.
+
+The existing sequence, retraction and snapshot algorithms are shared with scalar codecs; there
+is no additional aggregate operator or JNI ownership protocol. The generic Java-map-order
+helper accepts cloned keys, although character COLLECT deliberately retains Flink's JVM handler
+because collision ties can depend on JVM object identity. Its route must not be described as
+Rust accumulation.
+
+Variable-size state accounting includes retained string payloads in active/pending sequences,
+DISTINCT membership and retained map-order nodes. It charges payload size plus Arc allocation
+headers per retained reference, conservatively counting shared payloads more than once. Fixed-size
+codecs avoid this payload traversal. This is retained-state accounting, not an allocation profile.

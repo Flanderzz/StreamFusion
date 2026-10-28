@@ -66,7 +66,11 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends StreamPhysicalNa
   }
 
   boolean preservesCollections() {
-    if (hasCollectionResults()) return true;
+    return hasCollectionResults() || requiresCollectionInputs();
+  }
+
+  boolean requiresCollectionInputs() {
+    if (hasCollectionResults()) return false;
     for (int i = 0; i < aggregateKinds.length; i++) {
       if (valueTypes[i] == 100
           && (aggregateKinds[i] == 7

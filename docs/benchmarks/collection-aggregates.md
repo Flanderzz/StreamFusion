@@ -888,3 +888,89 @@ Repeat with 4096 keys and with `array_agg`/50,000 rows on Flink 2.2. Add `flink-
 profile list for the 1.18 COLLECT comparison. Copy the identical benchmark source into the
 previous checkout, set `jvmagg.expectNative=false` and load the same release library. ARRAY_AGG
 is N/A on 1.18. Correctness/restore verification is separate from these timed jobs.
+
+## Owned string collections
+
+STRING/VARCHAR and CHAR collection elements extend the shared collection boundary. ARRAY_AGG
+on Flink 2.2 accumulates owned UTF-8 values in Rust; character COLLECT on both lines uses the
+existing generated JVM handler inside the columnar group. JVM object-identity collision ties
+prevent claiming that character COLLECT is Rust accumulation. This is coverage groundwork,
+subject to the accepted two-pass optimization timebox, rather than a universal acceleration claim.
+
+The release comparison uses the identical `JvmAggregateBenchmark` fixture at the previous
+commit `872687f35725869fce11c0a0af72103908701216` and the candidate. Both use optimized native
+builds with mimalloc and RocksDB support. STRING values are `v<value>:é🙂` followed by 32 ASCII
+`x` characters; CHAR(8) uses a SQL cast of the same source. Each complete job has 50,000 rows,
+64 or 4,096 INT keys, an eight-value per-key domain and NULL every eighth row. Each engine has
+two warmups and three alternating timed trials. The fixture retains planning/submission,
+rowwise source and blackhole sink, keyed state, JNI and both perimeter transposes, excluding
+cluster setup and the initial explain. Previous string cases remain whole-plan Flink fallback;
+previous native BIGINT ARRAY_AGG/COLLECT controls verify the shared backend independently.
+
+Correctness requires 38 passing checks on Flink 2.2 and 16 passing/22 unavailable-function
+skips on Flink 1.18. Existing primitive, character-key and array-input regressions pass 656
+checks on 2.2 and 247 with 409 capability skips on 1.18. Unchanged released COLLECT tests pass
+seven/six invocations with exact native/fallback contracts; only the fallback diagnostic text
+changes in the manifests. These upstream integer tests are regression evidence; the new string
+suite positively verifies Rust ARRAY_AGG and the JVM COLLECT route separately, including two
+nonempty heap/RocksDB recoveries.
+
+The comparison retains **320 complete jobs and 100 positive group witnesses**, with no
+competing Java/native compilation detected in its cohorts. Seconds are medians (min–max).
+Previous stock and previous StreamFusion controls are retained independently; apparent
+improvements between short jobs with overlapping ranges are not sustained-throughput claims.
+
+| Flink / shape | Keys | Previous stock | Previous StreamFusion | Current stock | Current StreamFusion |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2 / collect_string | 64 | 0.255555 (0.183160–0.267526) | 0.255062 (0.215379–0.265643) | 0.256177 (0.227903–0.294199) | 0.286318 (0.214592–0.288351) |
+| 2.2 / collect_char | 64 | 0.227915 (0.158396–0.230799) | 0.230908 (0.222120–0.239790) | 0.225828 (0.161506–0.266311) | 0.261873 (0.189744–0.264317) |
+| 2.2 / array_agg_string | 64 | 1.036930 (0.980573–1.075990) | 1.043200 (0.980509–1.060535) | 1.154967 (1.056040–1.165088) | 1.403289 (1.340063–1.439068) |
+| 2.2 / array_agg_char | 64 | 0.966864 (0.932827–1.035282) | 0.925242 (0.840796–0.977501) | 0.977956 (0.938954–0.999409) | 1.086809 (1.046757–1.107717) |
+| 2.2 / array_agg | 64 | 0.863246 (0.823310–0.873698) | 0.288823 (0.285065–0.292343) | 0.839750 (0.807894–0.840052) | 0.329603 (0.315933–0.331331) |
+| 2.2 / collect_string | 4096 | 0.292148 (0.291102–0.292640) | 0.247239 (0.193127–0.261667) | 0.296945 (0.276053–0.310246) | 0.301686 (0.292887–0.307357) |
+| 2.2 / collect_char | 4096 | 0.248638 (0.180463–0.253721) | 0.239114 (0.228935–0.255344) | 0.174250 (0.164161–0.244092) | 0.262833 (0.184091–0.274300) |
+| 2.2 / array_agg_string | 4096 | 0.140592 (0.137364–0.150310) | 0.129057 (0.123342–0.131810) | 0.154541 (0.133802–0.155131) | 0.140018 (0.128899–0.141874) |
+| 2.2 / array_agg_char | 4096 | 0.143365 (0.129758–0.164276) | 0.128420 (0.121408–0.131651) | 0.122926 (0.121658–0.124124) | 0.132284 (0.126754–0.146799) |
+| 2.2 / array_agg | 4096 | 0.099647 (0.095412–0.100666) | 0.110310 (0.107413–0.122472) | 0.100979 (0.095464–0.105412) | 0.110004 (0.101032–0.111236) |
+| 1.18 / collect_string | 64 | 0.214007 (0.186996–0.263845) | 0.275204 (0.185680–0.278105) | 0.294065 (0.255530–0.305684) | 0.213706 (0.213684–0.307122) |
+| 1.18 / collect_char | 64 | 0.152819 (0.145687–0.161516) | 0.197792 (0.170522–0.272955) | 0.174236 (0.160488–0.231148) | 0.211587 (0.175240–0.253124) |
+| 1.18 / collect | 64 | 0.133454 (0.132751–0.143245) | 0.157805 (0.148502–0.162804) | 0.144275 (0.139469–0.150246) | 0.147464 (0.147113–0.155306) |
+| 1.18 / collect_string | 4096 | 0.214821 (0.174703–0.281765) | 0.285327 (0.189554–0.313804) | 0.204875 (0.187483–0.279155) | 0.283906 (0.212533–0.324204) |
+| 1.18 / collect_char | 4096 | 0.176106 (0.153228–0.280113) | 0.179172 (0.171862–0.241693) | 0.187259 (0.176012–0.208528) | 0.189979 (0.189364–0.191800) |
+| 1.18 / collect | 4096 | 0.165758 (0.152124–0.166639) | 0.159594 (0.150405–0.171786) | 0.148774 (0.139262–0.155378) | 0.149585 (0.142427–0.153750) |
+
+At 64 keys on Flink 2.2, owned STRING ARRAY_AGG takes 1.403289 s versus paired stock's
+1.154967 s and previous StreamFusion's 1.043200 s. CHAR ARRAY_AGG also loses to stock.
+The BIGINT ARRAY_AGG control takes 0.329603 s versus paired stock's 0.839750 s, but loses
+to its previous native median of 0.288823 s. High-cardinality ranges and character COLLECT
+results vary; neither the native route nor the codec abstraction establishes a universal win.
+The accepted collection-groundwork tradeoff applies; remaining aggregate emission/state costs
+follow [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+[Raw trials, source/library hashes, portable commands and execution counters](results/owned-string-collections-2026-10-28.json)
+retain the complete comparison. Reproduce with `JvmAggregateBenchmark`, `jvmagg.cases` set to
+`collect_string,collect_char,array_agg_string,array_agg_char,array_agg` on Flink 2.2 or
+`collect_string,collect_char,collect` on Flink 1.18, `jvmagg.rows=50000`, `jvmagg.values=8`,
+`jvmagg.keys=64` or `4096`, `jvmagg.warmup=2`, `jvmagg.runs=3`, `jvmagg.expectCache=false`
+and `jvmagg.expectNative=true`, using the `bench` profile and a frozen release/mimalloc library.
+For previous checkouts use `jvmagg.expectNative=false` and `jvmagg.expectedNativeCases=array_agg`
+(2.2) or `collect` (1.18), keeping the new string cases as explicit fallback controls.
+
+Two native-only CPU captures close this increment's investigation. Each follows one unprofiled
+complete job and uses an eight-second target loop, stopping after the current job; both JFR
+summaries report eight seconds. STRING ARRAY_AGG has 11,005 samples, including 6,500 unique
+inclusive native-group samples, 3,914 row/Arrow and 3,012 JIT samples. Notable leaf counts are
+Arrow `VarCharVector.get` (1,173), Flink generic-array copying (759), native UTF-8 builder
+appends (708) and collection result emission (458). Character COLLECT has 24,156 samples:
+3,665 unique inclusive JVM-handler, 1,387 row/Arrow and 16,546 JIT. Categories overlap and
+include chained callers; these are not isolated-kernel timings or allocation/copy byte counts.
+They identify remaining result copying/materialization and generated-handler work without
+justifying further tuning in this bounded item. The optimization timebox is closed.
+
+The raw artifact retains category patterns, leaf counts and recording hashes. Reproduce with
+`SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, the same release/profile/settings above,
+`JvmAggregateBenchmark#profileArrayAgg` / `jvmagg.cases=array_agg_string` and
+`JvmAggregateBenchmark#profileCollect` / `jvmagg.cases=collect_string`, `jvmagg.seconds=8`,
+`profile.asprof=<async-profiler executable>` and `profile.outputDir=<recording directory>`.
+The two captures include all JVM/native threads, JIT and repeated complete-job setup. No
+stock jobs run in the profiled process, and no further optimization passes are claimed.
