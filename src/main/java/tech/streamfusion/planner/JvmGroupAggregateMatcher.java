@@ -132,6 +132,10 @@ final class JvmGroupAggregateMatcher {
   }
 
   static boolean matches(StreamPhysicalGroupAggregate node) {
+    return JvmFunctionTypes.scalarRow(node.getInput().getRowType()) && matchesContext(node);
+  }
+
+  static boolean matchesContext(StreamPhysicalGroupAggregate node) {
     var config = ShortcutUtils.unwrapTableConfig(node);
     if (config.get(
             org.apache.flink.table.api.config.ExecutionConfigOptions.TABLE_EXEC_MINIBATCH_ENABLED)
@@ -139,7 +143,6 @@ final class JvmGroupAggregateMatcher {
             org.apache.flink.configuration.ConfigOptions.key("table.exec.async-state.enabled")
                 .booleanType()
                 .defaultValue(false))) return false;
-    if (!JvmFunctionTypes.scalarRow(node.getInput().getRowType())) return false;
     for (int i = 0; i < node.aggCalls().size(); i++) {
       var call = node.aggCalls().apply(i);
       if (!JvmFunctionTypes.scalar(call.getType()) && !verifiedCollectionAggregate(node, call))

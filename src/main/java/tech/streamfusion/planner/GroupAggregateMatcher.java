@@ -55,7 +55,12 @@ final class GroupAggregateMatcher {
       if (collectionKind(call) >= 0) {
         if (!rustCollectionsEnabled()
             || !JvmGroupAggregateMatcher.enabledAggregate(agg)
-            || !JvmGroupAggregateMatcher.matches(agg)
+            || !JvmGroupAggregateMatcher.matchesContext(agg)
+            || !inputType.getFieldList().stream()
+                .allMatch(
+                    field ->
+                        JvmFunctionTypes.scalar(field.getType())
+                            || collectionArrayInput(field.getType()))
             || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
           return "GROUP BY: unverified native collection signature or context";
         continue;
@@ -180,6 +185,18 @@ final class GroupAggregateMatcher {
       }
     }
     return null;
+  }
+
+  private static boolean collectionArrayInput(RelDataType type) {
+    if (type.getSqlTypeName() != SqlTypeName.ARRAY || !type.getComponentType().isNullable())
+      return false;
+    RelDataType element = type.getComponentType();
+    return collectionArrayInput(element)
+        || isRunningType(element.getSqlTypeName())
+        || element.getSqlTypeName() == SqlTypeName.DECIMAL
+        || element.getSqlTypeName() == SqlTypeName.BOOLEAN
+        || element.getSqlTypeName() == SqlTypeName.DATE
+        || element.getSqlTypeName() == SqlTypeName.TIME;
   }
 
   static boolean orderedValueType(SqlTypeName type) {

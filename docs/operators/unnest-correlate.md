@@ -53,8 +53,9 @@ generated expansion. Generated collection Calc results and other generated expan
 inputs; DropUpdateBefore, mini-batch assignment and watermark assignment preserve that contract.
 On Flink 2.2, verified scalar ARRAY_AGG results with NOT NULL elements also use this preserving
 consumer, from either native collection state or the explicit legacy JVM handler. A structural
-check admits nonsensitive scalar fields and arrays of nonsensitive scalar elements together;
-character grouping keys, character/nested arrays and MAP/MULTISET-bearing producer rows retain
+check admits nonsensitive grouping fields and arrays of nonsensitive scalar elements together;
+the grouping fields include the [verified nullable-element array keys](group-by.md#collection-aggregate-array-inputs).
+Character grouping keys, character/nested aggregate element values and MAP/MULTISET-bearing producer rows retain
 their guards. Nullable
 scalar arrays keep ordinary Arrow UNNEST. The [collection aggregate boundary](group-by.md#scalar-array-results-through-generated-unnest)
 describes the exact routes, unchecked-NULL behavior, recovery and released submission failures.

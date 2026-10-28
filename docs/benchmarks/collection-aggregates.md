@@ -830,3 +830,61 @@ Reproduce using the complete-job command above with
 smokes. Prior new-type runs set `-Djvmagg.expectNative=false` and
 `-Djvmagg.expectedNativeCases=collect,min_timestamp3` (or `array_agg,min_timestamp3`) to retain
 native control assertions. Add the Flink 1.18 Maven profile for its COLLECT-only comparison.
+
+
+## Collection aggregate array inputs
+
+Native collection admission shares execution/aggregate-form checks with the JVM handler without
+inheriting its scalar-input limit. Verified nullable-element numeric/BOOLEAN/DATE/TIME arrays,
+including nested arrays, reuse the existing key encoding, columnar exchange, collection state
+and snapshots. This is a planner change; the benchmark uses the **same frozen release/mimalloc
+library** for candidate and actual previous code `a7a05128`. The previous planner must fall back
+with no native work. [Coverage](../operators/group-by.md#collection-aggregate-array-inputs)
+describes the exact input and consumer limits.
+
+The 2026-10-28 comparison uses Flink 2.2.1/1.18.1, OpenJDK 17.0.20.1, parallelism one, 8 GiB heap,
+64/4096 groups and identical source/blackhole resources. Keys are ARRAY<DOUBLE> containing
+`[double(row % keys), NULL]`. BIGINT values use eight seeds per key and a NULL every eighth row.
+COLLECT has 200,000 rows; ARRAY_AGG has 50,000. Each engine has two warmups and three alternating
+trials. Complete-job timing retains planning/submission, state, JNI and both row/Arrow transposes;
+cluster setup and initial explain remain outside timing. Local IPC caching stays disabled and
+accumulator caching is zero. No competing Java/native build, test or benchmark process was
+observed by the process monitor.
+
+[All 120 jobs, 30 consumed native group witnesses and paired controls](results/collection-array-inputs-2026-10-28.json)
+retain the exact benchmark source/library hashes, commands, trial arrays and ranges. Candidate
+native group witnesses account for every configured source record. Medians in seconds (min–max):
+
+| Flink / aggregate | Keys | Previous paired stock | Previous fallback | Candidate paired stock | Native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2 COLLECT | 64 | 0.346071 (0.339055–0.429422) | 0.410590 (0.399666–0.436610) | 0.424615 (0.423587–0.433719) | 0.439998 (0.434324–0.459862) |
+| 2.2 COLLECT | 4096 | 0.468079 (0.455963–0.524854) | 0.461275 (0.406322–0.499007) | 0.463717 (0.411232–0.493607) | 0.454986 (0.438612–0.465492) |
+| 2.2 ARRAY_AGG | 64 | 0.569019 (0.565962–0.652175) | 0.625992 (0.605744–0.682339) | 0.671464 (0.556638–0.674724) | 0.265601 (0.261984–0.277028) |
+| 2.2 ARRAY_AGG | 4096 | 0.190511 (0.104385–0.199529) | 0.167184 (0.102442–0.173684) | 0.192713 (0.183719–0.205197) | 0.124536 (0.107006–0.222133) |
+| 1.18 COLLECT | 64 | 0.401249 (0.400550–0.440985) | 0.371207 (0.332759–0.387747) | 0.426346 (0.329719–0.522692) | 0.441383 (0.412582–0.475752) |
+| 1.18 COLLECT | 4096 | 0.395199 (0.366182–0.517281) | 0.425412 (0.363912–0.437631) | 0.440229 (0.414496–0.443789) | 0.439441 (0.422337–0.469866) |
+
+At 64 keys, native ARRAY_AGG takes 0.265601 s versus paired stock's 0.671464 s (2.53×) and previous
+fallback's 0.625992 s. At 4096 keys the native/stock medians are 0.124536/0.192713 s (1.55×), but
+ranges overlap and the slowest native trial loses to stock; this is not sustained-throughput
+proof. COLLECT stays close to paired stock while the 64-key native medians lose to previous
+fallback on both lines. Those losses remain enabled under the accepted collection-coverage
+tradeoff. No new kernel optimization is claimed or attempted: the shared collection engine's
+existing two-capture investigations remain closed, with emission/state/perimeter costs tracked
+in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+Reproduce after building the release library:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=JvmAggregateBenchmark#completeJobsRetainKeyedStateAndBothTransposes' \
+  -Dsf.testForks=1 -Djvmagg.keyType=array_double -Djvmagg.cases=collect \
+  -Djvmagg.rows=200000 -Djvmagg.keys=64 -Djvmagg.values=8 \
+  -Djvmagg.warmup=2 -Djvmagg.runs=3 -Djvmagg.expectNative=true \
+  -Djvmagg.expectCache=false
+```
+
+Repeat with 4096 keys and with `array_agg`/50,000 rows on Flink 2.2. Add `flink-1.18` to the
+profile list for the 1.18 COLLECT comparison. Copy the identical benchmark source into the
+previous checkout, set `jvmagg.expectNative=false` and load the same release library. ARRAY_AGG
+is N/A on 1.18. Correctness/restore verification is separate from these timed jobs.

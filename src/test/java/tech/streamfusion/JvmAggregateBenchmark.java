@@ -117,6 +117,20 @@ class JvmAggregateBenchmark {
             var sequence = env.fromSequence(0, Math.max(0, rows - 1)).filter(i -> i < rows);
             org.apache.flink.streaming.api.datastream.DataStream<Row> source;
             switch (keyType) {
+              case "array_double":
+                source =
+                    sequence
+                        .map(
+                            i ->
+                                Row.of(
+                                    new Double[] {(double) (i % keys), null},
+                                    inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(
+                                new String[] {"k", "v"},
+                                Types.OBJECT_ARRAY(Types.DOUBLE),
+                                inputValueType));
+                break;
               case "string":
                 source =
                     sequence
