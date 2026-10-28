@@ -2526,9 +2526,11 @@ formats; automatic migration is not supported. Groups containing functions outsi
 aggregate matcher retain their verified JVM route. These switches do not broaden admission. Mini-batching, async state, approximate/ordered calls and unverified function
 specialization retain fallback. A COLLECT result may reach a final row sink or a verified
 collection-preserving Calc. Unverified state, ordering, exchange and native-writer boundaries
-retain the existing collection guards. Direct COLLECT with SUM/MIN/MAX/COUNT or AVG is native;
-when the host shares SUM/AVG/COUNT through an outer arithmetic projection that cannot preserve
-the MULTISET representation, the existing whole-plan fallback remains on both state routes.
+retain the existing collection guards. Direct COLLECT with SUM/MIN/MAX/COUNT or AVG is native.
+A shared AVG arithmetic projection also preserves the numeric COLLECT result on both the
+managed JVM and Rust collection routes: the transition pass upgrades any transpose already
+inserted by pruning to the consumer's preserving layout. The original COLLECT harness checks
+resolved types, per-key ordered changelogs and consumed group/projection work for this case.
 Updating retained MAP/MULTISET payloads remain deferred
 in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
