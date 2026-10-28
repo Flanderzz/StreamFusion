@@ -163,7 +163,7 @@ class FlinkBinaryCollectionSqlHarnessTest {
           NativePlanner.explain(table, "SELECT k,CAST(COLLECT(v) AS STRING) FROM src GROUP BY k");
       assertEquals(0, scan.substitutions(), plan);
       assertTrue(
-          plan.contains("binary COLLECT formatting requires Flink's JVM key-identity order"), plan);
+          plan.contains("COLLECT formatting over binary or nested elements requires Flink's JVM key order"), plan);
     } else {
       check(
           function,

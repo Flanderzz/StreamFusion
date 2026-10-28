@@ -49,49 +49,52 @@ final class CollectionValueIdentity {
                     || !sensitive(value.getType()) && !readsSensitiveInput(value));
   }
 
-  static boolean observesBinaryCollectOrder(RelNode node) {
-    if (node instanceof Calc && containsBinaryCollect(node.getInput(0))) {
+  static boolean observesCollectionKeyOrder(RelNode node) {
+    if (node instanceof Calc && containsIdentityCollect(node.getInput(0))) {
       var program = ((Calc) node).getProgram();
       if (program.getProjectList().stream()
               .map(program::expandLocalRef)
-              .anyMatch(CollectionValueIdentity::formatsBinaryMultiset)
+              .anyMatch(CollectionValueIdentity::formatsIdentityMultiset)
           || program.getCondition() != null
-              && formatsBinaryMultiset(program.expandLocalRef(program.getCondition()))) return true;
+              && formatsIdentityMultiset(program.expandLocalRef(program.getCondition())))
+        return true;
     }
-    return node.getInputs().stream().anyMatch(CollectionValueIdentity::observesBinaryCollectOrder);
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::observesCollectionKeyOrder);
   }
 
-  private static boolean containsBinaryCollect(RelNode node) {
+  private static boolean containsIdentityCollect(RelNode node) {
     if (node instanceof StreamPhysicalGroupAggregate) {
       var aggregate = (StreamPhysicalGroupAggregate) node;
       for (int i = 0; i < aggregate.aggCalls().size(); i++) {
         var call = aggregate.aggCalls().apply(i);
         if (call.getAggregation()
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
-            && binaryMultiset(call.getType())) return true;
+            && identityMultiset(call.getType())) return true;
       }
     }
-    return node.getInputs().stream().anyMatch(CollectionValueIdentity::containsBinaryCollect);
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::containsIdentityCollect);
   }
 
-  private static boolean binaryMultiset(RelDataType type) {
+  private static boolean identityMultiset(RelDataType type) {
     if (type.getSqlTypeName() == SqlTypeName.MULTISET) {
       var element = type.getComponentType().getSqlTypeName();
-      if (element == SqlTypeName.BINARY || element == SqlTypeName.VARBINARY) return true;
+      if (element == SqlTypeName.BINARY
+          || element == SqlTypeName.VARBINARY
+          || RexExpression.collectionAggregateElement(type.getComponentType())) return true;
     }
-    return type.getComponentType() != null && binaryMultiset(type.getComponentType())
-        || type.getKeyType() != null && binaryMultiset(type.getKeyType())
-        || type.getValueType() != null && binaryMultiset(type.getValueType())
+    return type.getComponentType() != null && identityMultiset(type.getComponentType())
+        || type.getKeyType() != null && identityMultiset(type.getKeyType())
+        || type.getValueType() != null && identityMultiset(type.getValueType())
         || type.isStruct()
-            && type.getFieldList().stream().anyMatch(field -> binaryMultiset(field.getType()));
+            && type.getFieldList().stream().anyMatch(field -> identityMultiset(field.getType()));
   }
 
-  private static boolean formatsBinaryMultiset(RexNode expression) {
+  private static boolean formatsIdentityMultiset(RexNode expression) {
     if (!(expression instanceof RexCall)) return false;
     var call = (RexCall) expression;
     return org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(call.getType())
-            && call.getOperands().stream().anyMatch(value -> binaryMultiset(value.getType()))
-        || call.getOperands().stream().anyMatch(CollectionValueIdentity::formatsBinaryMultiset);
+            && call.getOperands().stream().anyMatch(value -> identityMultiset(value.getType()))
+        || call.getOperands().stream().anyMatch(CollectionValueIdentity::formatsIdentityMultiset);
   }
 
   static boolean fixedBinary(RelDataType type) {
@@ -393,11 +396,11 @@ final class CollectionValueIdentity {
   }
 
   static boolean generatedCollectionCrossesBoundary(RelNode root, boolean finalOutput) {
-    return generatedCollectionCrossesBoundary(root, null, finalOutput);
+    return generatedCollectionCrossesBoundary(root, null, finalOutput, false);
   }
 
   private static boolean generatedCollectionCrossesBoundary(
-      RelNode node, RelNode parent, boolean finalOutput) {
+      RelNode node, RelNode parent, boolean finalOutput, boolean verifiedExchange) {
     if (preservingCollectionProducer(node)
         && node.getRowType().getFieldList().stream()
             .anyMatch(
@@ -408,10 +411,15 @@ final class CollectionValueIdentity {
         && !(parent instanceof StreamPhysicalSink)
         && !FlinkPlannerCompat.isLegacyRowSink(parent)
         && !preservingCollectionProducer(parent)
+        && !(parent instanceof StreamPhysicalNativeColumnarExchange && verifiedExchange)
         && !(parent instanceof StreamPhysicalNativeCalc
             && ((StreamPhysicalNativeCalc) parent).preservesCollections())) return true;
+    boolean next =
+        node instanceof StreamPhysicalNativeJvmGroup
+                && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
+            || node instanceof StreamPhysicalNativeColumnarExchange && verifiedExchange;
     return node.getInputs().stream()
-        .anyMatch(input -> generatedCollectionCrossesBoundary(input, node, false));
+        .anyMatch(input -> generatedCollectionCrossesBoundary(input, node, false, next));
   }
 
   static boolean crossesBoundary(RelNode root, boolean finalOutput) {
@@ -438,7 +446,11 @@ final class CollectionValueIdentity {
     }
     boolean next =
         node instanceof StreamPhysicalGroupAggregate
-                && GroupAggregateMatcher.preservesComplexValues((StreamPhysicalGroupAggregate) node)
+                && (GroupAggregateMatcher.preservesComplexValues(
+                        (StreamPhysicalGroupAggregate) node)
+                    || JvmGroupAggregateMatcher.hasNestedCollectionElements(
+                            (StreamPhysicalGroupAggregate) node)
+                        && JvmGroupAggregateMatcher.matches((StreamPhysicalGroupAggregate) node))
             || node instanceof StreamPhysicalLocalGroupAggregate
                 && LocalGroupAggregateMatcher.preservesComplexValues(
                     (StreamPhysicalLocalGroupAggregate) node)

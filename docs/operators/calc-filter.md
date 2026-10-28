@@ -3498,6 +3498,16 @@ A pure native projection can pass a verified collection input column through bes
 unrelated scalar numeric expressions, retaining the input field metadata and Arrow
 buffers. The structural check requires a verified columnar producer, no condition,
 no JVM calls and direct references for sensitive fields. It does not widen generated
-collection evaluation or state/writer boundaries. Binary COLLECT formatting that
-observes JVM key-identity order retains the whole stock plan; see
-[binary collection elements](group-by.md#binary-collection-elements).
+collection evaluation or state/writer boundaries. COLLECT formatting over binary or
+nested elements
+retains the whole stock plan because Java key order is observable; see
+[binary](group-by.md#binary-collection-elements) and
+[nested collection elements](group-by.md#nested-collection-elements).
+
+The verified exchange into a JVM collection group preserves supported nested input
+representations. This shares the generated-container schema and released value
+serializers with expression evaluation. It admits the documented MAP and MULTISET
+aggregate elements without widening unrelated stateful consumers or user-function
+argument contracts. ARRAY, ROW and STRUCTURED aggregate elements remain unverified;
+array support requires a container copy-class representation that also covers empty
+arrays.

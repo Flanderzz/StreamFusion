@@ -45,8 +45,13 @@ class JvmAggregateBenchmark {
       boolean stringElement =
           collectionShape.endsWith("_string") || collectionShape.endsWith("_char");
       boolean binaryElement = collectionShape.endsWith("_binary");
+      boolean nestedElement = collectionShape.contains("_nested_");
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
-          binaryElement ? Types.PRIMITIVE_ARRAY(Types.BYTE) : stringElement
+          collectionShape.endsWith("_nested_multiset")
+              ? org.apache.flink.table.runtime.typeutils.ExternalTypeInfo.of(
+                  org.apache.flink.table.api.DataTypes.MULTISET(org.apache.flink.table.api.DataTypes.STRING()))
+              : collectionShape.endsWith("_nested_map") ? Types.MAP(Types.STRING, Types.LONG)
+              : binaryElement ? Types.PRIMITIVE_ARRAY(Types.BYTE) : stringElement
               ? Types.STRING
               : collectionShape.contains("_timestamp")
                   ? Types.LOCAL_DATE_TIME
@@ -73,6 +78,7 @@ class JvmAggregateBenchmark {
       String groupOperator =
           (collect || arrayAgg)
                   && !binaryElement
+                  && !nestedElement
                   && !(collect && stringElement)
                   && Boolean.parseBoolean(
                       System.getProperty(
@@ -108,7 +114,7 @@ class JvmAggregateBenchmark {
               + ")"
               + (expanded ? " AS a" : "")
               + (minTimestamp ? ",COUNT(*)" : "")
-              + (binaryElement ? ",(SUM(k)+1) AS score" : "")
+              + (binaryElement || nestedElement ? ",(SUM(k)+1) AS score" : "")
               + " FROM src GROUP BY k";
       if (expanded) sql = "SELECT k,x FROM (" + sql + ") s CROSS JOIN UNNEST(a) AS u(x)";
       double[][] elapsed = new double[2][runs];
@@ -272,7 +278,7 @@ class JvmAggregateBenchmark {
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
-              if (binaryElement)
+              if (binaryElement || nestedElement)
                 RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeCalc");
               if (expanded)
                 RecoveryExecutionMetrics.assertConsumed(
@@ -338,6 +344,18 @@ class JvmAggregateBenchmark {
   private static Object inputValue(long row, int keys, int values, String shape) {
     Long value = value(row, keys, values);
     if (value == null) return null;
+    if (shape.endsWith("_nested_multiset")) {
+      var map = new java.util.LinkedHashMap<String, Integer>();
+      map.put("v" + value, value.intValue());
+      map.put(null, 3);
+      return map;
+    }
+    if (shape.endsWith("_nested_map")) {
+      var map = new java.util.LinkedHashMap<String, Long>();
+      map.put("v" + value, value);
+      map.put(null, null);
+      return map;
+    }
     if (shape.endsWith("_binary")) {
       byte[] bytes = new byte[40];
       java.util.Arrays.fill(bytes, (byte) 0x78);
@@ -415,6 +433,8 @@ class JvmAggregateBenchmark {
   private static boolean collectCase(String shape) {
     return java.util.Set.of(
             "collect",
+            "collect_nested_multiset",
+            "collect_nested_map",
             "collect_binary",
             "collect_fixed_binary",
             "collect_string",
@@ -443,6 +463,8 @@ class JvmAggregateBenchmark {
   private static boolean arrayAggCase(String shape) {
     return java.util.Set.of(
             "array_agg",
+            "array_agg_nested_multiset",
+            "array_agg_nested_map",
             "array_agg_binary",
             "array_agg_fixed_binary",
             "array_agg_string",

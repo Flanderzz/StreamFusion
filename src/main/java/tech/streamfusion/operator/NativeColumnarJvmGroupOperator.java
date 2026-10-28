@@ -82,7 +82,18 @@ public final class NativeColumnarJvmGroupOperator extends FlinkStreamOperator<Ar
                       && (element.getTypeRoot() == LogicalTypeRoot.DATE
                           || element.getTypeRoot() == LogicalTypeRoot.TIME_WITHOUT_TIME_ZONE);
                 });
-    outputSchema = ArrowConversion.toArrowSchema(outputType, temporalArrays);
+    boolean nestedCollections =
+        outputType.getChildren().stream()
+            .anyMatch(
+                type ->
+                    (type instanceof org.apache.flink.table.types.logical.ArrayType
+                            || type instanceof org.apache.flink.table.types.logical.MultisetType)
+                        && type.getChildren().stream()
+                            .anyMatch(
+                                element ->
+                                    element.is(LogicalTypeRoot.MAP)
+                                        || element.is(LogicalTypeRoot.MULTISET)));
+    outputSchema = ArrowConversion.toArrowSchema(outputType, temporalArrays || nestedCollections);
     collector =
         new Collector<RowData>() {
           @Override

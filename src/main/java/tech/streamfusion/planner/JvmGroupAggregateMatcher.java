@@ -70,7 +70,8 @@ final class JvmGroupAggregateMatcher {
 
   private static boolean collectionElement(org.apache.calcite.rel.type.RelDataType type) {
     var family = type.getSqlTypeName().getFamily();
-    return COLLECTION_ELEMENTS.contains(type.getSqlTypeName())
+    return RexExpression.collectionAggregateElement(type)
+        || COLLECTION_ELEMENTS.contains(type.getSqlTypeName())
         || family == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_YEAR_MONTH
         || family == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_DAY_TIME;
   }
@@ -135,8 +136,35 @@ final class JvmGroupAggregateMatcher {
     return definition instanceof AggregateFunction ? (AggregateFunction<?, ?>) definition : null;
   }
 
+  static boolean requiresCollectionInputs(org.apache.calcite.rel.type.RelDataType rowType) {
+    return rowType.getFieldList().stream()
+        .anyMatch(field -> RexExpression.collectionAggregateElement(field.getType()));
+  }
+
+  static boolean hasNestedCollectionElements(StreamPhysicalGroupAggregate node) {
+    for (int i = 0; i < node.aggCalls().size(); i++) {
+      var call = node.aggCalls().apply(i);
+      if (verifiedCollectionAggregate(node, call)
+          && RexExpression.collectionAggregateElement(call.getType().getComponentType()))
+        return true;
+    }
+    return false;
+  }
+
   static boolean matches(StreamPhysicalGroupAggregate node) {
-    return JvmFunctionTypes.scalarRow(node.getInput().getRowType()) && matchesContext(node);
+    for (int key : GroupAggregateMatcher.keyColumns(node))
+      if (!JvmFunctionTypes.scalar(node.getInput().getRowType().getFieldList().get(key).getType()))
+        return false;
+    boolean nestedCollection = hasNestedCollectionElements(node);
+    boolean input =
+        JvmFunctionTypes.scalarRow(node.getInput().getRowType())
+            || nestedCollection
+                && node.getInput().getRowType().getFieldList().stream()
+                    .allMatch(
+                        field ->
+                            JvmFunctionTypes.scalar(field.getType())
+                                || RexExpression.collectionAggregateElement(field.getType()));
+    return input && matchesContext(node);
   }
 
   static boolean matchesContext(StreamPhysicalGroupAggregate node) {
@@ -157,6 +185,13 @@ final class JvmGroupAggregateMatcher {
       if (aggregation instanceof AggSqlFunction && aggregation.getClass() != AggSqlFunction.class)
         return false;
       var function = userFunction(aggregation);
+      if (function != null
+          && call.getArgList().stream()
+              .anyMatch(
+                  index ->
+                      !JvmFunctionTypes.scalar(
+                          node.getInput().getRowType().getFieldList().get(index).getType())))
+        return false;
       if (function instanceof org.apache.flink.table.functions.python.PythonFunction
           || function instanceof SpecializedFunction) return false;
       if (aggregation instanceof BridgingSqlAggFunction
@@ -177,9 +212,9 @@ final class JvmGroupAggregateMatcher {
 
   static String unsupportedReason(StreamPhysicalGroupAggregate node) {
     return "GROUP BY: JVM aggregates require verified scalar fields or verified COLLECT/ARRAY_AGG"
-               + " with verified collection elements, non-character scalar coresults and"
-               + " synchronous execution without mini-batching, specialization, approximate or"
-               + " ordered calls";
+        + " with verified collection elements, non-character scalar coresults and"
+        + " synchronous execution without mini-batching, specialization, approximate or"
+        + " ordered calls";
   }
 
   static RelNode substitute(StreamPhysicalGroupAggregate node, PlanContext context) {

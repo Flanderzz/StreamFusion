@@ -178,8 +178,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
-    if (CollectionValueIdentity.observesBinaryCollectOrder(root)) {
-      recordFallback("binary COLLECT formatting requires Flink's JVM key-identity order");
+    if (CollectionValueIdentity.observesCollectionKeyOrder(root)) {
+      recordFallback("COLLECT formatting over binary or nested elements requires Flink's JVM key order");
       return root;
     }
     if (JvmGroupAggregateMatcher.unverifiedCollectionInputMaterialization(root)) {
@@ -883,6 +883,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         node instanceof StreamPhysicalNativeGeneratedUnnest
             || node instanceof StreamPhysicalNativeTableFunction
                 && ((StreamPhysicalNativeTableFunction) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeJvmGroup
+                && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
             || node instanceof StreamPhysicalNativeColumnarGroupAggregate
                 && ((StreamPhysicalNativeColumnarGroupAggregate) node).requiresCollectionInputs()
             || node instanceof StreamPhysicalNativeColumnarLocalGroupAggregate

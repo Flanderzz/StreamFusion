@@ -2893,8 +2893,9 @@ Character COLLECT uses the existing generated JVM aggregate inside the columnar 
 supported lines. BinaryStringData is not a self-comparable HashMap key, so collision-tree order
 can depend on JVM object identities. A Rust lexical comparator would not reproduce that contract.
 This route retains Flink's signed counts, MapViews and fresh result copies; it is not Rust COLLECT.
-Mixed groups containing character COLLECT use this verified JVM route and its scalar-input limit.
-Character scalar coresults, richer aggregate elements, unverified state/order/native-writer
+Mixed groups containing character COLLECT use this verified JVM route. Inputs may also include
+the verified nested collection elements described below.
+Character scalar coresults, aggregate elements outside the documented gates, unverified state/order/native-writer
 consumers and updating retained MULTISET payloads remain guarded. Character arrays can feed the
 [preserved UNNEST boundary](unnest-correlate.md#preserved-scalar-array-expansion).
 
@@ -2952,3 +2953,37 @@ representation requirements.
 require both released-result parity and consumed work in the intended operators.
 Release comparisons and the closed profiling timebox are recorded with the
 [collection aggregate measurements](../benchmarks/collection-aggregates.md#binary-collection-elements).
+
+
+## Nested collection elements
+
+COLLECT over MAP and MULTISET elements uses the released Flink generated handler
+inside the existing Arrow-input/Arrow-output JVM group on both supported lines.
+ARRAY_AGG admits the same elements on Flink 2.2; it is absent from 1.18. This reuses
+the recursive generated-container bridge and released serializers, rather than
+introducing separate native accumulators per container. Child types keep the existing
+generated-container gates, including version-specific fixed BINARY exclusions.
+
+The input transpose and exchange retain the preserving schema; collection outputs
+use the same representation on exit. Verified contexts include NULL parents,
+NULL map keys/values, multiset counts, malformed strings, direct generic/binary maps,
+object reuse, three-row batches, FILTER, scalar numeric coresults, global/keyed and
+empty groups, parallelism one/three and two nonempty checkpoint recoveries with
+managed heap/native RocksDB state. Grouping keys and user aggregate arguments retain
+the previous JVM handler's scalar gate. Existing Rust array grouping keys are unchanged.
+
+ARRAY, ROW and STRUCTURED aggregate elements remain stock. The prototype lost the
+binary/generic distinction for primitive arrays across recovery; its per-element
+carrier cannot record an empty array's copy class. External STRUCTURED COLLECT also
+differed after heap recovery on 1.18, including against a recovered stock control.
+Computed ROW COLLECT on 1.18 exposes a released planner type-inference assertion.
+These experiments do not establish a general row/array aggregate state contract.
+A shared container representation is required before those gates broaden.
+COLLECT-to-character formatting over nested elements stays with the whole stock
+plan because Java key order is observable. Retained Top-N/LIMIT, join and writer
+boundaries remain guarded; this does not extend deferred #437.
+
+`FlinkNestedCollectionSqlHarnessTest` requires released values, resolved types,
+per-key ordered changes and consumed JVM group work. Its recovery cases inject two
+failures after nonempty checkpoint prefixes. Release comparisons and the profiling
+timebox are recorded in [nested collection measurements](../benchmarks/collection-aggregates.md#nested-collection-elements).

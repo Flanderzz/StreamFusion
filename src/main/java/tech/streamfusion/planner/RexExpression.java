@@ -819,6 +819,12 @@ final class RexExpression {
     }
   }
 
+  static boolean collectionAggregateElement(RelDataType type) {
+    return tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled()
+        && java.util.Set.of(SqlTypeName.MAP, SqlTypeName.MULTISET).contains(type.getSqlTypeName())
+        && rowCalcTypeCode(type, true) >= 0;
+  }
+
   private static int rowCalcTypeCode(RelDataType type) {
     return rowCalcTypeCode(type, false);
   }

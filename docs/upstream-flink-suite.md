@@ -39,6 +39,14 @@ nonempty work from successful jobs.
 The agent records the JVM aggregate and table-function operators after successful Arrow-batch
 consumption, using the same consumed-row recorder as the other columnar operators.
 
+Focused MAP/MULTISET collection-aggregate fixtures additionally require released values,
+resolved types, per-key ordered changes and consumed JVM group work, including two
+nonempty checkpoint recoveries on heap/native RocksDB. They reuse the recursive
+preserving container bridge. The unchanged scalar COLLECT fixture below remains its
+own execution contract; it does not establish nested-element parity by itself. ARRAY,
+ROW and STRUCTURED aggregate elements keep the stock route after rejected representation
+prototypes; see [the nested-element gates](operators/group-by.md#nested-collection-elements).
+
 The unchanged SQL `AggregateITCase.testUnboundedGroupByCollect` now has explicit contracts
 and route scopes for all seven 2.2 and six 1.18 variants. Synchronous HEAP/ROCKSDB variants
 require consumed input in the Rust group aggregate itself, not merely a Calc; the local runs observe 21

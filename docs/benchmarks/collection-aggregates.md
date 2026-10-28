@@ -1067,3 +1067,92 @@ collector, so correctness fixtures give both engines a 16 MiB collector. Benchma
 sinks remain blackholes. Initial failed assertions exhausted the reporter while
 printing the full wide changelog; final binary checks compare every ordered row
 and report the first difference compactly. Those failed runs are not timing data.
+
+## Nested collection elements
+
+MAP and MULTISET elements share the existing recursive preserving Arrow bridge and
+released JVM aggregate handler. These are functionality-enabling JVM-state paths,
+not new Rust collection accumulators. [Coverage and state gates](../operators/group-by.md#nested-collection-elements)
+retain whole-stock fallback for ARRAY/ROW/STRUCTURED aggregate elements, nested
+COLLECT formatting and unverified retained consumers.
+
+The actual previous revision is `5b454fe4`; its queries use whole-plan stock fallback.
+Both revisions use the same frozen release/mimalloc library, released Flink artifacts,
+identical benchmark source and JDK 17.0.20.1. Each engine/revision receives two warmups
+and three alternating measured trials, parallelism one and an 8 GiB heap, on an Intel
+i7-12650H / Linux x86-64 host. The matrix contains 240 complete jobs: 96 warmups and
+144 measured jobs. No competing Java/Rust process was observed in retained cohorts.
+
+Queries return the key, collection and `SUM(k)+1`. Native trials require consumed work
+in the JVM group and the shared pure native projection. Timers retain execution-time
+planning/submission, managed keyed state, production JNI, row sources, blackhole row
+sinks and both perimeter transposes. Cluster setup and initial explain are outside
+timing. There are 5,000 rows/64 keys and 50,000 rows/4,096 keys, with eight values and
+a NULL container every eighth input. MAP values contain `v{value}` mapped to the BIGINT
+value plus a NULL key/value; STRING MULTISET values contain that key with the integer
+value as count and a NULL key with count three. ARRAY_AGG is N/A on Flink 1.18.
+
+Median seconds [minimum–maximum] follow. The [raw report](results/nested-collection-elements-2026-10-28.json)
+retains all trials, both revisions' stock controls, sanitized commands, native witnesses,
+source/library hashes, correctness results and the closed profiles.
+
+| Flink / aggregate / element | Rows / keys | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- | --- |
+| 2.2 / COLLECT / MULTISET | 5,000 / 64 | 0.184 [0.173–0.205] | 0.192 [0.154–0.198] | 0.215 [0.190–0.225] |
+| 2.2 / COLLECT / MAP | 5,000 / 64 | 0.149 [0.074–0.157] | 0.145 [0.077–0.166] | 0.100 [0.095–0.178] |
+| 2.2 / ARRAY_AGG / MULTISET | 5,000 / 64 | 0.095 [0.090–0.187] | 0.098 [0.088–0.162] | 0.197 [0.121–0.234] |
+| 2.2 / ARRAY_AGG / MAP | 5,000 / 64 | 0.094 [0.093–0.106] | 0.094 [0.088–0.121] | 0.126 [0.126–0.193] |
+| 2.2 / COLLECT / MULTISET | 50,000 / 4,096 | 0.295 [0.291–0.369] | 0.326 [0.308–0.335] | 0.424 [0.414–0.434] |
+| 2.2 / COLLECT / MAP | 50,000 / 4,096 | 0.285 [0.211–0.355] | 0.270 [0.217–0.306] | 0.276 [0.272–0.368] |
+| 2.2 / ARRAY_AGG / MULTISET | 50,000 / 4,096 | 0.162 [0.152–0.168] | 0.173 [0.168–0.233] | 0.297 [0.219–0.343] |
+| 2.2 / ARRAY_AGG / MAP | 50,000 / 4,096 | 0.169 [0.156–0.171] | 0.171 [0.164–0.171] | 0.232 [0.228–0.234] |
+| 1.18 / COLLECT / MULTISET | 5,000 / 64 | 0.172 [0.167–0.180] | 0.173 [0.156–0.192] | 0.204 [0.199–0.264] |
+| 1.18 / COLLECT / MAP | 5,000 / 64 | 0.147 [0.078–0.155] | 0.151 [0.078–0.157] | 0.174 [0.095–0.181] |
+| 1.18 / COLLECT / MULTISET | 50,000 / 4,096 | 0.310 [0.305–0.312] | 0.294 [0.290–0.326] | 0.391 [0.370–0.448] |
+| 1.18 / COLLECT / MAP | 50,000 / 4,096 | 0.220 [0.214–0.354] | 0.205 [0.201–0.216] | 0.295 [0.278–0.366] |
+
+Results are mixed. At 5,000 rows, MAP COLLECT on 2.2 measures 0.100 s versus
+0.149 s stock and 0.145 s previous SF. At 50,000 rows it measures 0.276 s versus
+0.285 s stock but 0.270 s previous SF. The larger ARRAY_AGG cases lose: MULTISET
+measures 0.297 s versus 0.162 s stock / 0.173 s previous, and MAP measures 0.232 s
+versus 0.169 / 0.171 s. Both 1.18 element families remain slower than their stock
+and previous controls at the larger size. The full ranges above show the limits
+of comparing these short jobs.
+
+These short jobs remain startup-sensitive. Slower cases ship under the accepted
+collection-groundwork tradeoff; the ranges and separate previous stock controls are
+retained rather than pooled. These measurements do not establish sustained throughput.
+
+Exactly two CPU captures close the profiling timebox: MAP COLLECT and MULTISET
+ARRAY_AGG on Flink 2.2, each with an eight-second target loop following one unprofiled
+native warmup job. Each capture finishes its current complete job. Inclusive sample
+counts overlap and include JIT, setup and production callbacks/conversions; they are
+not isolated operator timings or allocation-byte measurements.
+
+`collect_nested_map` contains 25,629 samples. Inclusive categories: native_group 0, jvm_handler 1,652, row_arrow 915, owned_string 0, allocation 221, serialization 748, jit 19,123.
+
+`array_agg_nested_multiset` contains 22,968 samples. Inclusive categories: native_group 0, jvm_handler 2,199, row_arrow 1,722, owned_string 0, allocation 216, serialization 1,173, jit 16,313.
+
+JIT dominates both all-thread captures (19,123 and 16,313 samples). Application
+scopes still contain the released handler, row/Arrow conversions and serializers;
+these captures do not isolate a sustained operator bottleneck or copied bytes.
+Replacing that state/emission boundary is separate work, not a per-type tuning fix.
+
+No extra captures or tuning passes follow. Remaining state/emission and expression
+costs stay with [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239),
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392) and native
+replacements in [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505).
+
+The final consolidated suites pass 293 checks on 2.2 and 181 on 1.18 with 112
+explicit capability skips. The current 2.2 nested fixture passes 34 checks, and the
+suite-agent package passes 56 checks with one skip. Documentation builds successfully.
+
+The consolidated suites verify the new gates beside existing binary, structured,
+array-key, legacy-consumer and planner contracts. The new MAP/MULTISET fixture
+requires values, resolved types, per-key ordered changes and actual JVM group
+consumption, including two nonempty checkpoint recoveries on heap/native RocksDB.
+Final ARRAY/ROW/STRUCTURED negative cases keep stock execution. The raw report
+records rejected row/array prototypes and excludes their failed or contaminated
+runs from successful evidence. The unchanged released COLLECT variants pass seven
+cases on 2.2 and six on 1.18 with exact native/fallback contracts; those scalar-input
+fixtures complement the new nested-element runtime sources.

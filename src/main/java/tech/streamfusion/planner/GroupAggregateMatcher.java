@@ -65,6 +65,9 @@ final class GroupAggregateMatcher {
           return "GROUP BY: unverified native collection signature or context";
         var collectionElement =
             inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+        if (RexExpression.collectionAggregateElement(
+                inputType.getFieldList().get(call.getArgList().get(0)).getType()))
+          return "GROUP BY: nested collections retain the released JVM value contract";
         if (collectionElement == SqlTypeName.BINARY || collectionElement == SqlTypeName.VARBINARY)
           return "GROUP BY: binary collections retain the JVM object-identity contract";
         if (collectionKind(call) <= 49
