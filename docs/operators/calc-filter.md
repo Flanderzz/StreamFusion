@@ -428,8 +428,9 @@ As with Flink's generated random fields, stream state belongs to the running ope
 not keyed checkpoint state.
 
 Floating-point unary negation also runs natively, including `-RAND(seed)`, and preserves signed
-zero, infinities, NaN and NULL. Integer and DECIMAL unary negation use Flink-generated
-expressions through the batch JVM bridge inside native Calc.
+zero, infinities, NaN and NULL. Verified integer and DECIMAL unary negation also runs in Rust;
+the [exact unary coverage](#exact-unary-and-integral-functions) describes the admitted producers
+and the composed expressions that retain Flink-generated evaluation inside native Calc.
 
 Release diagnostic on Apple M1 Max, JDK 17/Flink 2.2.1: two million rows, parallelism 1,
 two warmups and five interleaved trials, with rowwise source/sink and both transposes asserted:
@@ -1473,12 +1474,13 @@ and Java overflow behavior. Adjacent supported
 host expressions fuse before crossing the Arrow boundary. These are host-evaluated functions
 inside a columnar native Calc, not pure-Rust kernels.
 
-Known correctness gap [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536):
-STRING CAST of compact `DECIMAL(p,p)` SIGN can revalidate its intermediate precision and
-turn a nonzero sign into NULL. Confirmed endpoints are DECIMAL(1,1) and DECIMAL(18,18)
-on both released Flink lines. Direct SIGN agrees in those probes; noncompact
-DECIMAL(19,19)/(38,38) retain released Flink's NULL sign results for nonzero values.
-This representation-sensitive consumer boundary remains separate from JVM-free unary work.
+Compact `DECIMAL(p,p)` SIGN and its affected character CAST stay in one generated evaluator,
+preserving the intermediate sign before an Arrow boundary can revalidate its precision.
+This is the preserving boundary shipped in [#542](https://github.com/datafusion-contrib/StreamFusion/pull/542)
+for [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536), described under
+[SIGN](#sign). Noncompact DECIMAL(19,19)/(38,38) retain released Flink's NULL sign
+results for nonzero values. The native ABS/negation producer whitelist does not admit SIGN;
+its character-consumer fusion and rounding guards remain in force.
 
 DECIMAL FLOOR/CEIL/CEILING run inside verified scalar consumers using one fused generated
 expression, so the intermediate decimal does not cross Arrow before its consumer executes.

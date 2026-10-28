@@ -2,7 +2,6 @@ package tech.streamfusion.planner;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.Base64;
 import org.apache.calcite.rel.core.Project;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
@@ -27,7 +26,7 @@ public final class DecimalUnaryBenchmarkFunctions {
   private static RowData[] rows;
   private static int precision;
   private static int scale;
-  private static String schema;
+  private static int resultCode;
   private static volatile long consumed;
 
   private DecimalUnaryBenchmarkFunctions() {}
@@ -103,14 +102,26 @@ public final class DecimalUnaryBenchmarkFunctions {
         || !encoded.jvmFunctionCalls().isEmpty()) {
       throw new IllegalStateException("The candidate must use the exact decimal unary kernel");
     }
-    var function = function(precision, scale);
-    schema = Base64.getEncoder().encodeToString(function.arrowResultSchema().serializeAsMessage());
-    previousBinding = binding(function);
+    var function =
+        FlinkExpressionGenerator.generate(
+            project.getProjects().get(0),
+            new LogicalType[] {new DecimalType(precision, scale)},
+            org.apache.flink.table.api.TableConfig.getDefault(),
+            DecimalUnaryBenchmarkFunctions.class.getClassLoader());
+    resultCode = NativeUdf.decimalType(precision, scale);
+    // Match the preceding scalar evaluator, including both decimal marshalling boundaries.
+    var descriptor =
+        NativeUdf.Descriptor.forFunction(
+            function,
+            FlinkExpressionFunction.class.getMethod("eval", Object[].class),
+            new int[] {resultCode},
+            resultCode);
+    previousBinding = new NativeUdf.Binding(new NativeUdf.Descriptor[] {descriptor}, new int[] {0});
     return (int) open(previousBinding);
   }
 
-  public static String schema() {
-    return schema;
+  public static int resultCode() {
+    return resultCode;
   }
 
   public static void prepare(

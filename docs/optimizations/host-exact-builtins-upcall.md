@@ -32,6 +32,9 @@ and precision widening without a scale change. Other producers keep their comple
 expression. Decimal rounding metadata guards remain in force. This changes computation inside
 an existing native Calc, without a new switch, expression opcode, JNI contract or operator.
 See [release measurements and limitations](../benchmarks/scalar-functions.md#decimal-abs).
+The current previous-version control uses main's scalar generated callback and both decimal
+marshalling boundaries. It supersedes the earlier whole-row callback control, whose conversion
+costs differed from the emitted single-expression plan.
 
 ## Existing host-exact paths
 
@@ -92,6 +95,8 @@ keep one generated expression. Existing decimal-rounding metadata guards run fir
 This extends an existing expression kernel and introduces no opcode or configuration switch.
 The [release controls](../benchmarks/scalar-functions.md#decimal-unary-minus) retain both
 stock and preceding-callback measurements and the separate complete row-source job.
+The preceding prepared control uses the scalar callback emitted by main, rather than a
+whole-row evaluator; both decimal argument and result conversions remain timed.
 
 ## Canonical timestamp TRY_CAST
 

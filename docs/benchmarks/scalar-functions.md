@@ -3098,7 +3098,7 @@ failures. Unchanged released `testTruncate` fixtures pass on both lines.
 
 ## DECIMAL ABS
 
-Measured on 2026-10-27 against canonical main `0a50eb6d`, with released Flink 1.18.1
+Measured on 2026-10-28 against canonical main `d89e03b5`, with released Flink 1.18.1
 and 2.2.1, JDK 17, Apple M4 Pro, Rust 1.94.0 and a release/no-default-features native
 build with the system allocator. All core Java production sources and compatibility
 sources are compiled from the candidate with `--release 11`. This replaces generated
@@ -3107,7 +3107,9 @@ JVM computation inside an already-admitted Calc without changing operator/type a
 Stock executes the released generated expression over prepared GenericRowData or
 BinaryRowData. Previous and candidate execute production Calc over equal Arrow values,
 types and NULLs, with the timer inside Rust. Setup, Arrow import/export and perimeter
-transposes are excluded from this prepared control; intrinsic callback conversions,
+transposes are excluded from this prepared control. The previous control uses the scalar
+generated-expression callback emitted by main (kind 17), including decimal argument and
+result marshalling; the earlier whole-row callback control is superseded. Intrinsic conversions,
 result allocation and equivalent signum consumption remain timed. Full schema/Arrow
 output equality is checked before timing, and each measured output contributes to a
 checksum. Schemas are nullable; enabled NULL values occur every seventh row. Inputs
@@ -3117,35 +3119,35 @@ No other test or benchmark runs concurrently. Values are median [min, max] ns/ro
 
 | Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 6.999 [6.683, 9.982] | 51.433 [46.571, 82.561] | 1.258 [1.237, 1.321] | 5.56x | 40.88x |
-| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 6.840 [6.111, 31.068] | 48.946 [46.489, 52.455] | 1.605 [1.544, 1.682] | 4.26x | 30.49x |
-| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.241 [5.018, 5.601] | 811.111 [777.960, 879.637] | 24.335 [22.187, 25.181] | 0.22x | 33.33x |
-| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 22.458 [22.085, 45.926] | 87.018 [65.328, 106.229] | 1.395 [1.364, 1.424] | 16.10x | 62.38x |
-| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 7.376 [7.095, 7.837] | 86.992 [80.615, 106.179] | 1.577 [1.539, 1.675] | 4.68x | 55.17x |
-| 1.18.1, DECIMAL(19,3), true, binary, 16 | 18.825 [18.192, 19.711] | 841.094 [809.948, 917.178] | 24.288 [23.230, 24.736] | 0.78x | 34.63x |
-| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 27.994 [24.845, 47.763] | 84.139 [77.765, 109.237] | 1.294 [1.277, 1.324] | 21.64x | 65.03x |
-| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 7.742 [7.200, 8.252] | 86.301 [83.549, 119.431] | 1.590 [1.534, 1.637] | 4.87x | 54.27x |
-| 1.18.1, DECIMAL(38,18), true, binary, 16 | 19.275 [17.827, 23.701] | 849.901 [822.794, 986.167] | 24.734 [23.921, 25.794] | 0.78x | 34.36x |
-| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 23.764 [22.912, 65.653] | 72.179 [66.765, 108.659] | 1.275 [1.256, 1.369] | 18.63x | 56.59x |
-| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 7.651 [6.495, 8.954] | 93.436 [75.404, 118.264] | 1.557 [1.443, 2.118] | 4.91x | 60.01x |
-| 1.18.1, DECIMAL(38,38), true, binary, 16 | 17.735 [17.082, 20.808] | 804.437 [790.918, 923.601] | 23.179 [22.050, 24.551] | 0.77x | 34.71x |
-| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 9.137 [7.314, 11.366] | 76.472 [64.469, 105.654] | 1.255 [1.235, 1.362] | 7.28x | 60.93x |
-| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 6.777 [6.415, 7.343] | 66.946 [52.999, 96.308] | 1.562 [1.437, 1.647] | 4.34x | 42.86x |
-| 2.2.1, DECIMAL(18,3), true, binary, 16 | 6.252 [5.810, 10.085] | 773.706 [757.919, 875.036] | 24.270 [23.468, 26.094] | 0.26x | 31.88x |
-| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 23.278 [22.865, 43.941] | 90.485 [68.031, 114.300] | 1.291 [1.146, 1.418] | 18.03x | 70.07x |
-| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 8.425 [6.598, 10.941] | 99.064 [77.416, 127.273] | 1.409 [1.348, 1.845] | 5.98x | 70.31x |
-| 2.2.1, DECIMAL(19,3), true, binary, 16 | 18.728 [18.190, 19.149] | 782.616 [768.067, 933.173] | 23.980 [23.219, 24.581] | 0.78x | 32.64x |
-| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 25.021 [23.016, 44.846] | 89.241 [76.305, 113.938] | 1.238 [1.113, 1.456] | 20.21x | 72.09x |
-| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 8.507 [7.356, 33.042] | 85.574 [82.726, 112.462] | 1.588 [1.499, 1.705] | 5.36x | 53.90x |
-| 2.2.1, DECIMAL(38,18), true, binary, 16 | 19.234 [19.006, 26.149] | 798.875 [793.021, 887.377] | 22.866 [21.667, 23.776] | 0.84x | 34.94x |
-| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 24.870 [24.239, 49.046] | 83.829 [74.181, 108.456] | 1.266 [1.211, 1.301] | 19.64x | 66.19x |
-| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 7.617 [6.921, 31.092] | 82.331 [71.508, 103.600] | 1.576 [1.453, 1.719] | 4.83x | 52.24x |
-| 2.2.1, DECIMAL(38,38), true, binary, 16 | 18.785 [18.207, 24.633] | 808.037 [781.120, 856.926] | 23.642 [23.181, 24.815] | 0.79x | 34.18x |
+| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 6.771 [6.255, 33.129] | 38.748 [31.810, 46.170] | 1.277 [1.254, 1.657] | 5.30x | 30.34x |
+| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 6.641 [5.821, 31.708] | 46.051 [41.422, 67.759] | 1.778 [1.691, 1.986] | 3.74x | 25.91x |
+| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.556 [4.824, 8.092] | 596.312 [564.630, 711.404] | 25.133 [23.392, 26.421] | 0.22x | 23.73x |
+| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 31.134 [23.839, 47.973] | 66.718 [48.780, 139.852] | 1.256 [1.146, 1.330] | 24.78x | 53.11x |
+| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 8.194 [7.320, 9.511] | 96.540 [75.018, 127.890] | 1.782 [1.696, 1.970] | 4.60x | 54.17x |
+| 1.18.1, DECIMAL(19,3), true, binary, 16 | 18.159 [17.847, 23.510] | 685.521 [571.056, 760.549] | 23.739 [22.762, 24.487] | 0.76x | 28.88x |
+| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 25.438 [22.809, 48.136] | 58.722 [44.867, 91.820] | 1.297 [1.263, 1.371] | 19.61x | 45.27x |
+| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 8.318 [7.112, 30.991] | 89.708 [78.290, 132.299] | 1.781 [1.743, 2.115] | 4.67x | 50.37x |
+| 1.18.1, DECIMAL(38,18), true, binary, 16 | 18.058 [16.403, 22.636] | 594.976 [570.112, 623.375] | 24.618 [24.240, 25.860] | 0.73x | 24.17x |
+| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 27.431 [24.631, 49.947] | 66.619 [46.130, 134.900] | 1.331 [1.214, 1.488] | 20.60x | 50.04x |
+| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 7.809 [6.671, 30.333] | 94.542 [83.144, 120.974] | 1.834 [1.743, 4.465] | 4.26x | 51.56x |
+| 1.18.1, DECIMAL(38,38), true, binary, 16 | 19.852 [17.552, 23.687] | 624.911 [583.037, 760.024] | 24.169 [23.059, 28.229] | 0.82x | 25.86x |
+| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 8.650 [6.227, 34.993] | 53.272 [44.177, 86.080] | 1.297 [1.142, 1.580] | 6.67x | 41.07x |
+| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 7.817 [6.538, 14.962] | 64.180 [36.743, 212.652] | 2.127 [1.836, 3.219] | 3.67x | 30.17x |
+| 2.2.1, DECIMAL(18,3), true, binary, 16 | 5.786 [4.878, 8.431] | 596.074 [567.899, 718.964] | 22.915 [22.058, 24.011] | 0.25x | 26.01x |
+| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 26.063 [24.449, 52.284] | 66.973 [49.121, 126.535] | 1.317 [1.204, 1.621] | 19.79x | 50.86x |
+| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 8.820 [7.537, 10.936] | 93.368 [72.261, 150.984] | 1.766 [1.605, 2.389] | 4.99x | 52.86x |
+| 2.2.1, DECIMAL(19,3), true, binary, 16 | 19.715 [18.974, 20.285] | 596.653 [570.852, 694.953] | 24.459 [23.104, 25.412] | 0.81x | 24.39x |
+| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 25.969 [25.345, 49.030] | 71.037 [49.401, 127.594] | 1.300 [1.154, 1.346] | 19.97x | 54.64x |
+| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 7.465 [7.186, 34.662] | 75.359 [47.146, 168.208] | 1.760 [1.705, 2.176] | 4.24x | 42.81x |
+| 2.2.1, DECIMAL(38,18), true, binary, 16 | 19.304 [17.955, 27.007] | 581.214 [573.262, 902.620] | 24.179 [23.502, 26.571] | 0.80x | 24.04x |
+| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 23.404 [22.887, 24.978] | 66.765 [54.471, 96.620] | 1.295 [1.149, 1.497] | 18.07x | 51.55x |
+| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 7.948 [7.013, 10.184] | 66.031 [48.108, 108.056] | 1.802 [1.633, 1.963] | 4.41x | 36.65x |
+| 2.2.1, DECIMAL(38,38), true, binary, 16 | 18.920 [17.187, 22.478] | 587.500 [567.618, 703.150] | 26.159 [24.940, 27.522] | 0.72x | 22.46x |
 
-At 1,024 rows the candidate is 4.26-21.64x faster than stock and
-30.49-72.09x faster than the preceding callback. Sixteen-row
-controls still lose to stock (0.22-0.84x), while improving the previous
-native-Calc route by 31.88-34.94x. These are sampled prepared-batch
+At 1,024 rows the candidate is 3.67-24.78x faster than stock and
+25.91-54.64x faster than the preceding callback. Sixteen-row
+controls still lose to stock (0.22-0.82x), while improving the previous
+native-Calc route by 22.46-28.88x. These are sampled prepared-batch
 gains; they do not establish universal small-batch acceleration. The nullable 1,024-row
 allocation probe records 20 allocations / 17,575 requested bytes, with 16,384 new value
 bytes and 128 shared validity bytes. Generic Calc/batch/result handling retains fixed
@@ -3155,22 +3157,22 @@ row/Arrow perimeter work stays in
 
 The independent complete job uses 1M DECIMAL(18,3) rows, parallelism one, a bounded
 row source, both transposes and a rowwise blackhole sink. The previous control loads
-the actual `0a50eb6d` encoder ahead of candidate classes and requires its JVM route;
+the actual `d89e03b5` encoder ahead of candidate classes and requires its JVM route;
 candidate requires `jvm=[]`. Both require positive consumed NativeCalc work.
 Each engine runs two warmups and five measured jobs in separate sequential JVMs.
 Seconds are median [min, max]:
 
 | Stock | Previous callback | Candidate |
 | ---: | ---: | ---: |
-| 0.134643 [0.129124, 0.142621] | 0.176163 [0.161797, 0.182178] | 0.149970 [0.143669, 0.161182] |
+| 0.138626 [0.123898, 0.143039] | 0.183183 [0.176360, 0.212639] | 0.139391 [0.137642, 0.155442] |
 
 The complete candidate improves previous StreamFusion by
-14.9% but remains
-11.4% slower than stock
+23.9% but remains
+0.6% slower than stock
 by median in this workload. Startup, submission, JIT, source conversion and both
 transposes remain included; their individual contributions are not isolated here.
 The prepared-batch gain is not a whole-job acceleration claim. The
-[result record](results/decimal-abs-2026-10-27.json) retains every trial,
+[result record](results/decimal-abs-2026-10-28.json) retains every trial,
 checksum, environment and allocation observation.
 
 After test-compiling with the `bench` Maven profile, set `SF_NATIVE_BENCH_CLASSPATH`
@@ -3192,7 +3194,7 @@ released `testAbs` fixtures pass on both lines.
 
 ## DECIMAL unary minus
 
-Measured on 2026-10-27 against canonical main `0a50eb6d`, with released Flink 1.18.1
+Measured on 2026-10-28 against canonical main `d89e03b5`, with released Flink 1.18.1
 and 2.2.1, JDK 17, Apple M4 Pro, Rust 1.94.0 and a release/no-default-features native
 build with the system allocator. All core Java production sources and compatibility
 sources are compiled from the candidate with `--release 11`. This replaces generated
@@ -3201,7 +3203,9 @@ JVM computation inside an already-admitted Calc without changing operator/type a
 Stock executes the released generated expression over prepared GenericRowData or
 BinaryRowData. Previous and candidate execute production Calc over equal Arrow values,
 types and NULLs, with the timer inside Rust. Setup, Arrow import/export and perimeter
-transposes are excluded from this prepared control; intrinsic callback conversions,
+transposes are excluded from this prepared control. The previous control uses the scalar
+generated-expression callback emitted by main (kind 17), including decimal argument and
+result marshalling; the earlier whole-row callback control is superseded. Intrinsic conversions,
 result allocation and equivalent signum consumption remain timed. Full schema/Arrow
 output equality is checked before timing, and each measured output contributes to a
 checksum. Schemas are nullable; enabled NULL values occur every seventh row. Inputs
@@ -3211,35 +3215,35 @@ No other test or benchmark runs concurrently. Values are median [min, max] ns/ro
 
 | Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 5.416 [5.150, 29.226] | 56.808 [50.892, 80.271] | 1.486 [1.416, 1.830] | 3.64x | 38.23x |
-| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 3.614 [3.316, 3.806] | 44.753 [42.688, 71.334] | 1.943 [1.846, 2.029] | 1.86x | 23.03x |
-| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.668 [4.963, 6.198] | 793.725 [777.576, 892.970] | 24.808 [23.781, 25.966] | 0.23x | 32.00x |
-| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 25.661 [24.817, 56.794] | 95.936 [81.018, 124.640] | 1.462 [1.402, 1.530] | 17.56x | 65.64x |
-| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 9.023 [8.832, 30.817] | 97.602 [90.857, 111.314] | 1.975 [1.863, 2.399] | 4.57x | 49.41x |
-| 1.18.1, DECIMAL(19,3), true, binary, 16 | 19.260 [18.131, 24.521] | 835.176 [804.578, 933.442] | 25.077 [24.161, 26.434] | 0.77x | 33.31x |
-| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 41.629 [21.288, 46.473] | 93.413 [64.404, 116.560] | 1.478 [1.299, 1.568] | 28.16x | 63.19x |
-| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 8.509 [7.215, 14.542] | 98.274 [72.553, 126.169] | 1.880 [1.790, 2.568] | 4.53x | 52.27x |
-| 1.18.1, DECIMAL(38,18), true, binary, 16 | 19.650 [17.914, 23.783] | 802.533 [794.978, 959.778] | 25.139 [24.014, 25.743] | 0.78x | 31.92x |
-| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 24.284 [23.059, 54.312] | 90.521 [79.256, 110.534] | 1.474 [1.410, 1.607] | 16.48x | 61.42x |
-| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 9.523 [7.628, 26.789] | 97.732 [81.200, 154.714] | 1.903 [1.860, 1.990] | 5.00x | 51.36x |
-| 1.18.1, DECIMAL(38,38), true, binary, 16 | 18.702 [18.497, 22.800] | 843.157 [791.604, 900.192] | 25.363 [24.940, 28.821] | 0.74x | 33.24x |
-| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 13.099 [8.298, 14.029] | 56.371 [44.548, 78.663] | 1.406 [1.230, 1.462] | 9.32x | 40.10x |
-| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 5.639 [5.468, 7.907] | 57.263 [54.236, 83.983] | 1.887 [1.855, 1.958] | 2.99x | 30.35x |
-| 2.2.1, DECIMAL(18,3), true, binary, 16 | 6.671 [6.517, 7.064] | 812.571 [805.053, 888.364] | 24.913 [24.624, 25.792] | 0.27x | 32.62x |
-| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 25.048 [23.839, 45.325] | 68.893 [65.287, 89.237] | 1.424 [1.277, 1.482] | 17.59x | 48.37x |
-| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 7.726 [7.058, 9.249] | 66.016 [62.069, 83.646] | 1.936 [1.844, 1.962] | 3.99x | 34.10x |
-| 2.2.1, DECIMAL(19,3), true, binary, 16 | 20.143 [19.751, 24.289] | 837.029 [823.052, 859.436] | 26.018 [25.891, 26.875] | 0.77x | 32.17x |
-| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 24.096 [22.860, 46.887] | 69.543 [65.516, 89.032] | 1.455 [1.316, 1.524] | 16.56x | 47.79x |
-| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 8.125 [7.620, 9.344] | 66.526 [61.137, 85.207] | 1.942 [1.898, 2.061] | 4.18x | 34.26x |
-| 2.2.1, DECIMAL(38,18), true, binary, 16 | 20.587 [20.013, 24.102] | 817.052 [797.058, 838.610] | 25.760 [25.481, 26.361] | 0.80x | 31.72x |
-| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 24.591 [23.741, 45.237] | 72.217 [66.619, 96.777] | 1.448 [1.274, 1.499] | 16.98x | 49.86x |
-| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 7.887 [7.186, 12.962] | 69.281 [62.028, 92.388] | 1.937 [1.836, 2.007] | 4.07x | 35.76x |
-| 2.2.1, DECIMAL(38,38), true, binary, 16 | 19.243 [17.735, 19.784] | 818.066 [812.884, 826.594] | 25.852 [25.107, 27.101] | 0.74x | 31.64x |
+| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 5.608 [5.397, 30.964] | 38.780 [36.360, 48.179] | 1.424 [1.360, 1.448] | 3.94x | 27.23x |
+| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 5.138 [4.994, 5.221] | 39.243 [30.175, 62.565] | 2.113 [2.067, 2.254] | 2.43x | 18.57x |
+| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.169 [5.025, 9.325] | 589.500 [563.921, 610.549] | 25.894 [24.883, 27.327] | 0.20x | 22.77x |
+| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 25.869 [24.083, 45.725] | 60.425 [53.040, 101.635] | 1.488 [1.422, 1.619] | 17.39x | 40.62x |
+| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 17.958 [16.544, 35.588] | 120.014 [115.727, 146.039] | 2.097 [2.040, 2.342] | 8.56x | 57.24x |
+| 1.18.1, DECIMAL(19,3), true, binary, 16 | 18.345 [17.713, 19.267] | 584.371 [578.275, 610.158] | 25.778 [25.321, 27.777] | 0.71x | 22.67x |
+| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 34.512 [21.738, 44.704] | 64.531 [43.767, 72.120] | 1.458 [1.367, 1.554] | 23.67x | 44.26x |
+| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 7.675 [7.338, 7.944] | 41.761 [39.220, 59.480] | 2.070 [1.995, 2.111] | 3.71x | 20.17x |
+| 1.18.1, DECIMAL(38,18), true, binary, 16 | 18.198 [16.834, 23.837] | 576.080 [568.844, 607.250] | 26.079 [25.583, 26.886] | 0.70x | 22.09x |
+| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 30.949 [22.371, 51.205] | 51.428 [45.383, 66.168] | 1.465 [1.390, 1.631] | 21.13x | 35.11x |
+| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 7.643 [7.118, 8.465] | 42.615 [39.193, 86.474] | 2.089 [2.033, 2.347] | 3.66x | 20.40x |
+| 1.18.1, DECIMAL(38,38), true, binary, 16 | 18.907 [17.902, 19.407] | 581.264 [573.115, 596.482] | 27.077 [26.356, 28.397] | 0.70x | 21.47x |
+| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 8.586 [7.102, 8.956] | 90.221 [35.983, 179.781] | 1.551 [1.473, 1.753] | 5.54x | 58.18x |
+| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 6.987 [6.547, 7.708] | 51.341 [36.867, 91.749] | 2.126 [2.028, 2.342] | 3.29x | 24.15x |
+| 2.2.1, DECIMAL(18,3), true, binary, 16 | 6.000 [5.145, 6.451] | 620.616 [588.384, 971.621] | 25.933 [25.349, 34.006] | 0.23x | 23.93x |
+| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 23.132 [21.831, 42.864] | 46.033 [42.233, 72.575] | 1.542 [1.408, 1.836] | 15.00x | 29.85x |
+| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 9.666 [8.183, 11.278] | 44.669 [40.233, 67.673] | 2.143 [2.030, 2.563] | 4.51x | 20.84x |
+| 2.2.1, DECIMAL(19,3), true, binary, 16 | 19.288 [18.641, 25.727] | 585.044 [571.290, 591.088] | 27.367 [26.751, 28.982] | 0.70x | 21.38x |
+| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 23.328 [22.225, 42.695] | 48.661 [43.836, 67.923] | 1.458 [1.418, 1.911] | 15.99x | 33.36x |
+| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 8.416 [7.359, 14.885] | 51.033 [42.275, 80.820] | 2.165 [2.050, 2.892] | 3.89x | 23.57x |
+| 2.2.1, DECIMAL(38,18), true, binary, 16 | 24.755 [18.713, 33.524] | 585.119 [570.680, 1058.025] | 27.826 [26.473, 78.137] | 0.89x | 21.03x |
+| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 23.077 [21.238, 45.155] | 47.891 [43.574, 75.425] | 1.476 [1.308, 1.616] | 15.63x | 32.44x |
+| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 8.402 [7.579, 13.434] | 57.577 [43.598, 75.661] | 2.181 [2.028, 2.316] | 3.85x | 26.39x |
+| 2.2.1, DECIMAL(38,38), true, binary, 16 | 19.016 [18.543, 19.412] | 599.046 [577.167, 607.373] | 25.196 [24.239, 26.623] | 0.75x | 23.78x |
 
-At 1,024 rows the candidate is 1.86-28.16x faster than stock and
-23.03-65.64x faster than the preceding callback. Sixteen-row
-controls still lose to stock (0.23-0.80x), while improving the previous
-native-Calc route by 31.64-33.31x. These are sampled prepared-batch
+At 1,024 rows the candidate is 2.43-23.67x faster than stock and
+18.57-58.18x faster than the preceding callback. Sixteen-row
+controls still lose to stock (0.20-0.89x), while improving the previous
+native-Calc route by 21.03-23.93x. These are sampled prepared-batch
 gains; they do not establish universal small-batch acceleration. The nullable 1,024-row
 allocation probe records 20 allocations / 17,575 requested bytes, with 16,384 new value
 bytes and 128 shared validity bytes. Generic Calc/batch/result handling retains fixed
@@ -3249,22 +3253,22 @@ row/Arrow perimeter work stays in
 
 The independent complete job uses 1M DECIMAL(18,3) rows, parallelism one, a bounded
 row source, both transposes and a rowwise blackhole sink. The previous control loads
-the actual `0a50eb6d` encoder ahead of candidate classes and requires its JVM route;
+the actual `d89e03b5` encoder ahead of candidate classes and requires its JVM route;
 candidate requires `jvm=[]`. Both require positive consumed NativeCalc work.
 Each engine runs two warmups and five measured jobs in separate sequential JVMs.
 Seconds are median [min, max]:
 
 | Stock | Previous callback | Candidate |
 | ---: | ---: | ---: |
-| 0.133551 [0.132106, 0.139531] | 0.186135 [0.170646, 0.220277] | 0.149443 [0.138556, 0.154910] |
+| 0.131800 [0.119555, 0.133355] | 0.174760 [0.167390, 0.180106] | 0.150979 [0.145502, 0.164335] |
 
 The complete candidate improves previous StreamFusion by
-19.7% but remains
-11.9% slower than stock
+13.6% but remains
+14.6% slower than stock
 by median in this workload. Startup, submission, JIT, source conversion and both
 transposes remain included; their individual contributions are not isolated here.
 The prepared-batch gain is not a whole-job acceleration claim. The
-[result record](results/decimal-negate-2026-10-27.json) retains every trial,
+[result record](results/decimal-negate-2026-10-28.json) retains every trial,
 checksum, environment and allocation observation.
 
 Use the shared release example with `SF_DECIMAL_UNARY_FUNCTION=NEGATE`. Complete-job

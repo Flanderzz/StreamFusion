@@ -82,16 +82,9 @@ fn main() {
     )
     .i()
     .unwrap();
-    let schema = java!(
-        env,
-        env.call_static_method(class, "schema", "()Ljava/lang/String;", &[])
-    )
-    .l()
-    .unwrap();
-    let schema: String = env
-        .get_string(&jni::objects::JString::from(schema))
-        .unwrap()
-        .into();
+    let result_code = java!(env, env.call_static_method(class, "resultCode", "()I", &[]))
+        .i()
+        .unwrap();
     java!(
         env,
         env.call_static_method(
@@ -137,12 +130,12 @@ fn main() {
     )
     .unwrap();
     let mut previous = CalcProgram::new(
-        vec![38, 0],
+        vec![17, 0],
         vec![0, 0],
         vec![1, 0],
-        vec![i64::from(id), 0],
+        vec![i64::from(id), i64::from(result_code)],
         vec![],
-        vec![Some(schema)],
+        vec![],
     );
     let mut native = CalcProgram::new(
         vec![6, 0],
