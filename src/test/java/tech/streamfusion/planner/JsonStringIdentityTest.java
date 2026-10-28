@@ -30,6 +30,11 @@ class JsonStringIdentityTest {
     assertFalse(general.getDigest().contains("jsonDocuments=true"));
     assertTrue(json.getDigest().contains("jsonDocuments=true"));
     assertTrue(json.copy(json.getTraitSet(), List.of(input)).getDigest().contains("jsonDocuments=true"));
+    var cached = general.withStringCaches().withPreferredBatchRows(2048);
+    assertFalse(general.getDigest().contains("stringCaches=true"));
+    assertTrue(cached.getDigest().contains("stringCaches=true"));
+    assertTrue(cached.copy(cached.getTraitSet(), List.of(input)).getDigest().contains("stringCaches=true"));
+    assertTrue(cached.withJsonDocuments().getDigest().contains("stringCaches=true"));
   }
 
   @Test

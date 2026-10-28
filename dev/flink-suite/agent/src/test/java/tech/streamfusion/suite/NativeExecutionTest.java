@@ -287,7 +287,7 @@ class NativeExecutionTest {
     NativeExecution.completed(calc, 21);
     assertThrows(AssertionError.class, () -> NativeExecution.finish(first));
     var second = NativeExecution.begin(test, new Fixture());
-    Object group = new NativeColumnarJvmGroupOperator();
+    Object group = new NativeColumnarGroupAggregateOperator();
     NativeExecution.opened(group);
     NativeExecution.completed(group, 21);
     NativeExecution.finish(second);

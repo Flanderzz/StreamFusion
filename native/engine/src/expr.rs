@@ -217,6 +217,29 @@ pub(crate) fn build_expr(
             );
             crate::flink_functions::decimal_float::function(arg == 4).call(vec![child])
         }
+        46 => {
+            let encoded = strings[arg]
+                .as_deref()
+                .expect("container cast configuration");
+            let parts = encoded.splitn(4, '|').collect::<Vec<_>>();
+            let target = encoded_field_type(parts[3]);
+            crate::flink_functions::collection_cast::function(
+                target,
+                parts[0] == "1",
+                parts[1] == "1",
+                parts[2].parse().expect("cast length"),
+            )
+            .call(vec![build_expr(
+                schema,
+                kinds,
+                payload,
+                child_counts,
+                longs,
+                doubles,
+                strings,
+                cursor,
+            )])
+        }
         43 => {
             let target = encoded_field_type(strings[arg].as_deref().expect("ARRAY cast schema"));
             let child = build_expr(
@@ -333,7 +356,12 @@ pub(crate) fn build_expr(
             function.numeric_cast = kinds[node] == 42;
             if kinds[node] == 44 {
                 function.certified_builtin = Some((longs[arg + 2], count));
-                for index in 0..count {
+                let cache_count = match longs[arg + 2] {
+                    11 => 1, // Integer SPLIT_INDEX needs only the source string cache.
+                    12 => 0, // SHA2 hashes bytes without consulting decoded string caches.
+                    _ => count,
+                };
+                for index in 0..cache_count {
                     let cache = if let datafusion::logical_expr::Expr::Column(column) =
                         &children[index]
                     {
@@ -1026,7 +1054,7 @@ fn hash_utf8<D: sha2::Digest>(
     }
 }
 
-fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
+pub(crate) fn append_digest_hex<D: sha2::Digest>(value: &str, output: &mut Vec<u8>) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in D::digest(value.as_bytes()) {
         output.push(HEX[(byte >> 4) as usize]);
@@ -2181,6 +2209,41 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         use datafusion::common::DataFusionError;
         use datafusion::logical_expr::ColumnarValue;
         let exec = |e: String| DataFusionError::Execution(e);
+        if let Some((12, count)) = self.certified_builtin {
+            if let [ColumnarValue::Array(source), ColumnarValue::Array(bits)] = &args.args[..count]
+            {
+                if let Some(output) = crate::flink_functions::sha2_runtime::evaluate([source, bits])
+                {
+                    return Ok(ColumnarValue::Array(output));
+                }
+            }
+        }
+        if let Some((11, count)) = self.certified_builtin {
+            if let [ColumnarValue::Array(source), ColumnarValue::Array(delimiter), ColumnarValue::Array(index)] =
+                &args.args[..count]
+            {
+                let caches = match &args.args[count] {
+                    ColumnarValue::Array(cache) => std::slice::from_ref(cache),
+                    _ => &[],
+                };
+                if let Some(output) = crate::flink_functions::split_index::integer_separator(
+                    [source, delimiter, index],
+                    caches,
+                ) {
+                    return Ok(ColumnarValue::Array(output));
+                }
+            }
+        }
+        if let Some((operation @ 20..=28, count)) = self.certified_builtin {
+            if let Some(output) = crate::flink_functions::string_fusion::evaluate(
+                operation,
+                &args.args[..count],
+                &args.args[count..],
+                args.number_rows,
+            ) {
+                return Ok(ColumnarValue::Array(output));
+            }
+        }
         let mut arrays = if self.row_result {
             args.args
                 .into_iter()
@@ -2191,13 +2254,15 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if let Some(output) = crate::flink_functions::certified::evaluate(
-                operation,
-                &arrays[..count],
-                &arrays[count..],
-                &self.return_type,
-            ) {
-                return Ok(ColumnarValue::Array(output));
+            if (1..=12).contains(&operation) {
+                if let Some(output) = crate::flink_functions::certified::evaluate(
+                    operation,
+                    &arrays[..count],
+                    &arrays[count..],
+                    &self.return_type,
+                ) {
+                    return Ok(ColumnarValue::Array(output));
+                }
             }
             for (index, cache) in arrays[count..].iter().enumerate() {
                 if cache.data_type() != &DataType::Null {
@@ -2224,7 +2289,14 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         let mut fields: Vec<Field> = arrays
             .iter()
             .enumerate()
-            .map(|(i, a)| Field::new(format!("arg{i}"), a.data_type().clone(), true))
+            .map(|(i, a)| {
+                Field::new(format!("arg{i}"), a.data_type().clone(), true).with_metadata(
+                    args.arg_fields
+                        .get(i)
+                        .map(|field| field.metadata().clone())
+                        .unwrap_or_default(),
+                )
+            })
             .collect();
         for (index, cache) in string_caches {
             fields.push(streamfusion_bridge::string_cache::string_cache_field(
@@ -2414,6 +2486,314 @@ pub(crate) fn infer_expr_type(
 mod certified_builtin_tests {
     use super::*;
     use crate::calc::CalcExpression;
+
+    #[test]
+    fn compiled_growing_padding_replacements_do_not_call_the_jvm() {
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, true),
+                Field::new("n", DataType::Int64, false),
+                Field::new("p", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("skip"),
+                    Some("a?"),
+                    Some("a?"),
+                    None,
+                    Some("\u{1f600}"),
+                ])),
+                Arc::new(arrow::array::Int64Array::from(vec![0, 8, 1, 4, 3])),
+                Arc::new(StringArray::from(vec!["", "x?", "x?", "y", "\u{1f600}"])),
+            ],
+        )
+        .unwrap()
+        .slice(1, 4);
+        for cached in [false, true] {
+            let input = if cached {
+                let mut fields = input.schema().fields().to_vec();
+                let mut columns = input.columns().to_vec();
+                for (index, values) in [
+                    (
+                        0,
+                        vec![Some(&[97, 63][..]), Some(&[97, 63][..]), None, None],
+                    ),
+                    (
+                        2,
+                        vec![
+                            Some(&[120, 63][..]),
+                            Some(&[120, 63][..]),
+                            Some(&[121][..]),
+                            None,
+                        ],
+                    ),
+                ] {
+                    let cache = string_cache_array(values);
+                    fields.push(Arc::new(string_cache_field(
+                        index,
+                        cache.data_type().clone(),
+                    )));
+                    columns.push(cache);
+                }
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+            } else {
+                input.clone()
+            };
+            for operation in [26, 27] {
+                let mut calc = CalcExpression {
+                    kinds: vec![44, 0, 0, 0, 3, 3],
+                    payload: vec![0, 0, 1, 2, 0, 1],
+                    child_counts: vec![5, 0, 0, 0, 0, 0],
+                    longs: vec![999, 0, operation],
+                    doubles: vec![],
+                    strings: vec![Some("?".into()), Some("Z".into())],
+                    projection_roots: vec![0],
+                    condition_root: -1,
+                    output_names: vec!["v".into()],
+                    compiled: None,
+                };
+                for _ in 0..2 {
+                    let result = calc.evaluate(input.clone());
+                    assert_eq!(
+                        result.column(0).as_ref(),
+                        &StringArray::from(vec![
+                            Some(if operation == 26 {
+                                "xZxZxZaZ"
+                            } else {
+                                "aZxZxZxZ"
+                            }),
+                            Some("a"),
+                            None,
+                            Some(if operation == 26 {
+                                "?\u{1f600}"
+                            } else {
+                                "\u{1f600}?"
+                            }),
+                        ])
+                    );
+                }
+                assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_growing_padding_comparisons_do_not_call_the_jvm() {
+        for operation in [20, 21, 23, 24] {
+            let input = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("s", DataType::Utf8, true),
+                    Field::new("n", DataType::Int64, false),
+                    Field::new("p", DataType::Utf8, false),
+                ])),
+                vec![
+                    Arc::new(StringArray::from(vec![
+                        Some("skip"),
+                        Some("a"),
+                        Some("a"),
+                        None,
+                    ])),
+                    Arc::new(arrow::array::Int64Array::from(vec![5, 5, 6, 5])),
+                    Arc::new(StringArray::from(vec!["x", "xy", "xy", "xy"])),
+                ],
+            )
+            .unwrap()
+            .slice(1, 3);
+            let mut calc = CalcExpression {
+                kinds: vec![44, 0, 0, 0, 3],
+                payload: vec![0, 0, 1, 2, 0],
+                child_counts: vec![4, 0, 0, 0, 0],
+                longs: vec![999, 4, operation],
+                doubles: vec![],
+                strings: vec![Some(
+                    if (operation - 20) % 3 == 0 {
+                        "xyxya"
+                    } else {
+                        "axyxy"
+                    }
+                    .into(),
+                )],
+                projection_roots: vec![0],
+                condition_root: -1,
+                output_names: vec!["v".into()],
+                compiled: None,
+            };
+            for _ in 0..2 {
+                let result = calc.evaluate(input.clone());
+                assert_eq!(
+                    result.column(0).as_ref(),
+                    &arrow::array::BooleanArray::from(vec![
+                        Some(operation < 23),
+                        Some(operation >= 23),
+                        None
+                    ])
+                );
+            }
+            assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+        }
+    }
+
+    #[test]
+    fn compiled_integer_split_index_does_not_call_the_jvm() {
+        use arrow::array::Int32Array;
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+
+        let sources: Vec<_> = (1..=255)
+            .map(|delimiter| {
+                format!(
+                    "\u{1f600}{}\u{4e2d}{}",
+                    char::from(delimiter),
+                    char::from(delimiter)
+                )
+            })
+            .collect();
+        let units: Vec<_> = sources
+            .iter()
+            .map(|s| s.encode_utf16().collect::<Vec<_>>())
+            .collect();
+        let strings = Arc::new(StringArray::from(sources)) as ArrayRef;
+        let cache = string_cache_array(units.iter().map(|units| Some(units.as_slice())));
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, false),
+                Field::new("delimiter", DataType::Int32, false),
+                Field::new("index", DataType::Int32, false),
+                string_cache_field(0, cache.data_type().clone()),
+            ])),
+            vec![
+                strings,
+                Arc::new(Int32Array::from_iter_values(1..=255)),
+                Arc::new(Int32Array::from(vec![1; 255])),
+                cache,
+            ],
+        )
+        .unwrap()
+        .slice(1, 254);
+        let mut calc = CalcExpression {
+            kinds: vec![44, 0, 0, 0],
+            payload: vec![0, 0, 1, 2],
+            child_counts: vec![3, 0, 0, 0],
+            longs: vec![-1, 0, 11],
+            doubles: vec![],
+            strings: vec![],
+            projection_roots: vec![0],
+            condition_root: -1,
+            output_names: vec!["v".into()],
+            compiled: None,
+        };
+        for _ in 0..2 {
+            let result = calc.evaluate(input.clone());
+            assert_eq!(
+                result.column(0).as_ref(),
+                &StringArray::from(vec!["\u{4e2d}"; 254])
+            );
+        }
+        assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+    }
+
+    #[test]
+    fn compiled_string_consumers_keep_utf16_without_a_jvm() {
+        use streamfusion_bridge::string_cache::{string_cache_array, string_cache_field};
+        for cached in [false, true] {
+            for operation in 20..=28 {
+                let producer = (operation - 20) % 3;
+                let replace = operation >= 26;
+                let mut fields = vec![Field::new("s", DataType::Utf8, true)];
+                let mut columns: Vec<ArrayRef> = vec![Arc::new(StringArray::from(vec![
+                    Some("unused"),
+                    Some(if cached && replace { "a" } else { "\u{1f600}" }),
+                    Some("?"),
+                    None,
+                ]))];
+                if cached {
+                    let cache = string_cache_array([
+                        Some(&[117_u16][..]),
+                        Some(if replace {
+                            &[97][..]
+                        } else {
+                            &[0xd83d, 0xde00][..]
+                        }),
+                        Some(&[63][..]),
+                        None,
+                    ]);
+                    fields.push(string_cache_field(0, cache.data_type().clone()));
+                    columns.push(cache);
+                }
+                let input = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+                    .unwrap()
+                    .slice(1, 3);
+                let mut kinds = vec![44, 0];
+                let mut payload = vec![0, 0];
+                let mut children = vec![if replace { 5 } else { 4 }, 0];
+                let longs = vec![
+                    999,
+                    if replace { 0 } else { 4 },
+                    operation,
+                    if producer == 2 { 2 } else { 1 },
+                ];
+                let strings = vec![
+                    Some(if producer == 2 { "" } else { "x" }.into()),
+                    Some("?".into()),
+                    Some("Z".into()),
+                ];
+                for (kind, argument) in if producer == 2 {
+                    [(3, 0), (1, 3)]
+                } else {
+                    [(1, 3), (3, 0)]
+                } {
+                    kinds.push(kind);
+                    payload.push(argument);
+                    children.push(0);
+                }
+                kinds.push(3);
+                payload.push(1);
+                children.push(0);
+                if replace {
+                    kinds.push(3);
+                    payload.push(2);
+                    children.push(0);
+                }
+                let mut calc = CalcExpression {
+                    kinds,
+                    payload,
+                    child_counts: children,
+                    longs,
+                    doubles: vec![],
+                    strings,
+                    projection_roots: vec![0],
+                    condition_root: -1,
+                    output_names: vec!["v".into()],
+                    compiled: None,
+                };
+                for _ in 0..2 {
+                    let result = calc.evaluate(input.clone());
+                    if replace {
+                        assert_eq!(
+                            result.column(0).as_ref(),
+                            &StringArray::from(vec![
+                                Some(if cached { "a" } else { "?" }),
+                                Some("Z"),
+                                None
+                            ])
+                        );
+                    } else {
+                        let unequal = operation >= 23;
+                        assert_eq!(
+                            result.column(0).as_ref(),
+                            &arrow::array::BooleanArray::from(vec![
+                                Some(unequal),
+                                Some(!unequal),
+                                None
+                            ])
+                        );
+                    }
+                }
+                assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
+            }
+        }
+    }
 
     #[test]
     fn compiled_batches_execute_certified_kernels_without_a_jvm() {

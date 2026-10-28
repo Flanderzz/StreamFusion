@@ -178,6 +178,11 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
+    if (JvmGroupAggregateMatcher.unverifiedTemporalCollectionInput(root)) {
+      recordFallback(
+          "NOT NULL temporal collection input materialization requires Flink physical getters");
+      return root;
+    }
     if (CollectionValueIdentity.crossesBoundary(root, finalOutput)) {
       recordFallback(
           "collection value representation requires a final projection or fused consumer");
@@ -297,6 +302,24 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
     // A non-windowed GROUP BY both emits and consumes a changelog, so it is exempt from the
     // insert-only guard — its input may be insert-only or itself a changelog.
+    entries.add(
+        Substitution.of(
+                StreamPhysicalGroupAggregate.class,
+                "groupAggregate",
+                GroupAggregateMatcher::substitute)
+            .shaped(
+                node ->
+                    GroupAggregateMatcher.rustCollectionsEnabled()
+                        && GroupAggregateMatcher.hasCollections(node))
+            .keyedState()
+            .matching(GroupAggregateMatcher::matches)
+            .reason(
+                node ->
+                    JvmGroupAggregateMatcher.matches(node)
+                        ? GroupAggregateMatcher.unsupportedReason(node)
+                        : JvmGroupAggregateMatcher.unsupportedReason(node))
+            .changelogSafe());
+
     entries.add(
         Substitution.of(
                 StreamPhysicalGroupAggregate.class,
@@ -454,7 +477,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     // (the `$row_kind$` tag rides through), so — like Expand — it is exempt from the insert-only
     // guard.
     entries.add(
-        Substitution.of(StreamPhysicalCorrelate.class, "tableFunction", TableFunctionMatcher::substitute)
+        Substitution.of(
+                StreamPhysicalCorrelate.class, "tableFunction", TableFunctionMatcher::substitute)
             .shaped(TableFunctionMatcher::isUserTableFunction)
             .matching(TableFunctionMatcher::matches)
             .reason(TableFunctionMatcher::unsupportedReason)
@@ -625,7 +649,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
             .changelogSafe());
 
     entries.add(
-        Substitution.of(StreamPhysicalOverAggregate.class, "over", NonTimeRowNumberMatcher::substitute)
+        Substitution.of(
+                StreamPhysicalOverAggregate.class, "over", NonTimeRowNumberMatcher::substitute)
             .shaped(NonTimeRowNumberMatcher::hasShape)
             .keyedState()
             .matching(NonTimeRowNumberMatcher::matches)
@@ -832,11 +857,18 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
 
   /** Inserts transpose rels at every columnar↔rowwise edge of the (already substituted) tree. */
   private RelNode insertTransitions(RelNode node) {
-    return insertTransitions(node, false, 1024);
+    return insertTransitions(node, false, 1024, false);
   }
 
   private RelNode insertTransitions(
-      RelNode node, boolean preserveCollections, int inheritedBatchRows) {
+      RelNode node, boolean preserveCollections, int inheritedBatchRows, boolean inheritedStringCaches) {
+    boolean stringCaches =
+        node instanceof StreamPhysicalNativeCalc
+                && ((StreamPhysicalNativeCalc) node).requiresOriginalStringInputs()
+            || inheritedStringCaches
+                && (node instanceof StreamPhysicalNativeMiniBatchAssigner
+                    || node instanceof StreamPhysicalNativeDropUpdateBefore
+                    || node instanceof StreamPhysicalNativeWatermarkAssigner);
     int preferredBatchRows =
         node instanceof StreamPhysicalNativeOverAggregate
             ? Math.max(
@@ -863,11 +895,12 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     List<RelNode> inputs = new ArrayList<>(node.getInputs().size());
     boolean changed = false;
     for (RelNode input : node.getInputs()) {
-      RelNode transitioned = insertTransitions(input, preserve, preferredBatchRows);
+      RelNode transitioned = insertTransitions(input, preserve, preferredBatchRows, stringCaches);
       RelNode adapted = adapt(node, transitioned, preserve);
       if (adapted instanceof StreamPhysicalRowDataToArrow) {
         adapted =
             ((StreamPhysicalRowDataToArrow) adapted).withPreferredBatchRows(preferredBatchRows);
+        if (stringCaches) adapted = ((StreamPhysicalRowDataToArrow) adapted).withStringCaches();
         if (node instanceof StreamPhysicalNativeCalc
             && ((StreamPhysicalNativeCalc) node).usesJavaJsonInput())
           adapted = ((StreamPhysicalRowDataToArrow) adapted).withJsonDocuments();
@@ -878,6 +911,7 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     RelNode result = changed ? node.copy(node.getTraitSet(), inputs) : node;
     if (result instanceof StreamPhysicalRowDataToArrow) {
       result = ((StreamPhysicalRowDataToArrow) result).withPreferredBatchRows(inheritedBatchRows);
+      if (inheritedStringCaches) result = ((StreamPhysicalRowDataToArrow) result).withStringCaches();
     }
     return result;
   }

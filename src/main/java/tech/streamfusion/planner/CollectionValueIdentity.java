@@ -5,6 +5,7 @@ import org.apache.calcite.rel.core.Calc;
 import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.*;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalDropUpdateBefore;
 import org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalGroupAggregate;
@@ -46,6 +47,7 @@ final class CollectionValueIdentity {
 
   static boolean requiresGeneratedEvaluation(RexProgram program) {
     if (!RexExpression.usesCollectionFunctions(program)) return false;
+    if (materializedInputCachesAffectReaders(program)) return true;
     boolean joins =
         program.getExprList().stream()
             .anyMatch(
@@ -64,8 +66,79 @@ final class CollectionValueIdentity {
             && consumerNeedsGeneration(program.expandLocalRef(program.getCondition()));
   }
 
+  private static boolean materializedInputCachesAffectReaders(RexProgram program) {
+    boolean[] found = new boolean[2];
+    var visitor =
+        new RexVisitorImpl<Void>(true) {
+          @Override
+          public Void visitCall(RexCall call) {
+            if (RexExpression.nativeRepresentedSplit(call)
+                && characterInput(call.getOperands().get(0), false)) {
+              RexNode separator = call.getOperands().get(1);
+              if (!(separator instanceof RexLiteral)
+                  || "".equals(((RexLiteral) separator).getValueAs(String.class))) found[0] = true;
+            }
+            boolean comparesCollections =
+                RexExpression.nativeStringCollectionOperation(call)
+                    && java.util.Set.of(
+                            "ARRAY_MIN",
+                            "ARRAY_MAX",
+                            "ARRAY_SORT",
+                            "ARRAY_DISTINCT",
+                            "ARRAY_CONTAINS",
+                            "ARRAY_POSITION",
+                            "ARRAY_REMOVE",
+                            "ARRAY_UNION",
+                            "ARRAY_EXCEPT",
+                            "ARRAY_INTERSECT")
+                        .contains(call.getOperator().getName());
+            boolean comparesValues =
+                java.util.Set.of(
+                        SqlKind.EQUALS,
+                        SqlKind.NOT_EQUALS,
+                        SqlKind.GREATER_THAN,
+                        SqlKind.GREATER_THAN_OR_EQUAL,
+                        SqlKind.LESS_THAN,
+                        SqlKind.LESS_THAN_OR_EQUAL,
+                        SqlKind.IS_DISTINCT_FROM,
+                        SqlKind.IS_NOT_DISTINCT_FROM)
+                    .contains(call.getKind());
+            if ((comparesCollections
+                    || comparesValues
+                    || RexExpression.nativeRepresentedMapUnion(call))
+                && call.getOperands().stream().anyMatch(arg -> characterInput(arg, true)))
+              found[1] = true;
+            return super.visitCall(call);
+          }
+        };
+    for (var project : program.getProjectList()) program.expandLocalRef(project).accept(visitor);
+    if (program.getCondition() != null)
+      program.expandLocalRef(program.getCondition()).accept(visitor);
+    return found[0] && found[1];
+  }
+
+  private static boolean characterInput(RexNode node, boolean skipSplit) {
+    if (node instanceof RexInputRef) return JsonStringIdentity.containsCharacter(node.getType());
+    if (node instanceof RexFieldAccess)
+      return JsonStringIdentity.containsCharacter(node.getType())
+          && characterInput(((RexFieldAccess) node).getReferenceExpr(), skipSplit);
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (skipSplit && RexExpression.nativeRepresentedSplit(call)) return false;
+    return call.getOperands().stream().anyMatch(arg -> characterInput(arg, skipSplit));
+  }
+
   private static boolean verifiedConsumer(RexCall call) {
-    return RexExpression.nativeArrayJoin(call)
+    return RexExpression.nativeRepresentedArrayOperation(call)
+        || RexExpression.nativeStringCollectionOperation(call)
+        || RexExpression.nativeRepresentedSplit(call)
+        || RexExpression.nativeStringArrayItem(call)
+        || RexExpression.nativeRepresentedMapArrays(call)
+        || RexExpression.nativeRepresentedMapUnion(call)
+        || RexExpression.nativeRepresentedMapConstructor(call)
+        || RexExpression.nativeCollectionCast(call)
+        || RexExpression.nativeBasicRow(call)
+        || RexExpression.nativeArrayJoin(call)
         || RexExpression.nativeObjectUpdate(call)
         || RexExpression.nativeObjectOf(call)
         || RexExpression.nativeInputMapProjection(call)
@@ -102,7 +175,18 @@ final class CollectionValueIdentity {
       return readsSensitiveInput(((RexFieldAccess) node).getReferenceExpr());
     if (!(node instanceof RexCall)) return false;
     var call = (RexCall) node;
-    if (RexExpression.nativeInputMapProjection(call))
+    if (RexExpression.nativeInputMapProjection(call)
+        || RexExpression.nativeRepresentedArrayOperation(call)
+        || RexExpression.nativeStringCollectionOperation(call)
+        || RexExpression.nativeRepresentedSplit(call)
+        || RexExpression.nativeStringArrayItem(call)
+        || RexExpression.nativeRepresentedMapArrays(call)
+        || RexExpression.nativeRepresentedMapUnion(call)
+        || RexExpression.nativeRepresentedMapConstructor(call)
+        || RexExpression.nativeCollectionCast(call)
+        || RexExpression.nativeBasicRow(call)
+        || RexExpression.nativeObjectOf(call)
+        || RexExpression.nativeObjectUpdate(call))
       return call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);
     return !verifiedConsumer(call)
         && call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);
@@ -173,7 +257,9 @@ final class CollectionValueIdentity {
   }
 
   private static boolean preservingCollectionProducer(RelNode node) {
-    return node instanceof StreamPhysicalNativeGeneratedUnnest
+    return node instanceof StreamPhysicalNativeColumnarGroupAggregate
+            && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeGeneratedUnnest
         || node instanceof StreamPhysicalNativeJvmGroup
             && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
         || node instanceof StreamPhysicalNativeTableFunction

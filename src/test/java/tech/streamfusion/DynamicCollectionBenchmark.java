@@ -30,6 +30,9 @@ class DynamicCollectionBenchmark {
   private static final int NULL_EVERY = Integer.getInteger("collection.nullEvery", 8);
   private static final int ELEMENT_NULL_EVERY =
       Integer.getInteger("collection.elementNullEvery", 7);
+  private static final boolean NUMERIC_STRINGS = Boolean.getBoolean("collection.numericStrings");
+  private static final boolean INTEGER_MAP = Boolean.getBoolean("collection.integerMap");
+  private static final boolean MULTISET = Boolean.getBoolean("collection.multiset");
   private static final String[] STRING_VALUES = strings();
   private static final boolean EXPECT_NATIVE =
       Boolean.parseBoolean(System.getProperty("collection.native", "true"));
@@ -76,9 +79,14 @@ class DynamicCollectionBenchmark {
         for (int turn = 0; turn < 2; turn++) {
           int engine = (trial + turn) % 2;
           double elapsed = run(map, expression, engine == 1);
-          System.out.printf(Locale.ROOT,
+          System.out.printf(
+              Locale.ROOT,
               "[collection-trial] engine=%s trial=%d warmup=%s rows=%d seconds=%.9f%n",
-              engine == 1 ? "native" : "flink", trial, trial < WARMUP, ROWS, elapsed);
+              engine == 1 ? "native" : "flink",
+              trial,
+              trial < WARMUP,
+              ROWS,
+              elapsed);
           if (trial >= WARMUP) {
             seconds[engine][trial - WARMUP] = elapsed;
           }
@@ -114,8 +122,9 @@ class DynamicCollectionBenchmark {
 
   private static double run(boolean map, String expression, boolean nativeRun) throws Exception {
     try (var metrics = new RecoveryExecutionMetrics()) {
-      TableEnvironment table = environment(map,
-          metrics.environment(new org.apache.flink.configuration.Configuration(), 1, 0));
+      TableEnvironment table =
+          environment(
+              map, metrics.environment(new org.apache.flink.configuration.Configuration(), 1, 0));
       String sql = prepare(table, expression);
       PhysicalPlanScan scan = nativeRun ? NativePlanner.install(table) : null;
       long start = System.nanoTime();
@@ -139,13 +148,20 @@ class DynamicCollectionBenchmark {
   private static void assertFunctionExecution(PhysicalPlanScan scan) {
     String rustFunction = System.getProperty("collection.rustFunction");
     String generatedFunction = System.getProperty("collection.generatedFunction");
-    if (rustFunction != null && scan.functionExecutions().stream().noneMatch(execution ->
-        listsFunction(execution, "native", rustFunction) && execution.contains("jvm=[]"))) {
-      throw new IllegalStateException("Expected Rust function execution: " + scan.functionExecutions());
+    if (rustFunction != null
+        && scan.functionExecutions().stream()
+            .noneMatch(
+                execution ->
+                    listsFunction(execution, "native", rustFunction)
+                        && execution.contains("jvm=[]"))) {
+      throw new IllegalStateException(
+          "Expected Rust function execution: " + scan.functionExecutions());
     }
-    if (generatedFunction != null && scan.functionExecutions().stream().noneMatch(execution ->
-        listsFunction(execution, "jvm", generatedFunction))) {
-      throw new IllegalStateException("Expected generated function execution: " + scan.functionExecutions());
+    if (generatedFunction != null
+        && scan.functionExecutions().stream()
+            .noneMatch(execution -> listsFunction(execution, "jvm", generatedFunction))) {
+      throw new IllegalStateException(
+          "Expected generated function execution: " + scan.functionExecutions());
     }
   }
 
@@ -154,8 +170,10 @@ class DynamicCollectionBenchmark {
     if (start < 0) return false;
     start += engine.length() + 2;
     int end = execution.indexOf(']', start);
-    return end >= 0 && Arrays.stream(execution.substring(start, end).split(","))
-        .map(String::trim).anyMatch(function::equals);
+    return end >= 0
+        && Arrays.stream(execution.substring(start, end).split(","))
+            .map(String::trim)
+            .anyMatch(function::equals);
   }
 
   private static double median(double[] values) {
@@ -222,7 +240,8 @@ class DynamicCollectionBenchmark {
   private static String[] strings() {
     String[] values = new String[Math.max(1, DOMAIN)];
     String suffix = "x".repeat(Integer.getInteger("collection.bytes", 264));
-    for (int i = 0; i < values.length; i++) values[i] = "中\0" + i + suffix;
+    for (int i = 0; i < values.length; i++)
+      values[i] = NUMERIC_STRINGS ? Integer.toString(i - DOMAIN / 2) : "中\0" + i + suffix;
     return values;
   }
 
@@ -249,14 +268,27 @@ class DynamicCollectionBenchmark {
               .map(
                   i ->
                       Row.of(
-                          i % 8 == 0 ? null : java.util.Map.of("a", i, "b", -i, "c", 7L),
+                          i % 8 == 0
+                              ? null
+                              : MULTISET
+                                  ? java.util.Map.of(-1, 2, 0, 3, 1, 4)
+                                  : INTEGER_MAP
+                                      ? java.util.Map.of(
+                                          "a", i.intValue(), "b", -i.intValue(), "c", 7)
+                                      : java.util.Map.of("a", i, "b", -i, "c", 7L),
                           i % 7 == 0
                               ? null
                               : new String[] {"a", "b", "c", "missing"}[(int) (i % 4)]))
               .returns(
                   Types.ROW_NAMED(
                       new String[] {"m", "lookup_key"},
-                      Types.MAP(Types.STRING, Types.LONG),
+                      MULTISET
+                          ? org.apache.flink.table.runtime.typeutils.ExternalTypeInfo.of(
+                              org.apache.flink.table.api.DataTypes.MULTISET(
+                                  org.apache.flink.table.api.DataTypes.INT()))
+                          : INTEGER_MAP
+                              ? Types.MAP(Types.STRING, Types.INT)
+                              : Types.MAP(Types.STRING, Types.LONG),
                       Types.STRING)));
     } else {
       org.apache.flink.api.common.typeinfo.TypeInformation<?> arrayType;
@@ -285,7 +317,8 @@ class DynamicCollectionBenchmark {
               .map(
                   i ->
                       Row.of(
-                          NULL_EVERY > 0 && i % NULL_EVERY == 0 ? null : inputArray(i), i % 7 == 0 ? null : (int) (i % 6 - 1)))
+                          NULL_EVERY > 0 && i % NULL_EVERY == 0 ? null : inputArray(i),
+                          i % 7 == 0 ? null : (int) (i % 6 - 1)))
               .returns(Types.ROW_NAMED(new String[] {"arr", "idx"}, arrayType, Types.INT)));
     }
     return table;

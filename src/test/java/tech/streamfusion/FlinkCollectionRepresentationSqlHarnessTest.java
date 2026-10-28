@@ -64,6 +64,20 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
         .assertSuccess(NativeFailureParity.Route.NATIVE);
   }
 
+  @org.junit.jupiter.api.Test
+  void sharedStringMaterializationRetainsSubsequentCollectionOrdering() {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("SPLIT");
+    String sql = "SELECT id,SPLIT(t[2],''),SPLIT(t[3],''),ARRAY_MAX(t) FROM src";
+    var table = environment();
+    var scan = tech.streamfusion.planner.NativePlanner.install(table);
+    table.explainSql(sql);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        scan.functionExecutions().stream().anyMatch(e -> e.contains("jvm=[SPLIT, ARRAY_MAX]")),
+        scan.functionExecutions().toString());
+    NativeFailureParity.run(FlinkCollectionRepresentationSqlHarnessTest::environment, sql)
+        .assertSuccess(NativeFailureParity.Route.NATIVE);
+  }
+
   @ParameterizedTest
   @ValueSource(strings = {"MAP_KEYS", "MAP_VALUES", "MAP_ENTRIES"})
   void binaryMapKeysPreserveTheInputEntryOrder(String function) {
@@ -72,6 +86,53 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
             FlinkCollectionRepresentationSqlHarnessTest::environment,
             "SELECT id," + function + "(m) FROM src")
         .assertSuccess(NativeFailureParity.Route.NATIVE);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "MAP_KEYS(m)",
+        "CAST(m AS MAP<STRING,BIGINT>)",
+        "MAP_KEYS(CAST(m AS MAP<STRING,BIGINT>))",
+        "MAP_VALUES(CAST(m AS MAP<STRING,BIGINT>))",
+        "MAP_ENTRIES(CAST(m AS MAP<STRING,BIGINT>))",
+        "MAP_KEYS(CAST(MAP_FROM_ARRAYS(t,ARRAY[CAST(id AS INT),CAST(id AS INT),CAST(id AS INT),"
+            + "CAST(id AS INT),CAST(id AS INT),CAST(NULL AS INT)]) AS MAP<STRING,BIGINT>))"
+      })
+  void mapCastsPreserveCachedAndColdKeysAndTheReleasedIterationOrder(String expression) {
+    for (boolean binary : new boolean[] {false, true}) {
+      java.util.function.Supplier<TableEnvironment> factory =
+          () -> {
+            var env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setParallelism(1);
+            env.getConfig().enableObjectReuse();
+            var table = StreamTableEnvironment.create(env);
+            table.getConfig().set("streamfusion.transpose.batchRows", "2");
+            table.executeSql(
+                "CREATE TABLE src (id BIGINT,t ARRAY<STRING>,r ARRAY<ROW<n INT>>,nn ARRAY<INT NOT"
+                    + " NULL>,m MAP<STRING,INT>) WITH"
+                    + " ('connector'='collection-representation','binary-maps'='"
+                    + binary
+                    + "')");
+            return table;
+          };
+      String sql = "SELECT id," + expression + " FROM src";
+      var table = factory.get();
+      var scan = tech.streamfusion.planner.NativePlanner.install(table);
+      String plan = table.explainSql(sql);
+      if (expression.contains("MAP_FROM_ARRAYS")) {
+        org.junit.jupiter.api.Assertions.assertTrue(
+            scan.functionExecutions().stream()
+                .anyMatch(e -> e.contains("jvm=[MAP_KEYS, CAST, MAP_FROM_ARRAYS, ARRAY]")),
+            plan + scan.functionExecutions());
+      } else {
+        org.junit.jupiter.api.Assertions.assertTrue(
+            !scan.functionExecutions().isEmpty()
+                && scan.functionExecutions().stream().allMatch(e -> e.contains("jvm=[]")),
+            plan + scan.functionExecutions());
+      }
+      NativeFailureParity.run(factory, sql).assertSuccess(NativeFailureParity.Route.NATIVE);
+    }
   }
 
   @ParameterizedTest
@@ -268,6 +329,11 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
           boolean binaryKeys =
               type.getTypeAt(4).getChildren().get(0).getTypeRoot()
                   == org.apache.flink.table.types.logical.LogicalTypeRoot.BINARY;
+          boolean stringKeys =
+              type.getTypeAt(4)
+                  .getChildren()
+                  .get(0)
+                  .is(org.apache.flink.table.types.logical.LogicalTypeFamily.CHARACTER_STRING);
           boolean multiset =
               type.getTypeAt(4) instanceof org.apache.flink.table.types.logical.MultisetType;
           boolean integerValues =
@@ -308,10 +374,16 @@ public class FlinkCollectionRepresentationSqlHarnessTest {
                                 : new GenericArrayData(new Integer[] {1, null, 3}));
                     if (binaryKeys || binaryValues)
                       entries.put(new byte[] {0, -1, 3, -128}, integerValues ? -1 : binaryPayload);
+                    if (stringKeys) {
+                      entries.clear();
+                      entries.put(text(id, "?"), (int) (long) id);
+                      entries.put(text(id, "\ud800"), -(int) (long) id);
+                      entries.put(text(id, "😀"), 7);
+                    }
                     entries.put(null, multiset ? 3 : null);
-                    if ((binaryKeys || binaryValues) && id % 8 == 6) entries.clear();
+                    if ((binaryKeys || binaryValues || stringKeys) && id % 8 == 6) entries.clear();
                     org.apache.flink.table.data.MapData map =
-                        (binaryKeys || binaryValues) && id % 8 == 7
+                        (binaryKeys || binaryValues || stringKeys) && id % 8 == 7
                             ? null
                             : new org.apache.flink.table.data.GenericMapData(entries);
                     if (binary && map != null)

@@ -1,6 +1,8 @@
 use crate::aggregates::{RAW_SUM_PARTIAL, RETRACTING_DECIMAL_SUM};
 use crate::*;
 
+mod collection_agg;
+use collection_agg::{is_collection, CollectionState};
 mod decimal_map_order;
 mod distinct;
 mod distinct_retention;
@@ -9,7 +11,7 @@ use distinct_retention::{
     DistinctViewRetention, APPEND_DISTINCT, PRESERVED_DISTINCT_APPEND, PRESERVED_DISTINCT_STATE,
     RETAINED_DISTINCT_COLUMN,
 };
-mod java_map_order;
+pub(crate) mod java_map_order;
 mod mapped_extreme;
 mod nested_hash;
 mod numeric_map_order;
@@ -340,6 +342,7 @@ fn group_partial_map(column: &ArrayRef) -> &arrow::array::ListArray {
 /// the backend persists in the main row.
 pub(crate) enum GroupAggState {
     Mapped(Box<MappedExtreme>),
+    Collection(Box<CollectionState>),
     Json(Box<JsonAggState>),
     List(ListAggState),
     Ordered(OrderedValueState),
@@ -422,6 +425,7 @@ pub(crate) fn emit_running(agg: &RunningAgg, count: i64, result_type: &DataType)
 impl GroupAggState {
     fn new(kind: i64, value_type: &DataType) -> Self {
         match kind {
+            48..=53 => Self::Collection(Box::new(CollectionState::new(kind, value_type))),
             38 | 39 => Self::Mapped(Box::new(MappedExtreme::new(kind == 38))),
             26..=31 | 42..=45 => Self::Json(Box::new(JsonAggState::new(kind))),
             24 | 25 | 32 | 33 | 46 | 47 => Self::List(ListAggState::new(kind)),
@@ -629,6 +633,7 @@ impl GroupAggState {
             }
             GroupAggState::Extremes { .. } => self.accumulate_extreme_key(MinMaxKey::of(value)),
             GroupAggState::Mapped(_)
+            | GroupAggState::Collection(_)
             | GroupAggState::Json(_)
             | GroupAggState::List(_)
             | GroupAggState::Ordered(_)
@@ -695,6 +700,7 @@ impl GroupAggState {
             }
             GroupAggState::Extremes { .. } => self.retract_extreme_key(MinMaxKey::of(value)),
             GroupAggState::Mapped(_)
+            | GroupAggState::Collection(_)
             | GroupAggState::Json(_)
             | GroupAggState::List(_)
             | GroupAggState::Ordered(_)
@@ -746,6 +752,7 @@ impl GroupAggState {
             Self::Distinct { set, .. } => set.forget_scalar(value),
             Self::DistinctRunning { counts, .. } => counts.forget_scalar(value),
             Self::Ordered(ordered) => ordered.forget_distinct(value),
+            Self::Collection(collection) => collection.forget_distinct(value),
             Self::List(list) => list.forget_distinct(value),
             _ => unreachable!("retained distinct state"),
         }
@@ -757,6 +764,7 @@ impl GroupAggState {
                 set.scalar_entries()
             }
             Self::Ordered(ordered) => ordered.snapshot_entries(),
+            Self::Collection(collection) => collection.distinct_entries(),
             Self::List(list) => list.distinct_entries(),
             _ => unreachable!("distinct membership"),
         }
@@ -767,6 +775,7 @@ impl GroupAggState {
             Self::Distinct { set, .. } => set,
             Self::DistinctRunning { counts, .. } => counts,
             Self::Ordered(ordered) => return ordered.distinct_count(value),
+            Self::Collection(collection) => return collection.distinct_count(value),
             Self::List(list) => return list.distinct_count(value),
             _ => unreachable!("membership on a non-distinct aggregate"),
         };
@@ -778,6 +787,7 @@ impl GroupAggState {
         match self {
             Self::Mapped(state) => state.emit(result_type),
             Self::Json(_) => unreachable!("JSON output uses fallible materialization"),
+            Self::Collection(state) => state.emit(result_type),
             Self::List(state) => state.emit(),
             Self::Ordered(state) => state.emit(),
             GroupAggState::Running { agg, non_null } => emit_running(agg, *non_null, result_type),
@@ -822,7 +832,7 @@ impl GroupAggState {
     fn import_multiset_entry(&mut self, value: ScalarValue, count: i64) {
         match self {
             Self::Mapped(state) => state.import_legacy(value, count),
-            Self::Json(_) | Self::List(_) => {
+            Self::Collection(_) | Self::Json(_) | Self::List(_) => {
                 unreachable!("string aggregate has no element side table")
             }
             Self::Ordered(state) => state.restore_entry(value, count),
@@ -877,6 +887,7 @@ impl GroupAggState {
             GroupAggState::Distinct { set, .. } => set.arm_journal(),
             GroupAggState::DistinctRunning { counts, .. } => counts.arm_journal(),
             GroupAggState::Mapped(_)
+            | GroupAggState::Collection(_)
             | GroupAggState::Json(_)
             | GroupAggState::List(_)
             | GroupAggState::Ordered(_)
@@ -895,6 +906,7 @@ impl GroupAggState {
             GroupAggState::Distinct { set, .. } => set.insert_restored(value, count),
             GroupAggState::DistinctRunning { counts, .. } => counts.insert_restored(value, count),
             GroupAggState::Mapped(_)
+            | GroupAggState::Collection(_)
             | GroupAggState::Json(_)
             | GroupAggState::List(_)
             | GroupAggState::Ordered(_)
@@ -929,6 +941,7 @@ impl GroupAggState {
             GroupAggState::Distinct { set, .. } => set.drain_journal(),
             GroupAggState::DistinctRunning { counts, .. } => counts.drain_journal(),
             GroupAggState::Mapped(_)
+            | GroupAggState::Collection(_)
             | GroupAggState::Json(_)
             | GroupAggState::List(_)
             | GroupAggState::Ordered(_)
@@ -1226,6 +1239,7 @@ impl crate::state::RocksStateCodec for GroupStateCodec {
             let mut state = GroupAggState::new(kind, value_type);
             match &mut state {
                 GroupAggState::Mapped(_) => unreachable!("mapped extrema use raw keyed snapshots"),
+                GroupAggState::Collection(collection) => collection.restore(scalar)?,
                 GroupAggState::Json(json) => json.restore(scalar)?,
                 GroupAggState::List(list) => list.restore(scalar)?,
                 GroupAggState::Ordered(ordered) => ordered.restore_value(scalar, count(2 + 2 * i)),
@@ -1277,7 +1291,11 @@ pub(crate) fn group_state_types(kinds: &[i64], value_types: &[DataType]) -> Vec<
         .iter()
         .zip(value_types)
         .map(|(&kind, vt)| {
-            if is_list_agg(kind) || is_json_agg(kind) || matches!(kind, 38 | 39) {
+            if is_collection(kind)
+                || is_list_agg(kind)
+                || is_json_agg(kind)
+                || matches!(kind, 38 | 39)
+            {
                 DataType::Binary
             } else if is_ordered_value(kind) {
                 vt.clone()
@@ -1295,6 +1313,7 @@ impl GroupAggState {
     fn persisted_scalar(&self, state_type: &DataType) -> ScalarValue {
         match self {
             Self::Mapped(_) => unreachable!("mapped extrema use raw keyed snapshots"),
+            Self::Collection(state) => state.snapshot(),
             Self::Json(state) => state.snapshot(),
             Self::List(state) => state.snapshot(),
             Self::Ordered(state) => state.snapshot_value(),
@@ -1312,7 +1331,7 @@ impl GroupAggState {
     fn persisted_count(&self) -> i64 {
         match self {
             Self::Mapped(_) => 0,
-            Self::Json(_) | Self::List(_) => 0,
+            Self::Collection(_) | Self::Json(_) | Self::List(_) => 0,
             Self::Ordered(state) => state.count(),
             Self::Running { non_null, .. } => *non_null,
             Self::DistinctRunning { live, .. } => *live,
@@ -1499,6 +1518,7 @@ pub(crate) const MULTISET_ENTRY_BYTES: usize = 64;
 /// O(1) estimated footprint of one aggregate's per-key state (multisets counted by `len`).
 pub(crate) fn group_agg_state_bytes(state: &GroupAggState) -> usize {
     let inner = match state {
+        GroupAggState::Collection(collection) => collection.bytes(),
         GroupAggState::Json(json) => json.bytes(),
         GroupAggState::List(list) => list.bytes() - std::mem::size_of::<ListAggState>(),
         GroupAggState::Ordered(ordered) => {
@@ -1599,7 +1619,9 @@ impl GroupAggregator {
             .iter()
             .zip(&value_types)
             .map(|(&kind, vt)| {
-                if kind == 21 {
+                if is_collection(kind) {
+                    collection_agg::result_type(kind, vt)
+                } else if kind == 21 {
                     DataType::Int32
                 } else if is_list_agg(kind) || is_json_agg(kind) {
                     DataType::Utf8
@@ -2076,6 +2098,15 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             .iter()
             .map(|c| c.map(|c| DistinctColumn::new(batch.column(c))))
             .collect();
+        let collection_columns: Vec<_> = (0..num_agg)
+            .map(|i| {
+                is_collection(self.kinds[i]).then(|| {
+                    collection_agg::CollectionColumn::new(
+                        batch.column(self.value_columns[i] as usize),
+                    )
+                })
+            })
+            .collect();
         let ordered_columns: Vec<Option<ordered_value::OrderedValueColumn>> = self
             .kinds
             .iter()
@@ -2364,6 +2395,9 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                 let mut expired_view = false;
                 for agg in &mut state.aggs {
                     match agg {
+                        GroupAggState::Collection(collection) => {
+                            expired_view |= collection.expire(ttl);
+                        }
                         GroupAggState::Json(json) => {
                             expired_view |= json.expire(ttl, state.last_write_ms)
                         }
@@ -2635,7 +2669,7 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                             row,
                         )?
                     };
-                    if value.is_null() {
+                    if value.is_null() && !targets.iter().any(|&i| matches!(&state.aggs[i], GroupAggState::Collection(collection) if collection.accepts_null())) {
                         continue;
                     }
                     let value = ordered_retention::ValueKey(value);
@@ -2656,6 +2690,15 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                         }
                     }
                     result_changed[i] = true;
+                    if let GroupAggState::Collection(collection) = &mut state.aggs[i] {
+                        result_changed[i] = collection.update(
+                            collection_columns[i].as_ref().unwrap().at(row),
+                            retract,
+                            ttl,
+                            retained_modes[i] == Some(true),
+                        );
+                        continue;
+                    }
                     if let GroupAggState::Json(json) = &mut state.aggs[i] {
                         json.expire(ttl, state.last_write_ms);
                         if let Some(partial) = json_partials[i] {
@@ -3031,7 +3074,11 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             })
             .collect();
         for (i, (rt, values)) in self.result_types.iter().zip(out_results).enumerate() {
-            fields.push(Field::new(format!("result{i}"), rt.clone(), true));
+            fields.push(collection_agg::output_field(
+                format!("result{i}"),
+                self.kinds[i],
+                rt,
+            ));
             columns.push(values.finish());
         }
         fields.push(Field::new(ROW_KIND_COLUMN, DataType::Int8, false));
@@ -3332,7 +3379,11 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
             columns.push(make_array(gathered.freeze()));
         }
         for (i, result_type) in self.result_types.iter().enumerate() {
-            fields.push(Field::new(format!("result{i}"), result_type.clone(), true));
+            fields.push(collection_agg::output_field(
+                format!("result{i}"),
+                self.kinds[i],
+                result_type,
+            ));
             columns.push(scalars_to_array(
                 std::mem::take(&mut out_results[i]),
                 result_type,
@@ -3402,6 +3453,10 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                 match &state.aggs[i] {
                     GroupAggState::Mapped(mapped) => {
                         state_columns[i].push(mapped.snapshot(&self.value_types[i]));
+                        non_null_columns[i].push(0);
+                    }
+                    GroupAggState::Collection(collection) => {
+                        state_columns[i].push(collection.snapshot());
                         non_null_columns[i].push(0);
                     }
                     GroupAggState::Json(json) => {
@@ -3768,6 +3823,14 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                 if let GroupAggState::Mapped(mapped) = &mut state.aggs[i] {
                     mapped
                         .restore(ScalarValue::try_from_array(main.column(2 + 2 * i), row).unwrap());
+                }
+                if let GroupAggState::Collection(collection) = &mut state.aggs[i] {
+                    collection
+                        .restore(
+                            ScalarValue::try_from_array(main.column(2 + 2 * i), row)
+                                .expect("collection snapshot column"),
+                        )
+                        .expect("collection snapshot state");
                 }
                 if let GroupAggState::Json(json) = &mut state.aggs[i] {
                     json.restore(

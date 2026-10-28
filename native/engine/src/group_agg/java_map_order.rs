@@ -1,7 +1,7 @@
 //! Java HashMap iteration order for caller-supplied spread hashes and tie order.
 //! Callers supply keys whose Ord matches the host key comparison for equal hashes.
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Node<K> {
     key: K,
     hash: i32,
@@ -12,20 +12,21 @@ struct Node<K> {
     red: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Bucket {
     first: Option<usize>,
     tree: bool,
 }
 
-pub(super) struct JavaMapOrder<K> {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct JavaMapOrder<K> {
     buckets: Vec<Bucket>,
     nodes: Vec<Node<K>>,
     size: usize,
 }
 
 impl<K: Copy + Ord> JavaMapOrder<K> {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             buckets: vec![Bucket::default(); capacity],
             nodes: Vec::new(),
@@ -33,13 +34,13 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
         }
     }
 
-    pub(super) fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.buckets.fill(Bucket::default());
         self.nodes = Vec::new();
         self.size = 0;
     }
 
-    pub(super) fn insert(&mut self, key: K, hash: i32) -> bool {
+    pub(crate) fn insert(&mut self, key: K, hash: i32) -> bool {
         let bucket = hash as u32 as usize & (self.buckets.len() - 1);
         let mut current = self.buckets[bucket].first;
         let tree = self.buckets[bucket].tree;
@@ -103,14 +104,14 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
         true
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = K> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = K> + '_ {
         self.buckets.iter().flat_map(|bucket| {
             std::iter::successors(bucket.first, |&index| self.nodes[index].next)
                 .map(|index| self.nodes[index].key)
         })
     }
 
-    pub(super) fn copy_preserves_order(&self, capacity: usize) -> bool {
+    pub(crate) fn copy_preserves_order(&self, capacity: usize) -> bool {
         self.buckets.len() == capacity
             && self.buckets.iter().all(|bucket| {
                 !bucket.tree
@@ -121,17 +122,17 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
             })
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.size
     }
 
-    pub(super) fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.buckets.capacity() * std::mem::size_of::<Bucket>()
             + self.nodes.capacity() * std::mem::size_of::<Node<K>>()
     }
 
-    pub(super) fn remove(&mut self, key: K, hash: i32) -> bool {
+    pub(crate) fn remove(&mut self, key: K, hash: i32) -> bool {
         let bucket = hash as u32 as usize & (self.buckets.len() - 1);
         let mut current = self.buckets[bucket].first;
         while let Some(index) = current {
@@ -143,6 +144,34 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
             current = self.nodes[index].next;
         }
         false
+    }
+
+    pub(super) fn compact(&mut self) {
+        if self.nodes.len() <= self.size.saturating_mul(2).saturating_add(64) {
+            return;
+        }
+        let mut indices = vec![None; self.nodes.len()];
+        let mut nodes = Vec::with_capacity(self.size);
+        for bucket in &self.buckets {
+            let mut current = bucket.first;
+            while let Some(index) = current {
+                indices[index] = Some(nodes.len());
+                nodes.push(self.nodes[index].clone());
+                current = self.nodes[index].next;
+            }
+        }
+        for node in &mut nodes {
+            node.next = node.next.and_then(|index| indices[index]);
+            node.prev = node.prev.and_then(|index| indices[index]);
+            node.parent = node.parent.and_then(|index| indices[index]);
+            node.children = node
+                .children
+                .map(|child| child.and_then(|index| indices[index]));
+        }
+        for bucket in &mut self.buckets {
+            bucket.first = bucket.first.and_then(|index| indices[index]);
+        }
+        self.nodes = nodes;
     }
 
     fn remove_node(&mut self, bucket: usize, removed: usize) {
@@ -437,7 +466,7 @@ impl<K: Copy + Ord> JavaMapOrder<K> {
 
 #[cfg(test)]
 impl<K: Copy + Ord> JavaMapOrder<K> {
-    pub(super) fn assert_structure(&self) {
+    pub(crate) fn assert_structure(&self) {
         let map = self;
         fn tree<K: Copy + Ord>(
             map: &JavaMapOrder<K>,
@@ -508,6 +537,11 @@ mod tests {
                 } else {
                     assert!(map.remove(key, hash));
                 }
+                // Exercise reclamation at every JDK fixture step without changing live nodes.
+                if let Some(dead) = map.nodes.first().cloned() {
+                    map.nodes.resize(map.size * 2 + 65, dead);
+                }
+                map.compact();
                 map.assert_structure();
                 let expected: Vec<_> = step["order"]
                     .as_array()

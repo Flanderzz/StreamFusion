@@ -23,6 +23,13 @@ arrays return fresh values. Row headers also retain their generic/binary categor
 keep the existing columnar views. SQL checks include generic, binary and independent proxy arrays,
 repeated string consumers, NULLs in declared NOT NULL elements and every nested row kind.
 
+Native collection aggregates mark NOT NULL DATE/TIME array outputs with the existing generic
+copy category. Direct Calc projections preserve source field metadata under aliases, pruning,
+reordering and repeated references; generated JVM argument batches carry that metadata into
+their readers. DataFusion's projection schema preserves source metadata by the same rule.
+Root schema metadata also survives projection and C Data import. Computed expressions retain
+their own output representation contract rather than inheriting an arbitrary input marker.
+
 Programs containing only nullable primitive collection types keep ordinary layouts and avoid
 serializer snapshots that preserve no additional identity. Represented nested-row vectors reuse
 their reader for the lifetime of the batch. Each returned row owns its fields before that reader
@@ -62,6 +69,10 @@ unsafe Arrow schema construction. This follows the existing IPC carrier; the Jav
 recognizes either its original outer marker or the expression child marker. Matching
 input offsets share both flattened child buffers; other offsets are aligned by row.
 NULL keys, duplicate keys and entry order remain visible to subsequent consumers.
+Scalar MAP results retain their complete owned one-row ListArray directly. DataFusion 54's
+generic scalar extraction copies the list field's name and nullability but drops its metadata;
+using it here loses the MAP marker, including for constant mixed-precision decimal constructors.
+The MAP adapters preserve the field through scalar broadcast as well as array evaluation.
 Rust IPC
 validates it during restore. For these newly admitted queries, a metadata-only schema view aliases
 MAP buffers as List-of-entry-Struct with nullable keys before native import. Map and List share
@@ -95,7 +106,8 @@ POSITION returns INT zero when absent and NULL for a NULL needle. Matching BOOLE
 DECIMAL types have exact native equality; decimal precision and scale are checked before dispatch.
 Scalar needles are not expanded to the batch length. Potentially failing arguments retain the
 complete generated Calc to preserve Flink's evaluation schedule. The existing representation
-checks keep strings, nested values and NOT NULL-element arrays on their verified generated route.
+checks keep unverified nested values and NOT NULL-element arrays on their verified generated route.
+Nullable represented STRING searches use the native views described below.
 CONTAINS also retains generated evaluation for non-NULL literals or nonnullable needles: Flink
 constructs its array element getter from that needle type. For DECIMAL, a stock binary array's
 unchecked read of a NULL cell can throw where the Arrow-backed JVM view returns NULL; that
@@ -105,9 +117,11 @@ ARRAY_MIN and ARRAY_MAX instead reuse released DataFusion 54 directly for nullab
 DECIMAL arrays. Flink's NULL skipping, nullable empty result, exact ordering and declared result
 type agree with those released kernels, including their short-list scan and long-list Arrow
 reduction. No duplicated reduction implementation or private dependency is needed. The planner
-retains generated evaluation for floating/string/temporal/nested elements, NOT NULL elements,
+retains generated evaluation for floating/temporal/nested elements, NOT NULL elements,
 fallible operands and representation-sensitive consumers; neither Spark floating ordering nor
 DataFusion's broader type support establishes parity for these excluded signatures.
+Represented STRING extrema use the native comparator described below rather than ordinary
+DataFusion UTF-8 ordering.
 
 MAP projections reuse DataFusion/Comet's shared Arrow view pattern, with the
 verified map-list carrier retained for NULL keys. MAP_UNION cannot use ordinary
@@ -139,3 +153,56 @@ across batch release. Flink 1.18 keeps its existing guard; no schema marker or u
 normalization is introduced. Representation-sensitive downstream consumers retain their
 existing admission gates. The release comparisons and two-pass investigation are recorded in
 [the benchmark ledger](../docs/benchmarks/scalar-functions.md#not-null-fixed-binary-map-leaves).
+
+
+## Native represented collection kernels
+
+The same marked UTF-8/optional UTF-16 columns now feed native collection kernels. Equality
+uses Java UTF-16 only when both values have caches; otherwise it uses encoded bytes. This
+relation can be nontransitive for isolated surrogates and cold question marks, so STRING
+set operations scan retained candidates rather than pretending it is an ordinary Rust Eq key.
+Gathering retains the entire original element. Copy-category flags distinguish a new generic
+array from an unchanged binary array; empty/singleton reversal and complete slices retain
+the original category. Binary ROW/MAP constructors clear caches, while generic OBJECT
+construction retains them. Shared mutable OBJECT_UPDATE expressions keep Flink evaluation.
+
+Flink's ARRAY_SORT comparator returns -1 for equal non-NULL ascending values, and +1 descending.
+A total Arrow sort cannot preserve its result identities or invalid-comparator exceptions.
+The native index sort ports the Apache-licensed Android TimSort from
+[Apache Spark 4.0.1](https://github.com/apache/spark/blob/v4.0.1/core/src/main/java/org/apache/spark/util/collection/TimSort.java).
+An independent JDK 17 Arrays.sort oracle covers 480 index-order cases, including 107 comparator
+failures. Runtime Boolean options and NULL ordering stay inside the same native kernel.
+
+On Flink 1.18, independently compiling `MAP_KEYS(MAP['a',i,'b',j])` produces both `[a,b]` and
+`[b,a]`: generated-expression grouping hashes global generated variable names. Represented
+native constructors use input order for this inherently nondeterministic construction order.
+Flink 2.2's ordered grouping remains deterministic and is preserved. This does not relax
+expression deduplication, failure, STRING representation or ownership contracts.
+
+Container casts reuse the existing exact scalar conversions and shared Java HashMap order
+implementation. Both released lines construct HashMap() with the default initial capacity of
+sixteen; the newer development-source size-based constructor must not be substituted. Numeric
+tree-bin order, including NULL keys, has an independent JDK 17 oracle. BinaryStringData is not
+Comparable to its own class, so its equal-hash tree tie order depends on JVM identityHashCode;
+native STRING tree ties use first-input identity order for that inherently nondeterministic case. They select visible child ranges before conversion, propagate element parsing
+failures to the complete outer container for TRY_CAST/legacy CAST, and preserve the original
+first key object with the final equal-key value. No JNI callback or borrowed-buffer lifetime
+is added. Numeric ARRAY formatting creates the same cached Java UTF-16 result as Flink.
+
+
+Generated MAP field reads call MapDataSerializer.copy before invoking a collection function or
+cast. On GenericMapData this produces binary key/value arrays, clearing nested Java caches.
+Native MAP-reference operands mirror that copy category recursively without mutating the input
+batch. The resulting nullable-key entry-list carrier shares values/offset buffers and replaces
+only representation metadata. Computed MAP_FROM_ARRAYS and other MAP results retain their own
+caches: applying the input-field snapshot to computed results would change equality and duplicate
+keys. Tests distinguish both cases using cached isolated surrogates, cold strings, NULL keys,
+original binary maps, nested RowKinds and downstream key/value/entry projections.
+
+
+Empty-separator SPLIT can mutate a shared StringData cache. Independently evaluating Arrow
+expressions cannot update aliases to that original Java object. Programs combining such input
+materialization with cache-sensitive original-input comparisons retain one generated Calc.
+A cold GenericArrayData fixture demonstrates the ordering change after two SPLIT calls; binary
+and proxy arrays retain their independent copy behavior. Native comparisons of a newly produced
+SPLIT array remain admitted because they read its explicit result caches.

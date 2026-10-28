@@ -4,8 +4,16 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.UInt2Vector;
+import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
@@ -19,6 +27,62 @@ import org.junit.jupiter.api.Test;
 
 class NativeColumnarDropUpdateBeforeOperatorTest {
   private static final RowType TYPE = RowType.of(new BigIntType());
+
+  @Test
+  void filteringPreservesListChildNamesMetadataAndOwnedBuffers() throws Exception {
+    var unit =
+        new Field(
+            "unit",
+            FieldType.notNullable(
+                new ArrowType.Int(16, false)),
+            null);
+    var cache =
+        new Field(
+            "cache",
+            new FieldType(
+                true,
+                ArrowType.List.INSTANCE,
+                null,
+                Map.of("identity", "original")),
+            List.of(unit));
+    var kind =
+        new Field(
+            RowDataArrowConverter.ROW_KIND_COLUMN,
+            FieldType.nullable(
+                new ArrowType.Int(8, true)),
+            null);
+    var schema = new Schema(List.of(cache, kind));
+    try (var allocator = new RootAllocator(); var harness = harness()) {
+      var input = VectorSchemaRoot.create(new Schema(List.of(cache)), allocator);
+      input.allocateNew();
+      var lists = (ListVector) input.getVector(0);
+      var units = (UInt2Vector) lists.getDataVector();
+      var kinds = new TinyIntVector(RowDataArrowConverter.ROW_KIND_COLUMN, allocator);
+      kinds.allocateNew();
+      int[] values = {0xd800, 0, 0xe000};
+      for (int i = 0; i < values.length; i++) {
+        lists.startNewValue(i);
+        units.setSafe(i, values[i]);
+        lists.endValue(i, 1);
+        kinds.setSafe(i, i);
+      }
+      input.setRowCount(3);
+      kinds.setValueCount(3);
+      var withKinds = RowDataArrowConverter.withExtraColumns(input, List.of(kinds), 3);
+      harness.processElement(new StreamRecord<>(new ArrowBatch(withKinds)));
+      var batch = (ArrowBatch) ((StreamRecord<?>) harness.getOutput().poll()).getValue();
+      try (var output = batch.root()) {
+        assertEquals(schema, output.getSchema());
+        assertEquals(2, output.getRowCount());
+        var retained =
+            (UInt2Vector)
+                ((ListVector) output.getVector(0)).getDataVector();
+        assertEquals(0xd800, retained.get(0));
+        assertEquals(0xe000, retained.get(1));
+      }
+      assertEquals(0, allocator.getAllocatedMemory());
+    }
+  }
 
   @Test
   void filtersEveryKindLikeTheReleasedHostAndKeepsRecordTimestamp() throws Exception {

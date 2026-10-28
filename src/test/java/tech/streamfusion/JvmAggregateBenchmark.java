@@ -19,6 +19,7 @@ class JvmAggregateBenchmark {
   @Test
   void completeJobsRetainKeyedStateAndBothTransposes() throws Exception {
     assertEquals("false", System.getProperty("streamfusion.exchange.zeroCopyLocal"));
+    boolean notNull = Boolean.getBoolean("jvmagg.notNull");
     int rows = Integer.getInteger("jvmagg.rows", 2_000_000);
     int keys = Integer.getInteger("jvmagg.keys", 65_536);
     int values = Integer.getInteger("jvmagg.values", 0);
@@ -32,10 +33,21 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean legacy = shape.startsWith("legacy_");
       String collectionShape = collectionShape(shape);
+      org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
+          collectionShape.endsWith("_date")
+              ? Types.LOCAL_DATE
+              : collectionShape.endsWith("_time") ? Types.LOCAL_TIME : Types.LONG;
       boolean udf = shape.equals("udaf");
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
       boolean jvm = udf || collect || arrayAgg;
+      String groupOperator =
+          (collect || arrayAgg)
+                  && Boolean.parseBoolean(
+                      System.getProperty(
+                          "streamfusion.experimental.rustCollectionAggregates", "true"))
+              ? "NativeColumnarGroupAggregate"
+              : jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate";
       String argument =
           collectionShape.equals("array_agg_not_null")
               ? "COALESCE(v,CAST(0 AS BIGINT))"
@@ -72,26 +84,48 @@ class JvmAggregateBenchmark {
               case "string":
                 source =
                     sequence
-                        .map(i -> Row.of(prefix + Long.toString(i % keys), value(i, keys, values)))
+                        .map(
+                            i ->
+                                Row.of(
+                                    prefix + Long.toString(i % keys),
+                                    inputValue(i, keys, values, collectionShape)))
                         .returns(
-                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.STRING, Types.LONG));
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.STRING, inputValueType));
                 break;
               case "bigint":
                 source =
                     sequence
-                        .map(i -> Row.of(i % keys, value(i, keys, values)))
-                        .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG));
+                        .map(i -> Row.of(i % keys, inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, inputValueType));
                 break;
               case "int":
                 source =
                     sequence
-                        .map(i -> Row.of((int) (i % keys), value(i, keys, values)))
-                        .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, Types.LONG));
+                        .map(
+                            i ->
+                                Row.of(
+                                    (int) (i % keys), inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, inputValueType));
                 break;
               default:
                 throw new IllegalArgumentException("Unsupported key type: " + keyType);
             }
-            table.createTemporaryView("src", source);
+            if (notNull) {
+              assertTrue(collectionShape.endsWith("_date") || collectionShape.endsWith("_time"));
+              table.createTemporaryView(
+                  "src",
+                  source,
+                  Schema.newBuilder()
+                      .column("k", org.apache.flink.table.api.DataTypes.of(keyType))
+                      .column(
+                          "v",
+                          org.apache.flink.table.api.DataTypes.of(
+                                  collectionShape.endsWith("_date") ? "DATE" : "TIME(3)")
+                              .notNull())
+                      .build());
+            } else table.createTemporaryView("src", source);
             table.createTemporarySystemFunction("test_aggregate", new PortableSqlFixtures.Sum());
             if (!legacy)
               table.createTemporaryTable(
@@ -109,7 +143,7 @@ class JvmAggregateBenchmark {
             if (!legacy && engine == 1) {
               if (!jvm || expectedUdf) {
                 assertTrue(
-                    plan.contains(jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate")
+                    plan.contains(groupOperator)
                         && plan.contains("RowDataToArrow")
                         && plan.contains("ArrowToRowData"),
                     plan);
@@ -136,7 +170,7 @@ class JvmAggregateBenchmark {
             System.out.printf(
                 Locale.ROOT,
                 "[jvm-aggregate-trial] shape=%s key_type=%s engine=%s trial=%d warmup=%s rows=%d"
-                    + " keys=%d start_ms=%d seconds=%.6f%n",
+                    + " keys=%d not_null=%s start_ms=%d seconds=%.6f%n",
                 shape,
                 keyType,
                 engine == 0 ? "Flink" : "StreamFusion",
@@ -144,11 +178,12 @@ class JvmAggregateBenchmark {
                 trial < warmups,
                 rows,
                 keys,
+                notNull,
                 startMillis,
                 seconds);
             if (trial >= warmups) elapsed[engine][trial - warmups] = seconds;
             if (engine == 1
-                && jvm
+                && groupOperator.equals("NativeJvmGroup")
                 && expectedUdf
                 && expectedCache
                 && Integer.getInteger("streamfusion.experimental.jvmAccumulatorCacheEntries", 0)
@@ -171,9 +206,17 @@ class JvmAggregateBenchmark {
                   metrics.nativeOperators().isEmpty(),
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
-              RecoveryExecutionMetrics.assertConsumed(
-                  metrics.nativeOperators(),
-                  jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate");
+              RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
+              for (var observation : metrics.nativeOperators())
+                System.out.printf(
+                    Locale.ROOT,
+                    "[jvm-aggregate-native] shape=%s trial=%d operator=%s records_in=%s"
+                        + " records_out=%s%n",
+                    shape,
+                    trial,
+                    observation.get("operator"),
+                    observation.get("recordsIn"),
+                    observation.get("recordsOut"));
               if (legacy) {
                 var jobs =
                     metrics.nativeOperators().stream()
@@ -221,8 +264,24 @@ class JvmAggregateBenchmark {
     profileCollection(shape);
   }
 
+  private static Object inputValue(long row, int keys, int values, String shape) {
+    Long value = value(row, keys, values);
+    if (value == null) return null;
+    if (shape.endsWith("_date")) return java.time.LocalDate.ofEpochDay(value - 3);
+    if (shape.endsWith("_time"))
+      return java.time.LocalTime.ofNanoOfDay(
+          Math.floorMod(value * 1000 + 1, 86_400_000) * 1_000_000L);
+    return value;
+  }
+
   private static boolean collectCase(String shape) {
-    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint", "collect_boolean")
+    return java.util.Set.of(
+            "collect",
+            "collect_tinyint",
+            "collect_smallint",
+            "collect_boolean",
+            "collect_date",
+            "collect_time")
         .contains(collectionShape(shape));
   }
 
@@ -233,6 +292,8 @@ class JvmAggregateBenchmark {
             "array_agg_tinyint",
             "array_agg_smallint",
             "array_agg_boolean",
+            "array_agg_date",
+            "array_agg_time",
             "array_agg_not_null")
         .contains(collectionShape(shape));
   }

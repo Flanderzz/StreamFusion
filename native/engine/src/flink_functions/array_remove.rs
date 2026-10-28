@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, ListArray, UInt32Array};
@@ -41,12 +42,23 @@ impl ScalarUDFImpl for ArrayRemove {
 
 fn remove(args: &[ArrayRef]) -> Result<ArrayRef> {
     let array = as_list_array(&args[0])?;
+    let represented = crate::flink_key::represented_string(array.values().data_type());
+    let strings = represented
+        .then(|| super::collection_string::Strings::new(array.values()))
+        .transpose()?;
+    let needle = represented
+        .then(|| super::collection_string::Strings::new(&args[1]))
+        .transpose()?;
     // Arrow's null ordering gives NULL = NULL here, as Flink's removal predicate requires.
-    let equal = arrow_ord::ord::make_comparator(
-        array.values().as_ref(),
-        args[1].as_ref(),
-        Default::default(),
-    )?;
+    let equal = if represented {
+        None
+    } else {
+        Some(arrow_ord::ord::make_comparator(
+            array.values().as_ref(),
+            args[1].as_ref(),
+            Default::default(),
+        )?)
+    };
     let mut indices = Vec::with_capacity(array.values().len());
     let mut offsets = Vec::with_capacity(array.len() + 1);
     offsets.push(0);
@@ -55,7 +67,12 @@ fn remove(args: &[ArrayRef]) -> Result<ArrayRef> {
             for index in
                 array.value_offsets()[row] as usize..array.value_offsets()[row + 1] as usize
             {
-                if !equal(index, row).is_eq() {
+                let matches = if let (Some(values), Some(needle)) = (&strings, &needle) {
+                    values.equal(index, needle, row)
+                } else {
+                    equal.as_ref().unwrap()(index, row).is_eq()
+                };
+                if !matches {
                     indices.push(index as u32);
                 }
             }
@@ -65,12 +82,13 @@ fn remove(args: &[ArrayRef]) -> Result<ArrayRef> {
     let DataType::List(field) = array.data_type() else {
         unreachable!()
     };
-    Ok(Arc::new(ListArray::new(
+    let result = ListArray::new(
         field.clone(),
         OffsetBuffer::new(offsets.into()),
         arrow::compute::take(array.values().as_ref(), &UInt32Array::from(indices), None)?,
         array.nulls().cloned(),
-    )))
+    );
+    super::array_copy::generic_elements(&result, |_| true)
 }
 
 #[cfg(test)]

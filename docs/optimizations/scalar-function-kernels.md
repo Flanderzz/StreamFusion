@@ -145,6 +145,23 @@ Single-byte separators use Rust's character searcher (memchr) instead of the gen
 
 [Complete-job Flink/native results](../benchmarks/scalar-functions.md#split).
 
+## Integer-Delimiter Split Index
+
+The verified `(STRING, INT, INT)` overload borrows UTF-8 token spans and writes only the
+requested field into one Arrow string builder. ASCII delimiters use `memchr`; Latin-1
+delimiters use Rust's character searcher. Both stop at the requested field, avoiding the
+complete token array allocated by Flink's released integer helper. Leading, consecutive
+and trailing empty fields are preserved, and an empty input produces NULL.
+
+Before using UTF-8, the kernel verifies any original Java UTF-16 source cache. The ASCII
+comparison uses a byte/unit reduction; Unicode compares encoded UTF-16 units. A mismatch
+retains the released evaluator and its original cache. The batch adapter borrows its three
+array arguments and passes only the source cache, avoiding refcount changes, unused numeric
+sidecars and generic scalar expansion on already-columnar inputs. No input-value cache or
+performance switch is added.
+
+See the [release matrix and full-pipeline diagnostic](../benchmarks/scalar-functions.md#integer-delimiter-split-index).
+
 ## SUBSTRING
 
 ASCII uses byte offsets. Negative positions in Unicode strings traverse backward only to the requested start, replacing a full character count followed by a second forward scan. The selected UTF-8 span is borrowed and copied into the Arrow builder.

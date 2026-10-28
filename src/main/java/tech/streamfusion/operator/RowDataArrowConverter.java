@@ -118,7 +118,7 @@ public final class RowDataArrowConverter {
       // Append the hidden RowKind byte column alongside the data vectors (a fresh root over the
       // same
       // vectors plus the kinds vector — the caller closes this root, freeing them all once).
-      List<FieldVector> columns = new ArrayList<>(dataRoot.getFieldVectors());
+      List<FieldVector> columns = new ArrayList<>();
       if (withRowKind) {
         kinds = new TinyIntVector(ROW_KIND_COLUMN, allocator);
         kinds.allocateNew(rows.size());
@@ -127,9 +127,7 @@ public final class RowDataArrowConverter {
         columns.add(kinds);
       }
       if (caches != null) columns.addAll(caches.finish(rows.size()));
-      VectorSchemaRoot root = new VectorSchemaRoot(columns);
-      root.setRowCount(rows.size());
-      return root;
+      return withExtraColumns(dataRoot, columns, rows.size());
     } catch (RuntimeException | Error failure) {
       try {
         org.apache.flink.util.IOUtils.closeAll(dataRoot, kinds, caches);
@@ -138,6 +136,19 @@ public final class RowDataArrowConverter {
       }
       throw failure;
     }
+  }
+
+  /** Transfers the original vectors and companions to one root without deriving nested fields anew. */
+  static VectorSchemaRoot withExtraColumns(
+      VectorSchemaRoot root, List<FieldVector> extra, int rows) {
+    var columns = new ArrayList<>(root.getFieldVectors());
+    columns.addAll(extra);
+    var fields = new ArrayList<>(root.getSchema().getFields());
+    for (var vector : extra) fields.add(vector.getField());
+    return new VectorSchemaRoot(
+        new org.apache.arrow.vector.types.pojo.Schema(fields, root.getSchema().getCustomMetadata()),
+        columns,
+        rows);
   }
 
   /**

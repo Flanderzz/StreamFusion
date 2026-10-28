@@ -112,7 +112,8 @@ class FlinkArrayAggSqlHarnessTest {
       runs.assertSuccess(NativeFailureParity.Route.NATIVE);
       assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
       recovery.verifyRepeatedRecovery();
-      RecoveryExecutionMetrics.assertConsumed(recovery.nativeExecution(), "NativeJvmGroup");
+      RecoveryExecutionMetrics.assertConsumed(
+          recovery.nativeExecution(), "NativeColumnarGroupAggregate");
       SharedFlinkCluster.assertNativeMemoryReleased("integer-array-agg-recovery");
     }
   }
@@ -130,7 +131,7 @@ class FlinkArrayAggSqlHarnessTest {
             .collect(java.util.stream.Collectors.toSet());
     var runs = NativeFailureParity.run(FlinkArrayAggSqlHarnessTest::environment, sql);
     runs.assertSuccess(NativeFailureParity.Route.NATIVE);
-    assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+    assertTrue(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
     RecoveryExecutionMetrics.assertConsumed(
         METRICS.nativeOperators().stream()
@@ -156,7 +157,7 @@ class FlinkArrayAggSqlHarnessTest {
         METRICS.nativeOperators().stream()
             .filter(row -> !earlier.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList());
-    RecoveryExecutionMetrics.assertConsumed(work, "NativeJvmGroup");
+    RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
     RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarTopN");
   }
 
@@ -182,7 +183,7 @@ class FlinkArrayAggSqlHarnessTest {
         METRICS.nativeOperators().stream()
             .filter(row -> !earlier.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList());
-    RecoveryExecutionMetrics.assertConsumed(work, "NativeJvmGroup");
+    RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
     String operator =
         runs.nativeRun().plan().contains("NativeGeneratedUnnest")
             ? "NativeGeneratedUnnest"
@@ -214,7 +215,7 @@ class FlinkArrayAggSqlHarnessTest {
     var runs = NativeFailureParity.run(FlinkArrayAggSqlHarnessTest::environment, sql);
     runs.assertSuccess(NativeFailureParity.Route.NATIVE);
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
-    assertTrue(runs.nativeRun().plan().contains("NativeJvmGroup"), runs::toString);
+    assertTrue(runs.nativeRun().plan().contains("NativeColumnarGroupAggregate"), runs::toString);
     if (sql.contains("GROUP BY"))
       assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
     else assertEquals(runs.host().rows(), runs.nativeRun().rows());
@@ -222,7 +223,7 @@ class FlinkArrayAggSqlHarnessTest {
         METRICS.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList()),
-        "NativeJvmGroup");
+        "NativeColumnarGroupAggregate");
   }
 
   private static java.util.Map<Object, java.util.List<java.util.List<Object>>> perKey(

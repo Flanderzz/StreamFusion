@@ -129,6 +129,7 @@ nav:
       - AppendFast Top-1: benchmarks/append-top1.md
       - Performance audit reproduction: benchmarks/performance-audit.md
       - Scalar functions: benchmarks/scalar-functions.md
+      - Native collection signatures: benchmarks/native-collections.md
       - Certified scalar kernels: benchmarks/native-certified-scalars.md
       - Collection aggregates: benchmarks/collection-aggregates.md
       - Native date-partition Calc: benchmarks/native-sync-calc.md
@@ -160,6 +161,7 @@ nav:
       - Collection representation work: optimizations/collection-representation-work.md
       - Native basic-array searches and extrema: optimizations/native-array-search.md
       - Native collection edits: optimizations/native-collection-edits.md
+      - Native collection state: optimizations/native-collection-state.md
       - Export Calc schemas once: optimizations/calc-schema-once-c-data.md
       - Shared FFI allocator: optimizations/shared-ffi-allocator.md
       - DataFusion hash joins: optimizations/datafusion-hash-joins.md
@@ -188,6 +190,7 @@ nav:
       - Asynchronous Top-N memory checkpoints: optimizations/async-topn-memory-checkpoints.md
       - Sub-plan reuse digest barriers: optimizations/subplan-reuse-digest-barriers.md
       - UDFs via columnar upcall: optimizations/udf-columnar-upcall.md
+      - Native string fusion: optimizations/native-string-fusion.md
       - Host-exact builtins via upcall: optimizations/host-exact-builtins-upcall.md
       - Regex pattern cache: optimizations/regexp-pattern-cache.md
       - Lookup joins kept in the island: optimizations/lookup-join-in-island.md

@@ -245,14 +245,15 @@ strict NULL propagation applied to `CONCAT` below.
 - **`BTRIM`:** Both default and literal character-set trimming delegate to DataFusion's btrim kernel; no duplicate space-only kernel is maintained. See the Calc page for admission, semantics, and individual measurements.
 - **`ELT`:** A scalar index returns the selected array with its buffers/NULL mask intact. Longer dynamic outputs are sized before writing; short strings keep a single writing pass to avoid a selection vector larger than their payload. Comet uses host codegen. The narrower Flink INTEGER gate avoids admitting other boxed index types that Flink rejects. See the Calc page for admission, semantics, and individual measurements.
 - **`URL_ENCODE`:** A Rust column kernel emits JDK-compatible form encoding into an Arrow string builder without a JVM callback. See the Calc page for admission, semantics, and individual measurements.
-- **`OVERLAY`:** Copies intact UTF-8 prefix/replacement/suffix slices when UTF-16 cuts align with codepoints; ASCII needs no UTF-16 conversion. Cuts inside surrogate pairs retain full UTF-16 reconstruction, recombined pairs, and Java's encoding of lone surrogates. Comet uses host codegen. Flink's verified UTF-16 boundaries require preserving Java narrowing, overflow, substring errors, and split surrogates. See the Calc page for admission, semantics, and individual measurements.
+- **`OVERLAY`:** Standalone final projections copy intact UTF-8 slices when UTF-16 cuts align with codepoints; split pairs use Java's final replacement encoding. Verified equality/inequality and single-ASCII-character REPLACE consumers fuse in Rust, retaining UTF-8 spans, original Java UTF-16 slices and split surrogate units until the consumer finishes. Remaining batches and consumers retain the released-Flink evaluator. Sensitive results crossing another relational operator retain fallback. Comet uses host codegen. See [native string fusion](../docs/optimizations/native-string-fusion.md) for admission and measurements.
 - **`URL_DECODE`:** A Rust column kernel mirrors the JDK's escape parser and UTF-8 replacement grouping instead of substituting Rust from_utf8_lossy. Flink SQL parity enumerates roughly 100,000 byte/Unicode-digit boundary probes. Rust from_utf8_lossy does not preserve Java replacement grouping. The planner chooses pre-JDK-25 Integer.parseInt escape rules or JDK 25+ ASCII-only HexFormat rules; PARSE_URL remains unadmitted. See the Calc page for admission, semantics, and individual measurements.
-- **`UPPER`/`LOWER` fall back by default** (opt-in via the flag above; asserted by a test). Native (Rust) case
-  folding is locale-independent Unicode, but the JVM's `String.toUpperCase()/toLowerCase()` is
-  locale-sensitive (e.g. Turkish dotless-i), so non-ASCII results can silently differ. DataFusion
-  Comet reached the same conclusion — it routes case conversion through the JVM by default and only
-  uses the native path under an opt-in flag. We do the same: fall back by default, native under the
-  `allowIncompatible` flag, rather than ship a silent non-ASCII divergence.
+- **`UPPER`/`LOWER` use the JVM inside native Calc by default.** The generated expression receives
+  original UTF-16 cache sidecars; no cache means binary-only input. Even ASCII differs under
+  Turkish locale: Java-backed strings use locale-sensitive String conversion while cold binary
+  strings use Flink's character fast path. Dependent consumers share the generated expression.
+  Comet also defaults case conversion to JVM evaluation, but its Spark UTF8String contract does
+  not establish Flink representation parity. The existing `allowIncompatible` flag selects
+  Rust's Unicode conversion explicitly; it is not the default correctness path.
 - **Remaining transcendental math falls back by default** (opt-in via the flag above):
   `EXP`/`LN`/`LOG10`/`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`. These are not IEEE-correctly-rounded, so
   the JVM's `java.lang.Math` (Flink) and DataFusion's Rust libm differ at the last ULP — verified:
@@ -281,7 +282,11 @@ strict NULL propagation applied to `CONCAT` below.
   intermediate binary columns, per-row hex strings, and MD5's string-view-to-UTF-8 copy. The digest
   algorithms are unchanged; the deviation is allocation and output construction, measured in
   `docs/optimizations/string-copy-reduction.md`. `SHA2` literal widths are compared exactly, without
-  narrowing BIGINT values. Exact admission and remaining gaps live in `docs/operators/calc-filter.md`.
+  narrowing BIGINT values. Direct runtime INT widths reuse those digest/hex helpers after a
+  batch width check; NULL returns NULL, while invalid runtime widths keep the released
+  evaluator and its JDK exception. Flink hashes BinaryStringData bytes rather than its decoded
+  Java cache, so this certificate intentionally reads only the bytes. Exact admission and
+  remaining gaps live in `docs/operators/calc-filter.md`.
 - **`CAST`:** widening numeric (`integer→wider int`, `integer→float/double`, `float→double`) is a plain
   Arrow cast — lossless/IEEE-identical. **Narrowing to an integer type** (a wider int, or a float/double,
   → `TINYINT`/`SMALLINT`/`INTEGER`/`BIGINT`) is *not* a plain Arrow cast — arrow's kernel errors on
@@ -365,7 +370,26 @@ Locates the suffix by traversing character boundaries from the end, without an i
 
 ### LPAD
 
-Copies borrowed UTF-8 prefixes and whole padding spans, following Comet's padding structure. A prefix counter measures Flink 2.2.1 UTF-16 units; a cut through a surrogate pair appends the JDK `?` replacement. Intact spans write directly into the Arrow output builder, without a per-row scratch string or whole-row UTF-16 buffers. Newer Flink source counts code points and cannot be substituted for the released runtime.
+Simple literal comparisons and verified ASCII REPLACE consumers can now fuse with LPAD/RPAD
+in Rust. A fixed set of borrowed UTF-8/UTF-16 spans represents truncation and overlay without
+encoding isolated surrogates early. This borrows Comet's buffer reuse and scalar-literal
+discipline, not its Spark code-point semantics. Released Flink counts UTF-16 units, and its
+original Java cache remains authoritative. Growing equality/inequality compares a literal's
+UTF-16 padding period and unchanged source without materializing a repeated padding buffer;
+Comet's standalone padding kernel materializes such a buffer because it returns strings.
+Growing single-ASCII-character REPLACE maps one period and copies it in growing chunks
+directly into the final Arrow buffer, then handles the partial period with the existing
+UTF-16 spans. This avoids a separate repeated padding buffer while preserving Flink's
+split-surrogate semantics. Dynamic consumers and unmeasured replacement contexts retain the
+generated Flink evaluator; no inter-operator string format is
+introduced. See the [Calc coverage](../docs/operators/calc-filter.md#lpad).
+
+Standalone final projections copy borrowed UTF-8 prefixes and whole padding spans, following
+Comet's padding structure. A prefix counter measures released Flink UTF-16 units; a cut through
+a surrogate pair appends the JDK `?` replacement only at the final observation boundary.
+Consumers fuse with padding in a released-Flink generated expression, retaining the isolated
+unit before comparison or replacement. Sensitive intermediate operator boundaries retain
+fallback. Newer Flink source counts code points and cannot replace the released contract.
 
 ### RPAD
 
@@ -374,6 +398,13 @@ Reuses the same UTF-16 prefix accounting and UTF-8 span-copying kernel, placing 
 ### SPLIT_INDEX
 
 Scans only as far as the requested token, retaining empty tokens, instead of constructing the complete split array. An empty separator uses the exact Java Character.isWhitespace set, not Rust is_whitespace or ASCII space alone.
+
+The integer delimiter overload uses released Flink's 1..255 character contract,
+with NULL for invalid delimiters or indices. It uses the same bounded token scan
+over UTF-8 after verifying any original Java UTF-16 cache agrees. Other batches
+retain the existing generated evaluator. Comet's literal split kernel similarly
+borrows UTF-8 slices, but its empty-input/delimiter behavior and Spark code-point
+rules are not substituted for Flink's integer overload.
 
 ### TO_DATE
 
@@ -463,3 +494,28 @@ ENCODE/DECODE keep the charset scalar, matching Comet's scalar-parameter approac
 old to_hex/uppercase array pipeline. LPAD/RPAD write directly to Arrow builders rather than materializing intermediate arrays or
 copying a per-row scratch string. The shared codepoint reverse scan serves SUBSTRING and RIGHT;
 LOCATE reuses memmem for both scalar and column needles.
+
+## Runtime ARRAY_SORT options
+
+DataFusion and Comet provide the primitive-array pattern: copy a flat values span
+once and sort its per-row slices in place. StreamFusion follows that structure
+for runtime Boolean options, with Flink's row-specific direction, independent
+NULL placement and NULL-option result. It does not adopt Spark's comparator
+semantics or DataFusion's requirement that direction be scalar.
+
+Flink's comparator returns a nonzero result for equal non-NULL elements. Java
+TimSort can reject some long duplicate arrays, so the planner keeps its existing
+shorter-than-32 or native-ARRAY_DISTINCT proof before admitting either Rust path.
+Unrestricted arrays and fallible options keep generated Flink evaluation. This
+preserves released behavior without a new JVM callback or representation format.
+
+
+## Java-compatible index ordering
+
+Flink's ARRAY_SORT comparator returns a nonzero result for equal non-NULL values. A total-order
+Arrow sort cannot reproduce every selected identity or the invalid-comparator failure of long
+duplicate inputs. A native index TimSort helper follows Java's run/gallop schedule using the
+Apache-licensed Android implementation carried by Apache Spark 4.0.1. Its independent JDK 17
+Arrays.sort fixture checks 480 complete index orders or failures, including 107 comparator
+errors. The checked Java generator reproduces the compressed fixture. This helper changes no
+SQL admission by itself; the Calc coverage page defines the wired native paths.

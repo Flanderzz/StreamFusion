@@ -92,6 +92,17 @@ output is already the `Utf8` representation that the Java boundary requires. Sca
 scalar results; sliced and empty arrays retain their validity and offset contracts. Invalid arity
 returns a DataFusion error instead of panicking at expression construction.
 
+Direct runtime INT widths in `SHA2` use the same digest-to-hex helper. A batch first checks
+non-NULL widths and sizes only the surviving digests, then writes mixed 224/256/384/512
+outputs into one offsets/value allocation. Invalid runtime widths retain released JDK
+evaluation; computed inputs retain the existing exact scalar route. Already-columnar
+parameters are borrowed, with no unused decoded-string sidecars: Flink hashes the original
+BinaryStringData bytes. The [runtime-width measurements](../benchmarks/scalar-functions.md#runtime-sha2-widths)
+compare the real preceding native bridge, released generated Flink and the compiled candidate.
+The 18 prepared-input profiles run 2.51-4.83x stock and 4.10-8.93x previous native;
+the separate startup-inclusive 2M-row job retains both transposes and runs 2.20x stock
+and 2.37x previous. These gains apply to the tested valid direct signatures.
+
 The end-to-end diagnostics and reproduction commands live on the [coverage page](../operators/calc-filter.md#string-concatenation-and-hashes).
 They include both row/Arrow transposes and a rowwise sink; their ratios are not isolated kernel
 speedups.

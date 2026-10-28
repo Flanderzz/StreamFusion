@@ -39,17 +39,24 @@ process abort still requires verification in the full suite.
 
 ## Direct generated-expression dispatch
 
-Known, final internal Flink expression evaluators without top-level string arguments receive a
+Known, final internal Flink expression evaluators without ordinary top-level string arguments receive a
 reusable Arrow-backed `RowData` view of the imported argument batch and invoke the same released
-Flink generated code. Generated expressions with string arguments retain typed column
-materialization and Java-backed `StringData`: Flink's UTF-16 comparison, string identity and
-empty-string trim behavior depend on this representation. They still call the generated
+Flink generated code. Ordinary generated string arguments retain typed column materialization.
+Representation-sensitive case conversion and fused STRING-identity consumers instead borrow
+the imported Arrow row with original UTF-16 cache sidecars. An absent cache stays binary-only;
+forcing every value into Java-backed `StringData` would change locale-sensitive casing.
+Flink's UTF-16 comparison, string identity and empty-string trim behavior also depend on the
+original representation. These paths still call the generated
 evaluator directly, without reflective dispatch. The borrowed path avoids
 materializing `Object[][]` argument columns, repacking a generic row, reflective varargs packing,
 and `Method.invoke` on every row. The borrowed view remains inside the imported batch's lifetime;
 each result is written before advancing to the next row. Generic user functions retain their
 resolved reflective call path and typed column materialization. Arrow conversion and the
 once-per-batch JNI boundary remain in the measured path.
+Verified [padding/overlay consumers](native-string-fusion.md) instead execute entirely in Rust
+when their batch meets the native conditions. They retain this generated evaluator for the
+remaining batches. The planner's `jvmFunctions` list describes the retained execution option;
+it does not count actual callbacks.
 Failures retain the original cause through the existing native exception handover, including checked
 exceptions and `Error`s. Open/close and classloader ownership are unchanged.
 

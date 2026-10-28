@@ -28,7 +28,7 @@ final class JvmGroupAggregateMatcher {
     return false;
   }
 
-  private static boolean verifiedCollectionAggregate(
+  static boolean verifiedCollectionAggregate(
       StreamPhysicalGroupAggregate node, org.apache.calcite.rel.core.AggregateCall call) {
     boolean collect =
         call.getAggregation()
@@ -41,13 +41,92 @@ final class JvmGroupAggregateMatcher {
                 org.apache.calcite.sql.type.SqlTypeName.TINYINT,
                 org.apache.calcite.sql.type.SqlTypeName.SMALLINT,
                 org.apache.calcite.sql.type.SqlTypeName.INTEGER,
-                org.apache.calcite.sql.type.SqlTypeName.BIGINT)
+                org.apache.calcite.sql.type.SqlTypeName.BIGINT,
+                org.apache.calcite.sql.type.SqlTypeName.DATE,
+                org.apache.calcite.sql.type.SqlTypeName.TIME)
             .contains(value.getSqlTypeName())
         && call.getType().getSqlTypeName()
             == (collect
                 ? org.apache.calcite.sql.type.SqlTypeName.MULTISET
                 : org.apache.calcite.sql.type.SqlTypeName.ARRAY)
-        && call.getType().getComponentType().getSqlTypeName() == value.getSqlTypeName();
+        && call.getType().getComponentType().getSqlTypeName() == value.getSqlTypeName()
+        && (value.isNullable()
+            || !java.util.Set.of(
+                    org.apache.calcite.sql.type.SqlTypeName.DATE,
+                    org.apache.calcite.sql.type.SqlTypeName.TIME)
+                .contains(value.getSqlTypeName())
+            || !materializesTemporalHints(node.getInput()));
+  }
+
+  static boolean unverifiedTemporalCollectionInput(RelNode node) {
+    if (node instanceof StreamPhysicalGroupAggregate) {
+      var aggregate = (StreamPhysicalGroupAggregate) node;
+      for (int i = 0; i < aggregate.aggCalls().size(); i++) {
+        var call = aggregate.aggCalls().apply(i);
+        if (call.getArgList().size() != 1
+            || !(call.getAggregation()
+                    == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
+                || tech.streamfusion.compat.FlinkCompat.isBuiltinArrayAgg(call.getAggregation())))
+          continue;
+        var type =
+            aggregate
+                .getInput()
+                .getRowType()
+                .getFieldList()
+                .get(call.getArgList().get(0))
+                .getType();
+        if (!type.isNullable()
+            && java.util.Set.of(
+                    org.apache.calcite.sql.type.SqlTypeName.DATE,
+                    org.apache.calcite.sql.type.SqlTypeName.TIME)
+                .contains(type.getSqlTypeName())
+            && materializesTemporalHints(aggregate.getInput())) return true;
+      }
+    }
+    return node.getInputs().stream()
+        .anyMatch(JvmGroupAggregateMatcher::unverifiedTemporalCollectionInput);
+  }
+
+  // A released Calc can expose a NULL source row's hidden primitive payload under these
+  // hints. Arrow validity retains the NULL, not that source-specific unchecked getter value.
+  private static boolean materializesTemporalHints(RelNode node) {
+    if (node instanceof org.apache.calcite.rel.core.Calc) {
+      var calc = (org.apache.calcite.rel.core.Calc) node;
+      var program = calc.getProgram();
+      if (program.getCondition() != null
+          && readsTemporalHint(program.expandLocalRef(program.getCondition()))) return true;
+      boolean identity =
+          program.getProjectList().size() == calc.getInput().getRowType().getFieldCount();
+      for (int i = 0; identity && i < program.getProjectList().size(); i++) {
+        var projection = program.expandLocalRef(program.getProjectList().get(i));
+        identity =
+            projection instanceof org.apache.calcite.rex.RexInputRef
+                && ((org.apache.calcite.rex.RexInputRef) projection).getIndex() == i;
+      }
+      if (!identity
+          && program.getProjectList().stream()
+              .map(program::expandLocalRef)
+              .anyMatch(JvmGroupAggregateMatcher::readsTemporalHint)) return true;
+    }
+    return node.getInputs().stream().anyMatch(JvmGroupAggregateMatcher::materializesTemporalHints);
+  }
+
+  private static boolean readsTemporalHint(org.apache.calcite.rex.RexNode expression) {
+    boolean[] found = {false};
+    expression.accept(
+        new org.apache.calcite.rex.RexVisitorImpl<Void>(true) {
+          @Override
+          public Void visitInputRef(org.apache.calcite.rex.RexInputRef input) {
+            var type = input.getType();
+            if (!type.isNullable()
+                && java.util.Set.of(
+                        org.apache.calcite.sql.type.SqlTypeName.DATE,
+                        org.apache.calcite.sql.type.SqlTypeName.TIME)
+                    .contains(type.getSqlTypeName())) found[0] = true;
+            return null;
+          }
+        });
+    return found[0];
   }
 
   private static AggregateFunction<?, ?> userFunction(SqlAggFunction function) {

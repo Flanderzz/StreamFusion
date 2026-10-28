@@ -41,7 +41,7 @@ consumption, using the same consumed-row recorder as the other columnar operator
 
 The unchanged SQL `AggregateITCase.testUnboundedGroupByCollect` now has explicit contracts
 and route scopes for all seven 2.2 and six 1.18 variants. Synchronous HEAP/ROCKSDB variants
-require consumed input in the JVM group itself, not merely a Calc; the local runs observe 21
+require consumed input in the Rust group aggregate itself, not merely a Calc; the local runs observe 21
 rows each. The local candidate run
 matches two native/five fallback cases on 2.2 and two native/four fallback cases on 1.18.
 Mini-batch/local-global and async-state variants retain exact fallback reasons; 1.18 additionally
@@ -49,6 +49,15 @@ follows the fixture's observed changelog-state setting. These runs preserve the 
 configuration and source recovery. The suite agent reads the pinned mini-batch mode's `on()`
 boolean through a `miniBatch=true|false` selector; its display string contains an equals sign
 and is not used as a selector value. No upstream test or setting is changed to force a route.
+
+The unchanged streaming SQL `CalcITCase.testNonPrimitiveMapType` requires consumed NativeCalc
+work on Flink 2.2. It constructs a MAP from runtime integer and STRING columns and retains
+upstream's output assertions. Flink 1.18's legacy output context retains the existing
+`collection value representation requires a final projection or fused consumer` fallback,
+with an exact fallback contract and runtime-route scope. That boundary remains with
+[#234](https://github.com/datafusion-contrib/StreamFusion/issues/234). Standard runtime-source
+collection SQL tests on both lines additionally require empty JVM-evaluator descriptors for
+the new STRING constructor kernels; a NativeCalc label alone does not establish Rust scalar execution.
 
 The agent self-tests select their contract resource once per JVM. With JDK 17, run separate
 Maven invocations from the repository root for each supported resource, including native
@@ -452,7 +461,7 @@ fixtures require `native` for `changelog=false` and `full_fallback` for `changel
 exact witness is independently checked against the existing execution contract. No upstream test
 configuration is changed to force a preferred route.
 
-The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 115 and 95
+The bundled `runtime-route-scope-2.2.json` and `runtime-route-scope-1.18.json` require 116 and 96
 verified runtime variants respectively. Run them with:
 
 ```sh
@@ -460,7 +469,7 @@ FLINK_VERSION=2.2.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 FLINK_VERSION=1.18.1 FLINK_SUITE_RUNTIME_AUDIT=true bin/flink-suite.sh runtime
 ```
 
-The option selects the scope's upstream methods (25 on 2.2 and 24 on 1.18), enables fresh SQL inventory collection/reporting,
+The option selects the scope's upstream methods (26 on 2.2 and 25 on 1.18), enables fresh SQL inventory collection/reporting,
 and applies the appropriate scope automatically. Add `FLINK_SUITE_REUSE_BUILD=true` after a
 compatible suite build. A custom `FLINK_SUITE_TEST` selection must still satisfy every required
 variant; omitted variants fail. The audit option requires the runtime suite and cannot be combined
