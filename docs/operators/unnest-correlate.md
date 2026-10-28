@@ -856,3 +856,10 @@ restores and consumed-row/memory-release assertions. Container signatures with u
 conversions or representation consumers, and an explicitly disabled table-function operator,
 retain complete-query fallback with zero native substitutions. Other JVM function contracts remain
 tracked in [#237](https://github.com/datafusion-contrib/StreamFusion/issues/237).
+
+
+The structural scalar-array producer check also covers the verified TIMESTAMP/TIMESTAMP_LTZ and
+interval ARRAY_AGG families on 2.2. Nullable results keep Arrow UNNEST; NOT NULL-element results
+reuse the preserving generated consumer, including ordinality and heap/native RocksDB recovery.
+[Aggregate coverage](group-by.md#timestamp-and-interval-collection-elements) specifies the same
+source-hint, representation, state/order and writer gates. ARRAY_AGG is N/A on 1.18.

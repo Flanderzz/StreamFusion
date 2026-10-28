@@ -40,7 +40,11 @@ impl CollectionElement for FloatElement {
         };
         (hash ^ (hash >> 16)) as i32
     }
-    fn array(&self, values: impl IntoIterator<Item = Option<FloatingKey>>) -> ArrayRef {
+    fn array(
+        &self,
+        values: impl IntoIterator<Item = Option<FloatingKey>>,
+        _: &DataType,
+    ) -> ArrayRef {
         match self {
             Self::Float32 => Arc::new(arrow::array::Float32Array::from(
                 values
@@ -87,11 +91,54 @@ impl CollectionElement for DecimalElement {
     fn hash(&self, value: i128) -> i32 {
         super::super::decimal_map_order::decimal_hash(value, self.scale)
     }
-    fn array(&self, values: impl IntoIterator<Item = Option<i128>>) -> ArrayRef {
+    fn array(&self, values: impl IntoIterator<Item = Option<i128>>, _: &DataType) -> ArrayRef {
         Arc::new(
             arrow::array::Decimal128Array::from(values.into_iter().collect::<Vec<_>>())
                 .with_precision_and_scale(self.precision, self.scale)
                 .expect("verified decimal element type"),
         )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) enum TimestampElement {
+    Components,
+}
+
+impl CollectionElement for TimestampElement {
+    type Value = i128;
+    fn from_type(ty: &DataType) -> Self {
+        assert!(streamfusion_bridge::timestamp::is_component_timestamp(ty));
+        Self::Components
+    }
+    fn scalar(&self, value: Option<i128>) -> ScalarValue {
+        // Shared DISTINCT retention uses the same full-range key as ordered timestamp values.
+        ScalarValue::Decimal128(value, 38, 0)
+    }
+    fn value(&self, value: &ScalarValue) -> Option<i128> {
+        match super::super::ordered_value::compact_value(value.clone()) {
+            ScalarValue::Decimal128(value, 38, 0) => value,
+            _ => unreachable!("timestamp collection membership"),
+        }
+    }
+    fn hash(&self, value: i128) -> i32 {
+        let millis = value.div_euclid(1_000_000) as i64;
+        let hash = (millis ^ (millis >> 32)) as u32;
+        let hash = hash
+            .wrapping_mul(31)
+            .wrapping_add(value.rem_euclid(1_000_000) as u32);
+        (hash ^ (hash >> 16)) as i32
+    }
+    fn array(&self, values: impl IntoIterator<Item = Option<i128>>, ty: &DataType) -> ArrayRef {
+        let array: ArrayRef = Arc::new(streamfusion_bridge::timestamp::timestamp_array(
+            values.into_iter().map(|value| {
+                value.map(|value| {
+                    streamfusion_bridge::timestamp::TimestampValue::from_nanos(value)
+                        .expect("timestamp collection range")
+                })
+            }),
+        ));
+        streamfusion_bridge::timestamp::cast_timestamp(&array, ty)
+            .expect("verified timestamp collection output")
     }
 }

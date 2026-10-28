@@ -2,10 +2,6 @@ package tech.streamfusion.planner;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 
-import tech.streamfusion.operator.ArrowBatch;
-import tech.streamfusion.operator.ArrowBatchTypeInformation;
-import tech.streamfusion.operator.OrderedKeyGroupReassembler;
-import tech.streamfusion.operator.SplitByKeyGroupOperator;
 import java.util.Collections;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.configuration.ReadableConfig;
@@ -20,13 +16,17 @@ import org.apache.flink.table.planner.plan.nodes.exec.SingleTransformationTransl
 import org.apache.flink.table.planner.plan.nodes.exec.stream.StreamExecNode;
 import org.apache.flink.table.planner.plan.nodes.exec.utils.ExecNodeUtil;
 import org.apache.flink.table.types.logical.RowType;
+import tech.streamfusion.operator.ArrowBatch;
+import tech.streamfusion.operator.ArrowBatchTypeInformation;
+import tech.streamfusion.operator.OrderedKeyGroupReassembler;
+import tech.streamfusion.operator.SplitByKeyGroupOperator;
 
 /**
  * Builds the columnar keyed exchange transformation: a {@link SplitByKeyGroupOperator} that splits
- * each Arrow batch into one sub-batch per destination (or recoverable key group), followed by a {@link
- * PartitionTransformation} using {@link ColumnarKeyGroupPartitioner} to route each sub-batch to its
- * current owner. The result is an {@code ArrowBatch} stream the downstream native operator consumes
- * without a row transpose; watermarks ride through the partition transformation as usual.
+ * each Arrow batch into one sub-batch per destination (or recoverable key group), followed by a
+ * {@link PartitionTransformation} using {@link ColumnarKeyGroupPartitioner} to route each sub-batch
+ * to its current owner. The result is an {@code ArrowBatch} stream the downstream native operator
+ * consumes without a row transpose; watermarks ride through the partition transformation as usual.
  */
 public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
     implements StreamExecNode<ArrowBatch>, SingleTransformationTranslator<ArrowBatch> {
@@ -35,6 +35,7 @@ public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
 
   private final int[] keyColumns;
   private final int[] timestampPrecisions;
+  private final int[] compactTimestampColumns;
   private final boolean singleKeyGroup;
 
   public NativeColumnarExchangeExecNode(
@@ -57,6 +58,23 @@ public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
         "A single-key-group exchange requires a SINGLETON distribution");
     this.keyColumns = keyColumns;
     this.timestampPrecisions = timestampPrecisions;
+    this.compactTimestampColumns =
+        java.util.stream.IntStream.range(0, outputType.getFieldCount())
+            .filter(
+                index -> {
+                  var type = outputType.getTypeAt(index);
+                  var root = type.getTypeRoot();
+                  return (root
+                              == org.apache.flink.table.types.logical.LogicalTypeRoot
+                                  .TIMESTAMP_WITHOUT_TIME_ZONE
+                          || root
+                              == org.apache.flink.table.types.logical.LogicalTypeRoot
+                                  .TIMESTAMP_WITH_LOCAL_TIME_ZONE)
+                      && org.apache.flink.table.types.logical.utils.LogicalTypeChecks.getPrecision(
+                              type)
+                          <= 3;
+                })
+            .toArray();
     this.singleKeyGroup = singleKeyGroup;
   }
 
@@ -82,7 +100,8 @@ public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
     // other consumers honor the configured count, independently of the destination count.
     int maxParallelism =
         singleKeyGroup ? 1 : FlinkKeyGroupUtils.maxParallelism(planner.getExecEnv(), numChannels);
-    boolean recoverable = planner.getExecEnv().getCheckpointConfig().isUnalignedCheckpointsEnabled();
+    boolean recoverable =
+        planner.getExecEnv().getCheckpointConfig().isUnalignedCheckpointsEnabled();
     // Aligned jobs keep destination batching. Unaligned-enabled jobs use independently recoverable
     // key-group fragments because any checkpoint can capture the already-buffered network records.
     Transformation<ArrowBatch> split =
@@ -90,7 +109,11 @@ public class NativeColumnarExchangeExecNode extends ExecNodeBase<ArrowBatch>
             input,
             createTransformationMeta(TRANSFORMATION, config),
             new SplitByKeyGroupOperator(
-                keyColumns, timestampPrecisions, maxParallelism, recoverable),
+                keyColumns,
+                timestampPrecisions,
+                maxParallelism,
+                recoverable,
+                compactTimestampColumns),
             NativeConfig.zeroCopyExchange(planner.getExecEnv())
                 ? ArrowBatchTypeInformation.ZERO_COPY
                 : ArrowBatchTypeInformation.INSTANCE,

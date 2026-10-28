@@ -3428,3 +3428,11 @@ scalar hint in a predicate or materializes it in a non-identity projection. Rele
 the source row's unchecked primitive payload beneath an actual NULL slot, which Arrow validity
 does not retain. This guard is scoped to collection aggregate admission. Direct source hints,
 key-only identity filters and COALESCE from nullable input remain verified aggregate contexts.
+
+
+Collection aggregate input guards also cover TIMESTAMP/TIMESTAMP_LTZ and both interval families.
+A materializing Calc over unsupported NOT NULL source hints retains released Flink execution;
+nullable inputs and explicitly matching timestamp comparison kinds retain their verified paths.
+The [timestamp/interval aggregate contract](group-by.md#timestamp-and-interval-collection-elements)
+also documents the released four-digit DAY precision planning error and native exchange copy
+semantics. The existing 1.18 mixed timestamp comparison normalization remains unchanged.

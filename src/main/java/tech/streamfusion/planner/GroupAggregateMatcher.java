@@ -535,8 +535,14 @@ final class GroupAggregateMatcher {
         }
       }
       if (retainsValue) {
+        var value = inputType.getFieldList().get(call.getArgList().get(0)).getType();
         codes[i] =
-            retainedValueTypeCode(inputType.getFieldList().get(call.getArgList().get(0)).getType());
+            collectionKind(call) >= 0 && intervalValueType(value.getSqlTypeName())
+                ? value.getSqlTypeName().getFamily()
+                        == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_YEAR_MONTH
+                    ? 2
+                    : 0
+                : retainedValueTypeCode(value);
       }
       if (call.isDistinct()
           && !call.getArgList().isEmpty()

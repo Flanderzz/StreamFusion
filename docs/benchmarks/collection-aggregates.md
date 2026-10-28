@@ -725,3 +725,108 @@ Reproduce with the complete-job command above, `-Djvmagg.cases=expanded_array_ag
 runs. Candidate uses `-Djvmagg.expectNative=true`; the preceding production revision uses
 `false` and must execute no native operators. Other existing ARRAY_AGG suffixes also accept
 the `expanded_` prefix for focused route checks.
+
+
+## Timestamp and interval element families
+
+TIMESTAMP/TIMESTAMP_LTZ use the shared native collection algorithm with owned full-range i128
+keys, the existing component reader and TimestampData hashing. Year-month/day-time intervals
+reuse the primitive month/millisecond codecs. The required native exchange copy boundary
+clears compact timestamp sub-millisecond remainders before both single-channel and partitioned
+exchange, matching Flink's serializer and preserving subsequent COLLECT map iteration.
+[Coverage and restore limits](../operators/group-by.md#timestamp-and-interval-collection-elements)
+include the released DAY(4) cast planning error and historical compact timestamp state boundary.
+
+[All 1,080 complete jobs, sources/library hashes, paired controls and two CPU captures](results/temporal-interval-collection-state-2026-10-28.json)
+retain the initial 720 jobs and one focused pass's 360 jobs. The actual preceding Java/native
+code is `4fd9d15e`; only identical benchmark fixtures are copied into its isolated builds. New
+temporal/interval cases require previous fallback. BIGINT collection and MIN TIMESTAMP(3)
+with COUNT(*) remain native in both revisions. All 420 expected grouped observations consume
+the configured row count. No competing Java/native build or test was observed in any cohort.
+
+Runs use Flink 2.2.1/1.18.1, OpenJDK 17.0.20.1, release+mimalloc, an 8 GiB heap, one task,
+1,024-row perimeter batches, IPC exchange, zero accumulator cache entries, two warmups and three
+alternating measurements per engine. COLLECT uses 200,000 runtime RowData records; ARRAY_AGG
+uses 50,000 and is N/A on 1.18. Both use 64/4096 INT keys, eight seeds and NULL every eighth
+row. Timestamp values span years 1/1970/9999 with fractional nanoseconds. Year-month values
+use I32, and day-time millisecond values exceed 32-bit range. Source schemas explicitly declare
+the logical temporal type. Timers retain planning/submission, production JNI/state, both
+row/Arrow transposes and a blackhole row sink; initial EXPLAIN and MiniCluster setup are outside.
+
+Final median seconds (minimum–maximum). Previous new-type cases are fallback; BIGINT and MIN
+controls are native. Each revision/pass retains its separately paired stock controls in the
+artifact, so cross-JVM movement is visible.
+
+| Line / keys / shape | Final paired stock | Previous StreamFusion | Final native |
+| --- | ---: | ---: | ---: |
+| 2.2 / 64 / collect_timestamp3 | 0.439916 (0.318148–0.444052) | 0.381486 (0.375575–0.388854) | 0.528791 (0.510544–0.545845) |
+| 2.2 / 64 / collect_timestamp9 | 0.320575 (0.309698–0.393724) | 0.310323 (0.309086–0.312347) | 0.520272 (0.514901–0.536467) |
+| 2.2 / 64 / collect_interval_month | 0.312613 (0.311028–0.313273) | 0.310072 (0.309498–0.318775) | 0.373783 (0.357564–0.374778) |
+| 2.2 / 64 / collect_interval_day | 0.333642 (0.328940–0.405322) | 0.317383 (0.315968–0.318505) | 0.373285 (0.371099–0.377387) |
+| 2.2 / 64 / collect | 0.313128 (0.307401–0.320929) | 0.385527 (0.376790–0.392681) | 0.371519 (0.369943–0.382803) |
+| 2.2 / 64 / min_timestamp3 | 0.142045 (0.138790–0.143378) | 0.340405 (0.335723–0.342983) | 0.340779 (0.332849–0.344703) |
+| 2.2 / 4096 / collect_timestamp3 | 0.477187 (0.415544–0.511665) | 0.443834 (0.384778–0.466644) | 0.589026 (0.571574–0.598551) |
+| 2.2 / 4096 / collect_timestamp9 | 0.432834 (0.349591–0.459340) | 0.360420 (0.351034–0.370145) | 0.558410 (0.556847–0.564077) |
+| 2.2 / 4096 / collect_interval_month | 0.343719 (0.343607–0.377173) | 0.363527 (0.341203–0.388674) | 0.370228 (0.367534–0.385022) |
+| 2.2 / 4096 / collect_interval_day | 0.376071 (0.352701–0.380411) | 0.364404 (0.362571–0.368487) | 0.395917 (0.390347–0.398499) |
+| 2.2 / 4096 / collect | 0.415182 (0.344293–0.449999) | 0.396470 (0.394263–0.403023) | 0.397501 (0.388666–0.422443) |
+| 2.2 / 4096 / min_timestamp3 | 0.146815 (0.140490–0.173256) | 0.361824 (0.349676–0.370828) | 0.364129 (0.345921–0.405477) |
+| 2.2 / 64 / array_agg_timestamp3 | 0.871428 (0.830123–0.888429) | 0.677224 (0.633716–0.880480) | 0.475057 (0.427914–0.515917) |
+| 2.2 / 64 / array_agg_timestamp9 | 0.842571 (0.665472–0.860158) | 0.659099 (0.625679–0.726751) | 0.421450 (0.418763–0.432252) |
+| 2.2 / 64 / array_agg_interval_month | 0.620463 (0.524524–0.680582) | 0.586492 (0.561591–0.759259) | 0.246855 (0.241229–0.248197) |
+| 2.2 / 64 / array_agg_interval_day | 0.831598 (0.634520–0.923233) | 0.638915 (0.603805–0.821160) | 0.328628 (0.326650–0.335460) |
+| 2.2 / 64 / array_agg | 0.584274 (0.581305–0.870570) | 0.288701 (0.281487–0.293552) | 0.327387 (0.322866–0.334375) |
+| 2.2 / 64 / min_timestamp3 | 0.086566 (0.083596–0.091424) | 0.140545 (0.134305–0.140636) | 0.135706 (0.127781–0.138032) |
+| 2.2 / 4096 / array_agg_timestamp3 | 0.172590 (0.113524–0.224448) | 0.173339 (0.107597–0.214507) | 0.128303 (0.125540–0.202798) |
+| 2.2 / 4096 / array_agg_timestamp9 | 0.109903 (0.099430–0.116646) | 0.097178 (0.092518–0.166864) | 0.125304 (0.114516–0.127005) |
+| 2.2 / 4096 / array_agg_interval_month | 0.103680 (0.095970–0.127722) | 0.102840 (0.094125–0.104824) | 0.098238 (0.094311–0.102176) |
+| 2.2 / 4096 / array_agg_interval_day | 0.101791 (0.099082–0.110817) | 0.106995 (0.092067–0.109441) | 0.098068 (0.091714–0.105245) |
+| 2.2 / 4096 / array_agg | 0.099093 (0.095407–0.102629) | 0.108812 (0.106727–0.116080) | 0.105680 (0.100373–0.109161) |
+| 2.2 / 4096 / min_timestamp3 | 0.083553 (0.083390–0.093328) | 0.151000 (0.149721–0.154751) | 0.152761 (0.147268–0.163514) |
+| 1.18 / 64 / collect_timestamp3 | 0.425261 (0.309746–0.470076) | 0.308883 (0.301271–0.335683) | 0.525663 (0.501168–0.534349) |
+| 1.18 / 64 / collect_timestamp9 | 0.303264 (0.298533–0.348748) | 0.302565 (0.298001–0.308478) | 0.498279 (0.496763–0.506235) |
+| 1.18 / 64 / collect_interval_month | 0.311108 (0.310690–0.318292) | 0.304061 (0.292975–0.326582) | 0.355967 (0.345618–0.372366) |
+| 1.18 / 64 / collect_interval_day | 0.411792 (0.340408–0.543153) | 0.310818 (0.307397–0.314854) | 0.423095 (0.386546–0.427949) |
+| 1.18 / 64 / collect | 0.322348 (0.318704–0.323611) | 0.381967 (0.376576–0.383099) | 0.359806 (0.356204–0.360685) |
+| 1.18 / 64 / min_timestamp3 | 0.141385 (0.130811–0.146613) | 0.338223 (0.334853–0.348422) | 0.334806 (0.332220–0.341086) |
+| 1.18 / 4096 / collect_timestamp3 | 0.424140 (0.417999–0.481334) | 0.371443 (0.355589–0.374963) | 0.570734 (0.558189–0.614636) |
+| 1.18 / 4096 / collect_timestamp9 | 0.343805 (0.330647–0.398302) | 0.357641 (0.337422–0.374597) | 0.562878 (0.531065–0.572545) |
+| 1.18 / 4096 / collect_interval_month | 0.371950 (0.340290–0.380317) | 0.358658 (0.351014–0.378769) | 0.365112 (0.364166–0.386349) |
+| 1.18 / 4096 / collect_interval_day | 0.377785 (0.365343–0.404279) | 0.373204 (0.359755–0.380358) | 0.390133 (0.380906–0.397588) |
+| 1.18 / 4096 / collect | 0.361846 (0.353103–0.363178) | 0.392311 (0.379747–0.416121) | 0.385109 (0.372683–0.394312) |
+| 1.18 / 4096 / min_timestamp3 | 0.146825 (0.126530–0.148337) | 0.366146 (0.361097–0.370771) | 0.353819 (0.346692–0.376993) |
+
+At 64 keys on 2.2, compact/full-precision timestamp arrays beat paired stock by 1.83×/2.00×,
+and month/day-time interval arrays by 2.51×/2.53×. Timestamp COLLECT remains slower: 0.529/0.520 s
+versus paired stock's 0.440/0.321 s. At 4096 keys the timestamp array medians are 0.128/0.125 s
+versus stock's 0.173/0.110 s; ranges overlap in these short jobs. Interval arrays approach parity
+there. On 1.18, temporal COLLECT still loses stock; high-cardinality month intervals are near
+parity. These are complete-job costs, not universal sustained-throughput claims.
+
+The existing MIN TIMESTAMP(3) control at 200,000 rows/64 keys takes 0.341 s final versus 0.340 s
+previous native, while paired stock takes 0.142 s. Its pre-existing loss remains visible. BIGINT
+ARRAY_AGG/64 takes 0.327 s final versus previous native 0.289 s, with an initial new-family
+median of 0.328 s before the focused pass. All controls and ranges remain in the table/artifact;
+the timestamp-specific pass does not erase that absolute difference.
+
+The first eight-second CPU capture has 15,580 samples: collection emission appears in 1,752,
+timestamp casts in 860, Arrow data reconstruction in 1,177 and typed updates in 25. The single
+measured optimization returns exact-typed timestamp Arrow arrays before rebuilding component
+ArrayData. TIMESTAMP(9) COLLECT/64 improves from 0.668 to 0.520 s and TIMESTAMP(3) from 0.690 to
+0.529 s, about 22–23%. A second eight-second confirmation capture has 15,756 samples: timestamp
+casts appear in 33, emission in 1,280, reconstruction in 610 and nested equality in 600.
+Categories overlap and include all threads, JIT and untimed cluster setup between jobs; they
+are diagnosis rather than isolated kernel timings or allocation/copy-byte measurements.
+
+This closes the bounded investigation after one measured optimization and two captures.
+Native result construction, nested equality and Java boundaries remain follow-up
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239). Slower collection cases
+ship as accepted aggregate groundwork, without another tuning pass or an acceleration claim.
+
+Reproduce using the complete-job command above with
+`-Djvmagg.cases=collect_timestamp3,collect_timestamp9,collect_interval_month,collect_interval_day,collect,min_timestamp3`,
+200,000 rows, 64/4096 keys, eight values, two warmups and three runs. ARRAY_AGG uses the matching
+`array_agg*` names and 50,000 rows. The `timestamp0` and `ltz0/3/9` suffixes also support route
+smokes. Prior new-type runs set `-Djvmagg.expectNative=false` and
+`-Djvmagg.expectedNativeCases=collect,min_timestamp3` (or `array_agg,min_timestamp3`) to retain
+native control assertions. Add the Flink 1.18 Maven profile for its COLLECT-only comparison.

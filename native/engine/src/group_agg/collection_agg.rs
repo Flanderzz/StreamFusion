@@ -2,7 +2,7 @@ use super::java_map_order::JavaMapOrder;
 use crate::*;
 use serde::{Deserialize, Serialize};
 mod elements;
-use elements::{DecimalElement, FloatElement};
+use elements::{DecimalElement, FloatElement, TimestampElement};
 
 pub(super) fn is_collection(kind: i64) -> bool {
     (48..=53).contains(&kind)
@@ -119,6 +119,7 @@ enum CollectionStorage {
     Primitive(TypedCollectionState<PrimitiveType>),
     Float(TypedCollectionState<FloatElement>),
     Decimal(TypedCollectionState<DecimalElement>),
+    Timestamp(TypedCollectionState<TimestampElement>),
 }
 
 pub(crate) struct CollectionState {
@@ -131,6 +132,7 @@ macro_rules! with_storage {
             CollectionStorage::Primitive($state) => $body,
             CollectionStorage::Float($state) => $body,
             CollectionStorage::Decimal($state) => $body,
+            CollectionStorage::Timestamp($state) => $body,
         }
     };
 }
@@ -138,6 +140,9 @@ macro_rules! with_storage {
 impl CollectionState {
     pub(super) fn new(kind: i64, ty: &DataType) -> Self {
         let storage = match ty {
+            ty if streamfusion_bridge::timestamp::is_component_timestamp(ty) => {
+                CollectionStorage::Timestamp(TypedCollectionState::new(kind, ty))
+            }
             DataType::Float32 | DataType::Float64 => {
                 CollectionStorage::Float(TypedCollectionState::new(kind, ty))
             }
@@ -180,6 +185,18 @@ impl CollectionState {
                 ttl,
                 append_distinct,
             ),
+            (CollectionStorage::Timestamp(state), CollectionColumn::Timestamp(column)) => state
+                .update(
+                    (!column.is_null(row)).then(|| {
+                        column
+                            .value(row)
+                            .expect("timestamp collection value")
+                            .nanos()
+                    }),
+                    retract,
+                    ttl,
+                    append_distinct,
+                ),
             _ => unreachable!("collection column and codec must agree"),
         }
     }
@@ -223,7 +240,11 @@ trait CollectionElement: Clone + PartialEq {
     fn scalar(&self, value: Option<Self::Value>) -> ScalarValue;
     fn value(&self, value: &ScalarValue) -> Option<Self::Value>;
     fn hash(&self, value: Self::Value) -> i32;
-    fn array(&self, values: impl IntoIterator<Item = Option<Self::Value>>) -> ArrayRef;
+    fn array(
+        &self,
+        values: impl IntoIterator<Item = Option<Self::Value>>,
+        ty: &DataType,
+    ) -> ArrayRef;
 }
 
 impl CollectionElement for PrimitiveType {
@@ -240,7 +261,7 @@ impl CollectionElement for PrimitiveType {
     fn hash(&self, value: i64) -> i32 {
         hash(value, &self.data_type())
     }
-    fn array(&self, values: impl IntoIterator<Item = Option<i64>>) -> ArrayRef {
+    fn array(&self, values: impl IntoIterator<Item = Option<i64>>, _: &DataType) -> ArrayRef {
         let ty = &self.data_type();
         match ty {
             DataType::Boolean => Arc::new(BooleanArray::from(
@@ -450,7 +471,8 @@ where
             let entries = arrow::array::StructArray::new(
                 fields.clone(),
                 vec![
-                    self.element.array(keys.into_iter().map(Some)),
+                    self.element
+                        .array(keys.into_iter().map(Some), fields[0].data_type()),
                     Arc::new(Int32Array::from(counts)),
                 ],
                 None,
@@ -472,7 +494,8 @@ where
             ScalarValue::List(Arc::new(arrow::array::ListArray::new(
                 field.clone(),
                 arrow::buffer::OffsetBuffer::from_lengths([self.values.len()]),
-                self.element.array(self.values.iter().copied()),
+                self.element
+                    .array(self.values.iter().copied(), field.data_type()),
                 None,
             )))
         }
@@ -510,6 +533,7 @@ where
 }
 
 pub(super) enum CollectionColumn<'a> {
+    Timestamp(streamfusion_bridge::timestamp::TimestampColumn<'a>),
     F32(&'a arrow::array::Float32Array),
     F64(&'a arrow::array::Float64Array),
     Decimal(&'a arrow::array::Decimal128Array),
@@ -524,6 +548,10 @@ pub(super) enum CollectionColumn<'a> {
 impl<'a> CollectionColumn<'a> {
     pub(super) fn new(array: &'a ArrayRef) -> Self {
         match array.data_type() {
+            ty if streamfusion_bridge::timestamp::is_component_timestamp(ty) => Self::Timestamp(
+                streamfusion_bridge::timestamp::TimestampColumn::try_new(array.as_ref())
+                    .expect("timestamp collection column"),
+            ),
             DataType::Float32 => Self::F32(array.as_any().downcast_ref().unwrap()),
             DataType::Float64 => Self::F64(array.as_any().downcast_ref().unwrap()),
             DataType::Decimal128(_, _) => Self::Decimal(array.as_any().downcast_ref().unwrap()),
@@ -734,6 +762,13 @@ mod codec_tests {
                     return None;
                 }
                 Some(match array.data_type() {
+                    ty if streamfusion_bridge::timestamp::is_component_timestamp(ty) => {
+                        streamfusion_bridge::timestamp::TimestampColumn::try_new(array)
+                            .unwrap()
+                            .value(row)
+                            .unwrap()
+                            .nanos() as u128
+                    }
                     DataType::Float32 => array
                         .as_any()
                         .downcast_ref::<arrow::array::Float32Array>()
@@ -758,7 +793,15 @@ mod codec_tests {
     }
 
     fn samples() -> Vec<ArrayRef> {
+        use streamfusion_bridge::timestamp::{timestamp_array, TimestampValue};
         vec![
+            Arc::new(timestamp_array([
+                Some(TimestampValue::new(i64::MIN, 1).unwrap()),
+                Some(TimestampValue::new(i64::MIN, 1).unwrap()),
+                Some(TimestampValue::new(-1, 999999).unwrap()),
+                Some(TimestampValue::new(i64::MAX, 999999).unwrap()),
+                None,
+            ])),
             Arc::new(arrow::array::Float32Array::from(vec![
                 Some(f32::from_bits(0x7f800001)),
                 Some(f32::from_bits(0xffc00002)),

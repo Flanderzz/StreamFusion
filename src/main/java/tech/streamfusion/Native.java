@@ -618,6 +618,14 @@ public final class Native {
       int parallelism,
       boolean recoverable);
 
+  /** Copies compact timestamp payloads as Flink's row-shuffle serializer does. */
+  public static native void copyCompactTimestampFields(
+      long inArrayAddress,
+      long inSchemaAddress,
+      long outArrayAddress,
+      long outSchemaAddress,
+      int[] columns);
+
   /**
    * Exports the next sub-batch of a split into the consumer-allocated C structs and returns its key
    * group, or -1 once the split is exhausted.
