@@ -3535,3 +3535,8 @@ created that transpose before the consumer was selected; the transition pass car
 the inherited requirement into its final schema. Existing batch-size, source-pruning,
 JSON and scalar string-cache settings survive the upgrade. This fixes the requested
 representation boundary without changing collection element admission.
+
+Generated collection values may also enter a columnar sink that explicitly accepts and
+canonicalizes their representation for its wire format. This preserves the existing Doris
+Arrow writer and sink-materializer contract; ordinary native sinks retain their row-sink
+guard. Native DISTINCT-array groups retain their separately verified input contract.

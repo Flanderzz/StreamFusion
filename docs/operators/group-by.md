@@ -2995,3 +2995,12 @@ boundaries remain guarded; this does not extend deferred #437.
 per-key ordered changes and consumed JVM group work. Its recovery cases inject two
 failures after nonempty checkpoint prefixes. Release comparisons and the profiling
 timebox are recorded in [nested collection measurements](../benchmarks/collection-aggregates.md#nested-collection-elements).
+
+The generated-collection boundary check retains the existing verified Rust
+COUNT(DISTINCT ARRAY) input contract, including local/global groups and their verified
+UNION, minibatch, exchange and changelog/watermark carriers. Input representation requirements are checked separately from collection
+results, so scalar-result aggregates do not accidentally reject their represented inputs.
+
+Representation classification uses each aggregate's base kind independently of its
+DISTINCT retention/append flags. Retained DISTINCT-array inputs and DISTINCT COLLECT
+outputs keep the same verified layout contracts as their unflagged forms.

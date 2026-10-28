@@ -163,6 +163,30 @@ class FlinkCollectSqlHarnessTest {
   }
 
   @org.junit.jupiter.api.Test
+  void retainedDistinctCollectionsKeepTheirRepresentedOutput() {
+    var earlier =
+        METRICS.nativeOperators().stream()
+            .map(row -> row.get("jobId"))
+            .collect(java.util.stream.Collectors.toSet());
+    var runs =
+        NativeFailureParity.run(
+            () -> {
+              var table = environment();
+              table.getConfig().set("table.exec.state.ttl", "1 h");
+              return table;
+            },
+            "SELECT k,COLLECT(DISTINCT v),COUNT(*) FROM src GROUP BY k");
+    runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+    assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+    assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
+    RecoveryExecutionMetrics.assertConsumed(
+        METRICS.nativeOperators().stream()
+            .filter(row -> !earlier.contains(row.get("jobId")))
+            .collect(java.util.stream.Collectors.toList()),
+        "NativeColumnarGroupAggregate");
+  }
+
+  @org.junit.jupiter.api.Test
   void sharedAverageProjectionPreservesCollectionsAcrossBothGroupRoutes() {
     String property = "streamfusion.experimental.rustCollectionAggregates";
     String previous = System.getProperty(property);

@@ -400,7 +400,7 @@ final class CollectionValueIdentity {
   }
 
   private static boolean generatedCollectionCrossesBoundary(
-      RelNode node, RelNode parent, boolean finalOutput, boolean verifiedExchange) {
+      RelNode node, RelNode parent, boolean finalOutput, boolean verifiedConsumer) {
     if (preservingCollectionProducer(node)
         && node.getRowType().getFieldList().stream()
             .anyMatch(
@@ -411,15 +411,33 @@ final class CollectionValueIdentity {
         && !(parent instanceof StreamPhysicalSink)
         && !FlinkPlannerCompat.isLegacyRowSink(parent)
         && !preservingCollectionProducer(parent)
-        && !(parent instanceof StreamPhysicalNativeColumnarExchange && verifiedExchange)
+        && !acceptsGeneratedCollections(parent)
+        && !(passesGeneratedCollections(parent) && verifiedConsumer)
         && !(parent instanceof StreamPhysicalNativeCalc
             && ((StreamPhysicalNativeCalc) parent).preservesCollections())) return true;
     boolean next =
-        node instanceof StreamPhysicalNativeJvmGroup
-                && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
-            || node instanceof StreamPhysicalNativeColumnarExchange && verifiedExchange;
+        acceptsGeneratedCollections(node) || passesGeneratedCollections(node) && verifiedConsumer;
     return node.getInputs().stream()
         .anyMatch(input -> generatedCollectionCrossesBoundary(input, node, false, next));
+  }
+
+  private static boolean passesGeneratedCollections(RelNode node) {
+    return node instanceof StreamPhysicalNativeUnion
+        || node instanceof StreamPhysicalNativeColumnarExchange
+        || node instanceof StreamPhysicalNativeMiniBatchAssigner
+        || node instanceof StreamPhysicalNativeDropUpdateBefore
+        || node instanceof StreamPhysicalNativeWatermarkAssigner;
+  }
+
+  private static boolean acceptsGeneratedCollections(RelNode node) {
+    return node instanceof StreamPhysicalNativeJvmGroup
+            && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
+        || node instanceof StreamPhysicalNativeColumnarGroupAggregate
+            && ((StreamPhysicalNativeColumnarGroupAggregate) node).requiresCollectionInputs()
+        || node instanceof StreamPhysicalNativeColumnarLocalGroupAggregate
+            && ((StreamPhysicalNativeColumnarLocalGroupAggregate) node).preservesCollections()
+        || node instanceof ColumnarInput
+            && ((ColumnarInput) node).acceptsCollectionRepresentation();
   }
 
   static boolean crossesBoundary(RelNode root, boolean finalOutput) {
