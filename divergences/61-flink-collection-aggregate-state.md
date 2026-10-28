@@ -24,8 +24,19 @@ signatures and consumer boundaries retain their existing admission guards.
 DATE and TIME extend the existing counted/sequence state with dedicated primitive tags.
 Their internal epoch-day/millisecond values use the same boxed-integer hash/equality contract,
 while restore and DISTINCT membership preserve the logical type. NOT NULL temporal arrays
-retain fallback until their released generic/binary copy category is verified end to end.
+retain Flink's generic copy category at aggregate output, through column projections and into
+JVM argument batches. The legacy JVM handler uses the same represented output carrier.
+Unverified state, UNNEST and native-writer consumers retain their representation guards.
 
-NOT NULL DATE/TIME arguments also retain host execution: actual NULL source slots under those
-hints succeed on released Flink but fail Arrow batch import. This admission guard avoids
-changing the shared bridge or silently strengthening Flink logical hints into constraints.
+Flink source NOT NULL declarations are logical hints, not runtime input validation. Actual
+NULL slots can reach a collection aggregate and succeed. Shared Arrow import therefore widens
+only inconsistent physical field flags, retaining the logical SQL type, buffers and metadata.
+This follows Comet's existing C Data transfer/release pattern; it adds no copy or ownership
+protocol. Cached declared schemas stay immutable. Sink NOT NULL enforcement and its failure
+remain observable at the released Flink boundary.
+
+NOT NULL temporal aggregate arguments crossing a materializing input Calc retain fallback.
+Flink's unchecked primitive getters can reveal a source-specific payload beneath actual NULLs;
+preserving an Arrow NULL does not reproduce that value or its TIME conversion failure. The
+collection admission guard covers predicates reading those hints and non-identity projections,
+while direct input, key-only identity filters and nullable-input COALESCE remain verified.

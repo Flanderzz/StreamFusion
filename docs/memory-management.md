@@ -39,6 +39,20 @@ overhead are also outside the reservation pool. The cap is therefore an allocati
 the large StreamFusion-controlled consumers above, not an RSS or container hard limit. Leave
 process headroom for those costs and for the JVM.
 
+## Arrow schema and buffer ownership
+
+C Data import transfers the array release callback using the existing Comet-style ownership
+pattern. Imported arrays retain their input buffers after producer objects close. Field and
+root schema metadata survive both ordinary and cached-schema import; cached declarations
+remain immutable.
+
+Flink sources can carry actual NULL slots beneath a NOT NULL logical hint. Import widens only
+those top-level physical Arrow fields before batch coalescing, shuffle or IPC validates the
+batch. It shares the same arrays and validity buffers, keeps the SQL logical type unchanged
+and leaves Flink's later sink constraints in place. No additional data copy, reservation or
+release callback is introduced. Calc column projections and JVM callback arguments also retain
+field metadata needed to reconstruct Flink's collection copy categories.
+
 ## Exhaustion and spilling
 
 A reservation that would cross the TaskManager-wide cap is denied with

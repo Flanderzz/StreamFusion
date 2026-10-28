@@ -19,6 +19,7 @@ class JvmAggregateBenchmark {
   @Test
   void completeJobsRetainKeyedStateAndBothTransposes() throws Exception {
     assertEquals("false", System.getProperty("streamfusion.exchange.zeroCopyLocal"));
+    boolean notNull = Boolean.getBoolean("jvmagg.notNull");
     int rows = Integer.getInteger("jvmagg.rows", 2_000_000);
     int keys = Integer.getInteger("jvmagg.keys", 65_536);
     int values = Integer.getInteger("jvmagg.values", 0);
@@ -111,7 +112,20 @@ class JvmAggregateBenchmark {
               default:
                 throw new IllegalArgumentException("Unsupported key type: " + keyType);
             }
-            table.createTemporaryView("src", source);
+            if (notNull) {
+              assertTrue(collectionShape.endsWith("_date") || collectionShape.endsWith("_time"));
+              table.createTemporaryView(
+                  "src",
+                  source,
+                  Schema.newBuilder()
+                      .column("k", org.apache.flink.table.api.DataTypes.of(keyType))
+                      .column(
+                          "v",
+                          org.apache.flink.table.api.DataTypes.of(
+                                  collectionShape.endsWith("_date") ? "DATE" : "TIME(3)")
+                              .notNull())
+                      .build());
+            } else table.createTemporaryView("src", source);
             table.createTemporarySystemFunction("test_aggregate", new PortableSqlFixtures.Sum());
             if (!legacy)
               table.createTemporaryTable(
@@ -156,7 +170,7 @@ class JvmAggregateBenchmark {
             System.out.printf(
                 Locale.ROOT,
                 "[jvm-aggregate-trial] shape=%s key_type=%s engine=%s trial=%d warmup=%s rows=%d"
-                    + " keys=%d start_ms=%d seconds=%.6f%n",
+                    + " keys=%d not_null=%s start_ms=%d seconds=%.6f%n",
                 shape,
                 keyType,
                 engine == 0 ? "Flink" : "StreamFusion",
@@ -164,6 +178,7 @@ class JvmAggregateBenchmark {
                 trial < warmups,
                 rows,
                 keys,
+                notNull,
                 startMillis,
                 seconds);
             if (trial >= warmups) elapsed[engine][trial - warmups] = seconds;
