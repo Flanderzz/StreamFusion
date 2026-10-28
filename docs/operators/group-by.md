@@ -2905,6 +2905,11 @@ the transition pass distinguishes input requirements from collection output requ
 nullable-source COALESCE remains a plain scalar expression before accumulation. Materializing
 an inconsistent source NOT NULL hint retains the existing whole-plan host boundary.
 
+The original COLLECT and ARRAY_AGG SQL harnesses also require native execution for
+character elements. They compare resolved types and per-key changelogs and require
+consumed work in the JVM COLLECT or Rust ARRAY_AGG handler, while retaining explicit
+fallback checks for unsupported coresults and disabled group execution.
+
 `FlinkStringCollectionSqlHarnessTest` compares values, resolved types and per-key ordered
 changelogs, and requires consumed work in the intended group operator. It covers STRING/CHAR,
 NULL/empty/wide/UTF-8 and malformed Java surrogate inputs, all RowKinds, DISTINCT/FILTER,
