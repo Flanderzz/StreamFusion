@@ -1040,6 +1040,18 @@ also retains generated execution; decimal representation guards remain in force.
 This replaces computation inside an already-admitted native Calc without adding a switch.
 See the [release measurements and limits](../benchmarks/scalar-functions.md#integral-sign).
 
+For compact `DECIMAL(p,p)` with precision 1 through 18, STRING/CHAR/VARCHAR CAST
+consumers keep SIGN and its enclosing scalar expression in one generated evaluator.
+Released Flink retains `1` or `-1` with the original scale even though those values exceed
+the declared precision; reconstructing the intermediate decimal would incorrectly produce NULL.
+Direct SIGN results, null predicates and TRY_CAST keep their existing routes. Noncompact precision
+19 through 38 retains released Flink's NULL result for nonzero `DECIMAL(p,p)` SIGN.
+Conditional branches, filters and the existing decimal-rounding representation guards still
+apply. This repairs [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536);
+JVM-free decimal execution remains separate work in
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491) and
+[#492](https://github.com/datafusion-contrib/StreamFusion/issues/492).
+
 FLOAT/DOUBLE SIGN returns the input for signed zero and NaN, and `-1` or `1` for
 nonzero values, including infinities. NULL remains NULL. The result keeps the input's
 floating width; dividing by `SIGN(-0.0)` therefore retains negative infinity.
