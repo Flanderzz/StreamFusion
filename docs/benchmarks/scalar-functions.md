@@ -3280,3 +3280,124 @@ empty filtered batches, with positive consumed NativeCalc work on both Flink lin
 JDK 11/17. Rust/encoding tests cover every legal decimal precision/scale pair. Unchanged
 released `ScalarOperatorsTest.testUnaryPlusMinus` and `DecimalTypeTest.testUnaryPlusMinus`
 fixtures pass on both lines.
+
+## DECIMAL SIGN
+
+The typed Decimal128 kernel replaces the scalar generated callback for verified direct/literal,
+same-scale lossless-widening and nested SIGN inputs. Ordinary `p > s` returns scaled -1/0/1;
+noncompact `p = s` returns NULL for nonzero values and scaled zero otherwise. Compact `p = s`
+remains generated because its out-of-precision internal value has consumer-specific behavior.
+DECIMAL CASE/IF containing that compact intermediate retains the released branch conversion.
+This bounded implementation does not complete [#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+### Prepared operation
+
+Apple M4 Pro, macOS aarch64, JDK 17.0.12, Rust 1.94.0, release/no-default-features,
+system allocator with the counting wrapper; released Flink 1.18.1 and 2.2.1. Each trial consumes
+65,536 logical rows: 64 batches of 1,024 or 4,096 batches of 16. Each configuration has 16
+warmups and 11 measured trials, rotating stock/previous/native order. Data include signed
+extremes, values beyond 2^53, actual zeros every eleventh row, and NULL every seventh row
+in the nullable-value configurations. All logical schemas are nullable; the NULL-values column
+below describes actual values. GenericRowData and BinaryRowData stock formats are both retained.
+
+Stock starts in Java on prepared RowData, evaluates the released generated projection and
+consumes every decimal result. Previous and candidate start in Rust on equivalent prepared
+Arrow batches, run the production Calc and consume each output through an equivalent checksum.
+Their timers start and stop inside Rust. Setup, Arrow import/export and perimeter transposes
+are outside this small-operation timer. The previous control uses the actual main `d89e03b5`
+kind-17 scalar evaluator with one decimal argument and the matching precision/scale result code;
+its JVM callback and both intrinsic decimal marshalling boundaries stay inside timing.
+The baseline encoding is independently checked on both released lines. The candidate asserts
+opcode 65 and empty JVM descriptors. Before timing, every candidate Arrow output and schema
+is compared exactly with the preceding evaluator; each timed engine also checks its checksum.
+
+Medians and observed min/max are ns/row. Ratios above 1 favor native.
+
+| Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 8.788 [7.560, 32.969] | 31.644 [29.802, 35.288] | 1.726 [1.422, 1.775] | 5.09x | 18.34x |
+| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 5.188 [5.105, 5.262] | 39.490 [37.286, 64.526] | 2.113 [2.028, 2.317] | 2.45x | 18.69x |
+| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.563 [4.834, 6.092] | 573.643 [558.766, 590.951] | 25.682 [23.939, 28.564] | 0.22x | 22.34x |
+| 1.18.1, DECIMAL(19,19), false, binary, 1024 | 36.277 [33.051, 60.411] | 49.828 [45.473, 70.459] | 3.698 [3.549, 3.969] | 9.81x | 13.47x |
+| 1.18.1, DECIMAL(19,19), true, generic, 1024 | 17.546 [16.832, 29.591] | 50.177 [47.459, 73.354] | 3.915 [3.748, 3.991] | 4.48x | 12.82x |
+| 1.18.1, DECIMAL(19,19), true, binary, 16 | 27.656 [27.335, 34.155] | 588.833 [575.139, 716.778] | 29.204 [28.835, 30.251] | 0.95x | 20.16x |
+| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 31.000 [28.632, 49.302] | 53.205 [44.348, 117.357] | 1.711 [1.563, 1.806] | 18.12x | 31.10x |
+| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 9.205 [8.858, 10.038] | 44.694 [41.683, 68.454] | 2.144 [1.930, 2.423] | 4.29x | 20.85x |
+| 1.18.1, DECIMAL(19,3), true, binary, 16 | 19.688 [19.352, 20.637] | 592.555 [583.083, 611.048] | 25.354 [24.656, 26.271] | 0.78x | 23.37x |
+| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 28.429 [27.130, 49.131] | 46.403 [43.915, 85.672] | 1.654 [1.457, 1.750] | 17.19x | 28.06x |
+| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 8.948 [8.448, 26.579] | 42.668 [40.415, 60.392] | 2.248 [2.197, 2.358] | 3.98x | 18.98x |
+| 1.18.1, DECIMAL(38,18), true, binary, 16 | 20.622 [19.639, 25.847] | 585.923 [563.824, 598.157] | 23.598 [23.005, 24.824] | 0.87x | 24.83x |
+| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 43.238 [34.046, 66.534] | 52.330 [45.084, 97.438] | 3.705 [3.527, 3.743] | 11.67x | 14.12x |
+| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 19.147 [18.496, 42.937] | 72.809 [54.204, 98.392] | 3.871 [3.808, 4.006] | 4.95x | 18.81x |
+| 1.18.1, DECIMAL(38,38), true, binary, 16 | 29.189 [28.351, 33.110] | 576.757 [569.712, 624.387] | 31.391 [30.214, 32.533] | 0.93x | 18.37x |
+| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 5.978 [5.406, 34.654] | 38.769 [30.835, 45.469] | 1.563 [1.343, 1.754] | 3.82x | 24.80x |
+| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 7.204 [6.912, 7.796] | 32.211 [29.266, 59.492] | 2.220 [1.803, 2.257] | 3.24x | 14.51x |
+| 2.2.1, DECIMAL(18,3), true, binary, 16 | 5.570 [5.396, 6.739] | 557.027 [543.966, 583.133] | 25.658 [24.828, 26.042] | 0.22x | 21.71x |
+| 2.2.1, DECIMAL(19,19), false, binary, 1024 | 35.250 [34.651, 74.614] | 76.201 [48.690, 124.938] | 3.799 [3.780, 3.902] | 9.28x | 20.06x |
+| 2.2.1, DECIMAL(19,19), true, generic, 1024 | 15.188 [14.617, 34.014] | 71.803 [50.053, 157.637] | 3.953 [3.872, 4.104] | 3.84x | 18.17x |
+| 2.2.1, DECIMAL(19,19), true, binary, 16 | 28.546 [27.047, 32.573] | 590.797 [561.872, 627.825] | 29.456 [28.050, 30.531] | 0.97x | 20.06x |
+| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 27.291 [26.423, 46.593] | 45.663 [42.999, 72.019] | 1.730 [1.412, 1.883] | 15.78x | 26.40x |
+| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 8.733 [7.748, 11.492] | 46.698 [41.372, 63.026] | 2.172 [1.893, 2.428] | 4.02x | 21.50x |
+| 2.2.1, DECIMAL(19,3), true, binary, 16 | 20.555 [19.496, 23.326] | 574.708 [558.461, 636.387] | 24.882 [23.509, 30.155] | 0.83x | 23.10x |
+| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 28.486 [27.484, 49.393] | 51.687 [46.701, 74.498] | 1.746 [1.603, 1.935] | 16.32x | 29.61x |
+| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 9.229 [8.596, 14.255] | 49.003 [42.676, 66.046] | 2.261 [2.113, 2.501] | 4.08x | 21.67x |
+| 2.2.1, DECIMAL(38,18), true, binary, 16 | 20.540 [19.787, 26.115] | 606.761 [588.124, 715.747] | 24.800 [23.598, 25.590] | 0.83x | 24.47x |
+| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 34.427 [32.860, 68.352] | 52.185 [46.946, 90.398] | 3.644 [3.595, 3.922] | 9.45x | 14.32x |
+| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 15.423 [14.765, 34.475] | 46.836 [43.168, 89.345] | 3.973 [3.814, 4.130] | 3.88x | 11.79x |
+| 2.2.1, DECIMAL(38,38), true, binary, 16 | 30.945 [28.578, 46.801] | 596.071 [584.038, 614.315] | 30.892 [29.867, 31.805] | 1.00x | 19.30x |
+
+At 1,024 rows the candidate is **2.45–18.12x stock** and **11.79–31.10x previous** across
+these configurations. At 16 rows it is **0.22–1.00x stock**, although **18.37–24.83x previous**.
+Small-batch Calc/result overhead remains in #491; these controls do not establish a stock
+speedup. The allocation probe records 20 calls for an ordinary SIGN Calc at either batch size,
+with 256 new output value-buffer bytes at 16 rows versus 16,384 at 1,024. Noncompact p=s
+also derives a new validity bitmap (22 recorded allocation calls). These are per-invocation
+observations, not a complete causal CPU profile or an allocation-free execution claim.
+
+### Complete row-source job
+
+Flink 2.2.1, parallelism one, one million nullable DECIMAL(18,3) values with mixed signs,
+zero and extremes, rowwise blackhole sink. Each engine has two warmups and five measured jobs
+in separate sequential JVMs. Previous uses the unchanged main encoder; native plans require
+both RowDataToArrow and ArrowToRowData and positive consumed NativeCalc work. Timings include
+submission, full source/sink processing and both perimeter transposes.
+
+| Engine | Median seconds | Observed min/max seconds |
+| --- | ---: | ---: |
+| Stock Flink | 0.135526792 | 0.125703833–0.148966750 |
+| Previous scalar callback | 0.174364125 | 0.168311458–0.186801792 |
+| Typed native SIGN | 0.151711958 | 0.141338042–0.159535541 |
+
+The candidate is **0.89x stock** and **1.15x previous** by these medians. It still loses to
+stock in this standalone job, with overlapping stock/native ranges; the prepared-kernel gain
+is not an end-to-end acceleration claim. Both transposes remain a material pipeline cost.
+
+### Validation and reproduction
+
+The focused matrix passes 324 JVM test invocations across both Flink lines and JDK 11/17,
+including NULL/NOT NULL results, released sink failures, consumed native batches, compact
+character and DECIMAL conditional consumers, integer/floating SIGN controls, rounding metadata,
+unselected failures and all-filtered batches. A released-method oracle separately checks 2,337
+values and precision/scale pairs per Flink line, including compact and noncompact p=s.
+The unchanged released `ScalarFunctionsTest.testSign` passes on both lines as a result oracle;
+separate runtime-source witnesses establish native execution over 5,003 rows per admitted
+profile. Rust tests cover every supported precision/scale, scalar/array results, slices,
+empty/all-NULL inputs and input ownership; the release core suite passes 834 tests.
+
+The helper is `DecimalSignBenchmarkFunctions`, the full job is `DecimalSignPipelineBenchmark`,
+and all measured trials/allocation probes are in the [raw results](results/decimal-sign-2026-10-28.json).
+With the ordinary Maven test classpath in `SF_NATIVE_BENCH_CLASSPATH`, JDK 17 in `JAVA_HOME`,
+and `SF_NATIVE_LIB_DIR` pointing at the release library directory:
+
+```sh
+cargo build --manifest-path native/Cargo.toml -p streamfusion --release \
+  --no-default-features --lib --example decimal_sign
+native/target/release/examples/decimal_sign 18 3 true false 1024 64 16 11
+```
+
+Use `19 19` or `38 38` for noncompact zero-integer-width controls; `16 4096` as the batch/loop
+arguments retains the same row count for the small control. The pipeline is opt-in:
+`SF_BENCHMARK=true mvn test -Pbench -pl streamfusion-core -Dtest=DecimalSignPipelineBenchmark`
+with `-Ddecimal.sign.pipeline.engine=flink` or `native`; `previous` requires the independently
+compiled baseline encoder at the front of the classpath. Defaults retain one million rows,
+two warmups and five measured runs. Do not compare a debug library with these release results.
