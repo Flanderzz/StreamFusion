@@ -41,13 +41,20 @@ final class JvmGroupAggregateMatcher {
                 org.apache.calcite.sql.type.SqlTypeName.TINYINT,
                 org.apache.calcite.sql.type.SqlTypeName.SMALLINT,
                 org.apache.calcite.sql.type.SqlTypeName.INTEGER,
-                org.apache.calcite.sql.type.SqlTypeName.BIGINT)
+                org.apache.calcite.sql.type.SqlTypeName.BIGINT,
+                org.apache.calcite.sql.type.SqlTypeName.DATE,
+                org.apache.calcite.sql.type.SqlTypeName.TIME)
             .contains(value.getSqlTypeName())
         && call.getType().getSqlTypeName()
             == (collect
                 ? org.apache.calcite.sql.type.SqlTypeName.MULTISET
                 : org.apache.calcite.sql.type.SqlTypeName.ARRAY)
-        && call.getType().getComponentType().getSqlTypeName() == value.getSqlTypeName();
+        && call.getType().getComponentType().getSqlTypeName() == value.getSqlTypeName()
+        && (!java.util.Set.of(
+                    org.apache.calcite.sql.type.SqlTypeName.DATE,
+                    org.apache.calcite.sql.type.SqlTypeName.TIME)
+                .contains(value.getSqlTypeName())
+            || value.isNullable() && (collect || call.getType().getComponentType().isNullable()));
   }
 
   private static AggregateFunction<?, ?> userFunction(SqlAggFunction function) {

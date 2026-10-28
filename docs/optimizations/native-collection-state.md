@@ -1,6 +1,6 @@
 # Rust collection aggregate state
 
-Verified integer/BOOLEAN COLLECT and Flink 2.2 ARRAY_AGG execute their accumulation,
+Verified integer/BOOLEAN and DATE/TIME COLLECT and Flink 2.2 ARRAY_AGG execute their accumulation,
 retraction and result materialization inside the existing Rust keyed aggregate. Arrow batches
 cross JNI once per push, avoiding the preceding generated JVM handler's rowwise aggregate work.
 The source/sink transposes remain at the native island's perimeter.
@@ -34,3 +34,9 @@ COLLECT retains slower BOOLEAN/narrow-integer cases. These are workload-specific
 results, not a universal throughput claim. Two CPU captures close the optimization timebox;
 generic result materialization and boxed arrays at row exits remain follow-up work in
 [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+
+DATE and TIME reuse this state layout with separate logical type tags and the existing Java
+boxed-integer hashing/order contract. Arrow date/time columns are downcast once per batch;
+no temporal-to-integer row conversion is introduced inside the operator. Their nullable-array
+and representation gates are [documented separately](../operators/group-by.md#date-and-time-collection-elements).

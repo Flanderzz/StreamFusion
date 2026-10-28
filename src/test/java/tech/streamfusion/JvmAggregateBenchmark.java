@@ -32,6 +32,10 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean legacy = shape.startsWith("legacy_");
       String collectionShape = collectionShape(shape);
+      org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
+          collectionShape.endsWith("_date")
+              ? Types.LOCAL_DATE
+              : collectionShape.endsWith("_time") ? Types.LOCAL_TIME : Types.LONG;
       boolean udf = shape.equals("udaf");
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
@@ -79,21 +83,30 @@ class JvmAggregateBenchmark {
               case "string":
                 source =
                     sequence
-                        .map(i -> Row.of(prefix + Long.toString(i % keys), value(i, keys, values)))
+                        .map(
+                            i ->
+                                Row.of(
+                                    prefix + Long.toString(i % keys),
+                                    inputValue(i, keys, values, collectionShape)))
                         .returns(
-                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.STRING, Types.LONG));
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.STRING, inputValueType));
                 break;
               case "bigint":
                 source =
                     sequence
-                        .map(i -> Row.of(i % keys, value(i, keys, values)))
-                        .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, Types.LONG));
+                        .map(i -> Row.of(i % keys, inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.LONG, inputValueType));
                 break;
               case "int":
                 source =
                     sequence
-                        .map(i -> Row.of((int) (i % keys), value(i, keys, values)))
-                        .returns(Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, Types.LONG));
+                        .map(
+                            i ->
+                                Row.of(
+                                    (int) (i % keys), inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(new String[] {"k", "v"}, Types.INT, inputValueType));
                 break;
               default:
                 throw new IllegalArgumentException("Unsupported key type: " + keyType);
@@ -179,6 +192,16 @@ class JvmAggregateBenchmark {
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
+              for (var observation : metrics.nativeOperators())
+                System.out.printf(
+                    Locale.ROOT,
+                    "[jvm-aggregate-native] shape=%s trial=%d operator=%s records_in=%s"
+                        + " records_out=%s%n",
+                    shape,
+                    trial,
+                    observation.get("operator"),
+                    observation.get("recordsIn"),
+                    observation.get("recordsOut"));
               if (legacy) {
                 var jobs =
                     metrics.nativeOperators().stream()
@@ -226,8 +249,24 @@ class JvmAggregateBenchmark {
     profileCollection(shape);
   }
 
+  private static Object inputValue(long row, int keys, int values, String shape) {
+    Long value = value(row, keys, values);
+    if (value == null) return null;
+    if (shape.endsWith("_date")) return java.time.LocalDate.ofEpochDay(value - 3);
+    if (shape.endsWith("_time"))
+      return java.time.LocalTime.ofNanoOfDay(
+          Math.floorMod(value * 1000 + 1, 86_400_000) * 1_000_000L);
+    return value;
+  }
+
   private static boolean collectCase(String shape) {
-    return java.util.Set.of("collect", "collect_tinyint", "collect_smallint", "collect_boolean")
+    return java.util.Set.of(
+            "collect",
+            "collect_tinyint",
+            "collect_smallint",
+            "collect_boolean",
+            "collect_date",
+            "collect_time")
         .contains(collectionShape(shape));
   }
 
@@ -238,6 +277,8 @@ class JvmAggregateBenchmark {
             "array_agg_tinyint",
             "array_agg_smallint",
             "array_agg_boolean",
+            "array_agg_date",
+            "array_agg_time",
             "array_agg_not_null")
         .contains(collectionShape(shape));
   }

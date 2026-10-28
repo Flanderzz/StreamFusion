@@ -2492,7 +2492,7 @@ Runtime sources require consumed NativeCalc work on both supported releases, inc
 four input changelog kinds, filtered/CASE paths and empty batches. Direct BINARY elements
 use the length-delimited generated boundary below. MULTISET outputs use the same final row-sink/fused-consumer restriction as
 MAP outputs; unverified state, exchange, ordering and native-writer boundaries still fall back.
-A verified integer COLLECT producer can feed this preserving Calc through its existing map-shaped
+A verified integer/BOOLEAN or [DATE/TIME COLLECT](group-by.md#date-and-time-collection-elements) producer can feed this preserving Calc through its existing map-shaped
 output; character aggregate results and other unverified aggregate representations retain fallback.
 Verified character grouping fields retain the released serialized-key representation through these
 consumers; their pre-group Java caches do not become grouped output caches.

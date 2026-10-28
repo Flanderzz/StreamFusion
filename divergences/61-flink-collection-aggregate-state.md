@@ -19,3 +19,13 @@ JVM savepoint requires `streamfusion.experimental.rustCollectionAggregates=false
 migration is not claimed. The existing JVM route also remains available for verified mixed
 aggregate groups whose other functions do not have a Rust implementation. Richer collection
 signatures and consumer boundaries retain their existing admission guards.
+
+
+DATE and TIME extend the existing counted/sequence state with dedicated primitive tags.
+Their internal epoch-day/millisecond values use the same boxed-integer hash/equality contract,
+while restore and DISTINCT membership preserve the logical type. NOT NULL temporal arrays
+retain fallback until their released generic/binary copy category is verified end to end.
+
+NOT NULL DATE/TIME arguments also retain host execution: actual NULL source slots under those
+hints succeed on released Flink but fail Arrow batch import. This admission guard avoids
+changing the shared bridge or silently strengthening Flink logical hints into constraints.
