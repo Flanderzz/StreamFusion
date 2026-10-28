@@ -5,7 +5,6 @@ import java.util.Optional;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.Exchange;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory$;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
 import org.apache.flink.table.planner.plan.nodes.physical.common.CommonPhysicalJoin;
@@ -114,7 +113,7 @@ final class RegularJoinMatcher {
       return null;
     }
     RexNode expanded =
-        RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
+        SearchArguments.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
     return RexExpression.encode(expanded, join);
   }
 

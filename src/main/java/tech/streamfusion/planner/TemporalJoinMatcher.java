@@ -99,7 +99,7 @@ final class TemporalJoinMatcher {
     if (residual == null) {
       return null;
     }
-    RexNode expanded = RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, residual);
+    RexNode expanded = SearchArguments.expandSearch(join.getCluster().getRexBuilder(), null, residual);
     return RexExpression.encode(expanded, join);
   }
 

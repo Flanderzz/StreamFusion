@@ -658,7 +658,7 @@ final class RexExpression {
     projectionRoot = null;
     if (program.getCondition() != null) {
       RexNode condition =
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(),
               null,
               program.expandLocalRef(program.getCondition()));
@@ -672,7 +672,7 @@ final class RexExpression {
       // Expand a Sarg/SEARCH the same as in the condition — a `FILTER (WHERE x >= a AND x < b)`
       // lowers its range into a SEARCH inside a projected expression, not just the condition.
       RexNode projection =
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
       projectionRoot = projection;
       if (!emit(projection)) {
@@ -1164,7 +1164,7 @@ final class RexExpression {
       RexNode condition =
           program.getCondition() == null
               ? null
-              : RexUtil.expandSearch(
+              : SearchArguments.expandSearch(
                   calc.getCluster().getRexBuilder(),
                   null,
                   program.expandLocalRef(program.getCondition()));
@@ -1175,7 +1175,7 @@ final class RexExpression {
       List<RexNode> projections = new ArrayList<>();
       for (RexLocalRef ref : program.getProjectList()) {
         RexNode projection =
-            RexUtil.expandSearch(
+            SearchArguments.expandSearch(
                 calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
         if (!validateDecimalRoundingBoundary(projection)) return false;
         if (!validateGeneratedExpression(projection)) return false;
@@ -1276,7 +1276,7 @@ final class RexExpression {
     RexProgram program = calc.getProgram();
     if (program.getCondition() != null) {
       captureFunctions(
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(),
               null,
               program.expandLocalRef(program.getCondition())),
@@ -1284,7 +1284,7 @@ final class RexExpression {
     }
     for (RexLocalRef projection : program.getProjectList()) {
       captureFunctions(
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(projection)),
           calls);
     }

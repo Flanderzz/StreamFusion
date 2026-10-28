@@ -3468,3 +3468,11 @@ these are not counted as positive evidence for the new source boundary.
 [Release comparisons and the closed two-capture investigation](../benchmarks/scalar-functions.md#external-structured-collection-inputs)
 retain the slower stock/previous/native results and production conversion costs under the
 accepted collection-extension tradeoff. Further standalone performance work stays in #392.
+
+### Character search endpoints
+
+Native expansion of `IN` and `NOT IN` search predicates preserves the exact
+character endpoints stored by the released Flink planner, including the spaces
+in explicitly cast `CHAR` constants. This uses the same search normalization
+across filters, projections, UNNEST predicates and join conditions. It does not
+change string ordering admission or add unsupported comparison signatures.

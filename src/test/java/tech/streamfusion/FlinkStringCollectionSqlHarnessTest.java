@@ -269,6 +269,31 @@ class FlinkStringCollectionSqlHarnessTest {
         true);
   }
 
+  @ParameterizedTest
+  @CsvSource({"STRING", "CHAR(8)"})
+  void typedCharacterLiteralsKeepPaddingInProjectionsAndSearchFilters(String type) {
+    check(
+        "COLLECT",
+        () -> environment(type, 1),
+        "SELECT k,v,CAST('' AS CHAR(8)),CAST('a' AS CHAR(8)),v=CAST('' AS CHAR(8)),v=CAST('a' AS"
+            + " CHAR(8)) FROM src",
+        true,
+        "NativeCalc");
+    check(
+        "COLLECT",
+        () -> environment(type, 1),
+        "SELECT k,v FROM src WHERE v IN (CAST('' AS CHAR(8)),CAST('a' AS CHAR(8)))",
+        true,
+        type.equals("STRING") ? "NativeFilter" : "NativeCalc");
+    check(
+        "COLLECT",
+        () -> environment(type, 1),
+        "SELECT k,v,v IN (CAST('' AS CHAR(8)),CAST('a' AS CHAR(8))),v NOT IN (CAST('' AS"
+            + " CHAR(8)),CAST('a' AS CHAR(8))) FROM src",
+        true,
+        "NativeCalc");
+  }
+
   private static TableEnvironment recoveryInput(TableEnvironment table, String type) {
     table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
     table.getConfig().set("streamfusion.transpose.batchRows", "3");

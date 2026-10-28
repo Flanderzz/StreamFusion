@@ -8,7 +8,6 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
-import org.apache.calcite.rex.RexUtil;
 
 /**
  * Recognizes a filter the native operator can run: a {@link Calc} with an input-ref projection (a
@@ -47,7 +46,7 @@ final class FilterCalcMatcher {
     // Calcite folds `col = literal`, IN, and ranges into a SEARCH/Sarg; expand it back into the
     // comparisons the native engine evaluates. The native side handles arbitrary AND/OR/NOT trees,
     // so no disjunctive-normal-form rewrite is needed.
-    RexNode expanded = RexUtil.expandSearch(calc.getCluster().getRexBuilder(), null, condition);
+    RexNode expanded = SearchArguments.expandSearch(calc.getCluster().getRexBuilder(), null, condition);
     return RexExpression.encode(expanded, calc);
   }
 
