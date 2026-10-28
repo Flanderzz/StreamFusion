@@ -2555,9 +2555,10 @@ The versioned native snapshot retains the sequence, pending retractions and DIST
 ARRAY_AGG shares the explicit JVM-savepoint route described above.
 
 Nullable primitive-array results can feed the verified native updating Top-N and UNNEST paths,
-with consumed work in both the producer and consumer. Sensitive output forms, including
-NOT NULL-element arrays, retain the existing final row-sink/preserving-consumer guards.
-Unverified state/writer shapes retain fallback. This does not enable updating MAP/MULTISET
+with consumed work in both the producer and consumer. NOT NULL-element scalar arrays feed the
+[verified generated consumer](#scalar-array-results-through-generated-unnest); other sensitive
+output forms retain final row-sink/preserving-consumer guards. Unverified state/writer shapes
+retain fallback. This does not enable updating MAP/MULTISET
 payload support deferred in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
 [Release comparisons](../benchmarks/collection-aggregates.md#integer-array_agg) retain array
@@ -2702,9 +2703,9 @@ Nullable-input COALESCE expressions and identity projections with key-only filte
 NOT NULL-element arrays retain their generic copy-category marker through native projections
 and generated JVM argument batches. Mixed primitive arrays, aliases, repeated consumers,
 formatting, reverse/distinct/slice, CASE and retained/shared Java callbacks are verified.
-The explicit legacy JVM aggregate handler uses the same represented array boundary. NOT NULL
-temporal arrays crossing unverified stateful, UNNEST or native-writer boundaries still retain
-planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous
+The explicit legacy JVM aggregate handler uses the same represented array boundary. Verified
+scalar arrays feed the released generated UNNEST boundary as described below. Unverified
+stateful/order and native-writer consumers still retain planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous
 single-phase, representation-consumer and native-writer gates remain. This does not extend
 updating retained
 MAP/MULTISET payloads deferred in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
@@ -2742,7 +2743,8 @@ aggregate: predicates or non-identity projections reading NOT NULL supported sca
 Flink execution when an unchecked source getter's hidden NULL-slot payload cannot be represented.
 Direct input hints, nullable-input COALESCE and key-only identity filters retain their verified
 routes. Stateful/order consumers of nullable primitive arrays retain their existing boundary;
-NOT NULL-element arrays and other sensitive results retain unverified state/UNNEST/writer guards.
+NOT NULL-element scalar arrays use the verified generated UNNEST boundary below; unverified
+stateful/order and native-writer consumers, and other sensitive results, retain their guards.
 Character aggregate-result fields, non-scalar input schemas, asynchronous/mini-batch or multi-phase
 collection aggregation, unverified element families and nested collection results remain fallback.
 The updating MAP/MULTISET extension in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
@@ -2755,3 +2757,39 @@ limit. The complete regression set executes 349 checks on 2.2 and 196 with 153 c
 on 1.18, including the legacy row API at parallelism one/three. The unchanged released upstream
 COLLECT fixture passes all seven/six variants with its exact runtime contracts. Slower collection
 profiles remain documented groundwork, not a universal acceleration claim.
+
+
+## Scalar array results through generated UNNEST
+
+On Flink 2.2, NOT NULL-element ARRAY_AGG results over every verified scalar element family
+can feed the existing Arrow-input/Arrow-output generated UNNEST operator. The same structural
+producer check covers native collection state and the explicit legacy JVM aggregate handler:
+all input fields must be ordinary nonsensitive scalars or arrays whose element representation
+is nonsensitive. It adds no per-type list and retains the aggregate's generic array-copy
+metadata through the existing generated argument frame. Nullable arrays retain ordinary Arrow
+UNNEST; mixed nullable/NOT NULL scalar arrays use the preserving consumer when necessary.
+
+CROSS/LEFT expansion, NULL-check predicates, selected original arrays, ordinality, parallelism
+one/three and per-key changelog order are verified across integer/BOOLEAN, DATE/TIME,
+FLOAT/DOUBLE and compact/wide DECIMAL. Real NULL slots under NOT NULL source hints retain the
+released success or getter/conversion failure, including IGNORE NULLS. Temporal LEFT ordering
+predicates that fail during released collect-sink submission still fail before substitution;
+EXPLAIN alone does not reproduce that assertion. Heap/native RocksDB tests restore twice over
+nonempty prefixes and require consumed group and generated-expansion work.
+
+This reuses the released Java correlate generator inside the columnar operator. Collection
+state remains native; expansion is JVM work and is not described as a Rust UNNEST kernel.
+ARRAY_AGG is N/A on 1.18. Character grouping keys, sensitive character/nested arrays,
+MAP/MULTISET-bearing input rows and unverified stateful/order and writer consumers retain
+fallback. This does not extend #437.
+
+
+The focused consolidated set passes 180 checks on Flink 2.2.1. Flink 1.18.1 passes 174 with
+224 capability skips, including its existing collection and UNNEST routes; new ARRAY_AGG
+cases are N/A. Floating element payload bits are observed through the real scalar callback
+after expansion. Four unchanged released upstream UNNEST cases pass per line as result
+regressions; the matrix and benchmark counters provide positive execution evidence.
+[Complete-job comparisons](../benchmarks/collection-aggregates.md#scalar-array-expansion-boundary)
+retain all 120 jobs and ranges. At 64 keys, BIGINT/DOUBLE/wide DECIMAL pipelines take
+1.002/0.999/2.048 s versus paired stock's 5.773/7.178/14.798 s. Shorter 4096-key cases also
+improve medians but have overlapping ranges; no universal sustained-throughput claim is made.

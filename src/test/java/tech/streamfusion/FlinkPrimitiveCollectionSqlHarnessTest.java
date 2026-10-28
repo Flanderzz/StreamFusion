@@ -447,20 +447,132 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
+  private static String nonNullArgument(String type) {
+    return "COALESCE(v,CAST("
+        + (type.equals("DATE")
+            ? "DATE '1970-01-01'"
+            : type.equals("TIME") ? "TIME '00:00:00'" : type.equals("BOOLEAN") ? "FALSE" : "0")
+        + " AS "
+        + type
+        + "))";
+  }
+
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(strings = {"DATE", "TIME"})
-  void nonNullTemporalArraysRetainUnverifiedStateAndUnnestGuards(String type) {
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
+  void nonNullScalarArraysKeepStateGuardsAndUseGeneratedExpansion(String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
-    String zero = type.equals("DATE") ? "DATE '1970-01-01'" : "TIME '00:00:00'";
-    String input = "(SELECT k,ARRAY_AGG(COALESCE(v," + zero + ")) AS a FROM src GROUP BY k)";
-    for (String sql :
-        List.of(
-            "SELECT k,x FROM " + input + " AS s CROSS JOIN UNNEST(a) AS u(x)",
+    String input = "(SELECT k,ARRAY_AGG(" + nonNullArgument(type) + ") AS a FROM src GROUP BY k)";
+    NativeFailureParity.run(
+            () -> environment(type),
             "SELECT k,a FROM (SELECT k,a,ROW_NUMBER() OVER (ORDER BY k) AS rn FROM "
                 + input
-                + ") WHERE rn<=2"))
-      NativeFailureParity.run(() -> environment(type), sql)
-          .assertSuccess(NativeFailureParity.Route.FALLBACK);
+                + ") WHERE rn<=2")
+        .assertSuccess(NativeFailureParity.Route.FALLBACK);
+    for (int parallelism : new int[] {1, 3}) {
+      for (String join :
+          List.of("CROSS JOIN UNNEST(a) AS u(x)", "LEFT JOIN UNNEST(a) AS u(x) ON TRUE"))
+        check(
+            () -> environment(type, 3, false, parallelism),
+            "SELECT k,a,x FROM " + input + " AS s " + join,
+            "NativeColumnarGroupAggregate",
+            "NativeGeneratedUnnest");
+      check(
+          () -> environment(type, 3, false, parallelism),
+          "SELECT k,x FROM " + input + " AS s CROSS JOIN UNNEST(a) AS u(x) WHERE x IS NOT NULL",
+          "NativeColumnarGroupAggregate",
+          "NativeGeneratedUnnest");
+      if (tech.streamfusion.compat.FlinkTestCapabilities.UNNEST_ORDINALITY)
+        check(
+            () -> environment(type, 3, false, parallelism),
+            "SELECT k,a,x,o FROM " + input + " AS s CROSS JOIN UNNEST(a) WITH ORDINALITY AS u(x,o)",
+            "NativeColumnarGroupAggregate",
+            "NativeGeneratedUnnest");
+    }
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
+  void nonNullScalarExpansionRetainsUncheckedNullSlotBehavior(String type) throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    for (String nulls : List.of("", " IGNORE NULLS")) {
+      var previous =
+          METRICS.nativeOperators().stream()
+              .map(row -> row.get("jobId"))
+              .collect(java.util.stream.Collectors.toSet());
+      var runs =
+          NativeFailureParity.run(
+              () -> environment(type, 3, true),
+              "SELECT k,x FROM (SELECT k,ARRAY_AGG(v)"
+                  + nulls
+                  + " AS a FROM src GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)");
+      if (runs.host().failure() == null) runs.assertSuccess(NativeFailureParity.Route.NATIVE);
+      else
+        runs.assertFailure(
+            runs.host().rootCause().getClass(),
+            runs.host().phase(),
+            NativeFailureParity.Route.NATIVE);
+      assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+      var work =
+          METRICS.nativeOperators().stream()
+              .filter(row -> !previous.contains(row.get("jobId")))
+              .collect(java.util.stream.Collectors.toList());
+      RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
+      RecoveryExecutionMetrics.assertConsumed(work, "NativeGeneratedUnnest");
+      SharedFlinkCluster.assertNativeMemoryReleased("scalar-array-unnest-null-slots");
+    }
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
+  void nonNullScalarArrayExpansionUsesTheExplicitLegacyHandler(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    String property = "streamfusion.experimental.rustCollectionAggregates";
+    String previous = System.getProperty(property);
+    try {
+      System.setProperty(property, "false");
+      check(
+          type,
+          "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+              + nonNullArgument(type)
+              + ") AS a FROM src GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)",
+          "NativeJvmGroup",
+          "NativeGeneratedUnnest");
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
+  void nonNullScalarLeftPredicatesRetainReleasedBehavior(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    check(
+        type,
+        "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+            + nonNullArgument(type)
+            + ") AS a FROM src GROUP BY k) s LEFT JOIN UNNEST(a) AS u(x) ON x IS NOT NULL",
+        "NativeColumnarGroupAggregate",
+        "NativeGeneratedUnnest");
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"DATE", "TIME"})
+  void nonNullTemporalLeftOrderingPredicatesRetainReleasedSubmissionFailure(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    String zero = type.equals("DATE") ? "DATE '1970-01-01'" : "TIME '00:00:00'";
+    String sql =
+        "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+            + nonNullArgument(type)
+            + ") AS a FROM src GROUP BY k) s LEFT JOIN UNNEST(a) AS u(x) ON x>="
+            + zero;
+    for (boolean nativeEnabled : new boolean[] {false, true}) {
+      var table = environment(type);
+      var scan = nativeEnabled ? tech.streamfusion.planner.NativePlanner.install(table) : null;
+      var failure = assertThrows(AssertionError.class, () -> table.sqlQuery(sql).execute());
+      assertTrue(failure.getMessage().contains("Type mismatch"), failure.toString());
+      if (scan != null) assertEquals(0, scan.substitutions());
+    }
   }
 
   @ParameterizedTest
@@ -607,6 +719,26 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"FLOAT", "DOUBLE"})
+  void expandedFloatingElementsRetainPayloadBits(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    check(
+        () -> {
+          var table = environment(type);
+          table.createTemporarySystemFunction(
+              "collection_bits",
+              type.equals("FLOAT") ? FloatArrayBits.class : DoubleArrayBits.class);
+          return table;
+        },
+        "SELECT k,collection_bits(ARRAY[x]) FROM (SELECT k,ARRAY_AGG("
+            + nonNullArgument(type)
+            + ") AS a FROM src GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)",
+        "NativeColumnarGroupAggregate",
+        "NativeGeneratedUnnest",
+        "NativeCalc");
+  }
+
   @org.apache.flink.table.annotation.FunctionHint(
       input = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<DATE NOT NULL>"),
       output = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<DATE NOT NULL>"))
@@ -716,7 +848,29 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     restore(function, type, backend, true);
   }
 
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("scalarArrayRecoveryProfiles")
+  void nonNullScalarArrayExpansionRestoresTwice(String type, String backend) throws Exception {
+    restore("ARRAY_AGG", type, backend, false, true);
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      scalarArrayRecoveryProfiles() {
+    return collectionElementTypes()
+        .flatMap(
+            type ->
+                java.util.stream.Stream.of(
+                        "hashmap", "tech.streamfusion.state.RocksDBNativeStateBackendFactory")
+                    .map(backend -> org.junit.jupiter.params.provider.Arguments.of(type, backend)));
+  }
+
   private static void restore(String function, String type, String backend, boolean notNull)
+      throws Exception {
+    restore(function, type, backend, notNull, false);
+  }
+
+  private static void restore(
+      String function, String type, String backend, boolean notNull, boolean unnest)
       throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     var rows = new ArrayList<Row>();
@@ -737,6 +891,11 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
               + "(v),"
               + function
               + "(DISTINCT v),COUNT(*) FROM recovery_input GROUP BY k";
+      if (unnest)
+        sql =
+            "SELECT k,a,x FROM (SELECT k,ARRAY_AGG("
+                + nonNullArgument(type)
+                + ") AS a FROM recovery_input GROUP BY k) s CROSS JOIN UNNEST(a) AS u(x)";
       var runs =
           NativeFailureParity.runRecovery(
               () -> onePhase(recovery.uninterrupted()), () -> onePhase(recovery.get()), sql);
@@ -746,6 +905,9 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
       recovery.verifyRepeatedRecovery();
       RecoveryExecutionMetrics.assertConsumed(
           recovery.nativeExecution(), "NativeColumnarGroupAggregate");
+      if (unnest)
+        RecoveryExecutionMetrics.assertConsumed(
+            recovery.nativeExecution(), "NativeGeneratedUnnest");
       SharedFlinkCluster.assertNativeMemoryReleased("primitive-collection-recovery");
     }
   }

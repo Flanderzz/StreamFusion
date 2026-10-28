@@ -39,6 +39,7 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean expectedUdf = expectedAllNative || expectedNativeCases.contains(shape);
       boolean legacy = shape.startsWith("legacy_");
+      boolean expanded = shape.startsWith("expanded_");
       String collectionShape = collectionShape(shape);
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
           collectionShape.endsWith("_date")
@@ -71,6 +72,10 @@ class JvmAggregateBenchmark {
                       : collectionShape.endsWith("_smallint")
                           ? "CAST(v AS SMALLINT)"
                           : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+      if (expanded) {
+        assertTrue(arrayAgg, "Expansion requires an ARRAY_AGG case");
+        argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
+      }
       if (legacy && !collect && !arrayAgg)
         throw new IllegalArgumentException("Legacy collection case required: " + shape);
       String sql =
@@ -78,7 +83,10 @@ class JvmAggregateBenchmark {
               + (udf ? "test_aggregate" : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : "SUM")
               + "("
               + argument
-              + ") FROM src GROUP BY k";
+              + ")"
+              + (expanded ? " AS a" : "")
+              + " FROM src GROUP BY k";
+      if (expanded) sql = "SELECT k,x FROM (" + sql + ") s CROSS JOIN UNNEST(a) AS u(x)";
       double[][] elapsed = new double[2][runs];
       for (int trial = 0; trial < warmups + runs; trial++) {
         for (int order = 0; order < 2; order++) {
@@ -226,6 +234,9 @@ class JvmAggregateBenchmark {
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
+              if (expanded)
+                RecoveryExecutionMetrics.assertConsumed(
+                    metrics.nativeOperators(), "NativeGeneratedUnnest");
               for (var observation : metrics.nativeOperators())
                 System.out.printf(
                     Locale.ROOT,
@@ -349,8 +360,32 @@ class JvmAggregateBenchmark {
         .contains(collectionShape(shape));
   }
 
+  private static String collectionZero(String shape) {
+    if (shape.endsWith("_date")) return "DATE '1970-01-01'";
+    if (shape.endsWith("_time")) return "TIME '00:00:00'";
+    if (shape.endsWith("_boolean")) return "FALSE";
+    String type =
+        shape.contains("_decimal")
+            ? "DECIMAL(" + decimalPrecision(shape) + "," + decimalScale(shape) + ")"
+            : java.util.Map.of(
+                    "tinyint",
+                    "TINYINT",
+                    "smallint",
+                    "SMALLINT",
+                    "int",
+                    "INT",
+                    "float",
+                    "FLOAT",
+                    "double",
+                    "DOUBLE")
+                .getOrDefault(shape.substring(shape.lastIndexOf('_') + 1), "BIGINT");
+    return "CAST(0 AS " + type + ")";
+  }
+
   private static String collectionShape(String shape) {
-    return shape.startsWith("legacy_") ? shape.substring("legacy_".length()) : shape;
+    return shape.startsWith("legacy_")
+        ? shape.substring("legacy_".length())
+        : shape.startsWith("expanded_") ? shape.substring("expanded_".length()) : shape;
   }
 
   private void profileCollection(String shape) throws Exception {

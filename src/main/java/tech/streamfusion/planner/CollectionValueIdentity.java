@@ -266,6 +266,20 @@ final class CollectionValueIdentity {
             && ((StreamPhysicalNativeTableFunction) node).preservesCollections();
   }
 
+  static boolean scalarArrayProducer(RelNode node) {
+    return (node instanceof StreamPhysicalNativeColumnarGroupAggregate
+                && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
+            || node instanceof StreamPhysicalNativeJvmGroup
+                && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults())
+        && node.getRowType().getFieldList().stream().anyMatch(field -> sensitive(field.getType()))
+        && node.getRowType().getFieldList().stream()
+            .allMatch(
+                field ->
+                    !sensitive(field.getType())
+                        || field.getType().getSqlTypeName() == SqlTypeName.ARRAY
+                            && !sensitive(field.getType().getComponentType()));
+  }
+
   private static boolean verifiedCorrelate(
       org.apache.flink.table.planner.plan.nodes.physical.stream.StreamPhysicalCorrelate node) {
     return GeneratedUnnestMatcher.matches(node)
