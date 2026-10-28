@@ -8,9 +8,9 @@ back](#still-falls-back).
 Flink picks between the two plan shapes itself, based on `table.exec.mini-batch.enabled`; this page
 covers both, since a query only accelerates when whichever shape Flink chose is fully native.
 
-Integer/BOOLEAN COLLECT uses Rust counted multiset state behind Arrow batch boundaries;
+Integer/BOOLEAN and [DATE/TIME](#date-and-time-collection-elements) COLLECT use Rust counted multiset state behind Arrow batch boundaries;
 see [Integer COLLECT](#integer-collect) for its narrow type and representation gates.
-Integer/BOOLEAN ARRAY_AGG additionally uses Rust sequence state on
+Integer/BOOLEAN and nullable DATE/TIME ARRAY_AGG additionally use Rust sequence state on
 Flink 2.2 as [described below](#integer-array_agg); richer collection results remain pending.
 
 When the selected aggregate uses a mini-batch trigger, translation uses the released host's
@@ -835,7 +835,9 @@ route on both supported JDKs, and check helpful JVM null-dereference text when i
 ## Type support
 
 The separate [integer COLLECT](#integer-collect) and [integer ARRAY_AGG](#integer-array_agg) routes
-admit BOOLEAN and TINYINT/SMALLINT/INT/BIGINT through Rust collection state. The table below describes the arithmetic native accumulators.
+admit BOOLEAN and TINYINT/SMALLINT/INT/BIGINT through Rust collection state;
+[DATE/TIME](#date-and-time-collection-elements) extend the verified element types.
+The table below describes the arithmetic native accumulators.
 
 The matcher only accelerates `(aggregate, value-type)` pairs where DataFusion's native arithmetic
 agrees byte-for-byte with Flink's — this table is that guardrail; anything marked ✗ falls back.
@@ -2498,7 +2500,8 @@ COLLECT over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN uses the columnar Rust grou
 A counted multiset preserves Flink's signed 32-bit counts and Java map iteration behavior,
 including the fresh result-map materialization used by the released MapView. Input fields remain scalar, and aggregate result fields cannot
 contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
-boundary [described below](#character-grouping-keys). Other COLLECT
+boundary [described below](#character-grouping-keys). DATE and TIME use the
+[verified temporal extension](#date-and-time-collection-elements). Other COLLECT
 value types and nested results retain fallback. ARRAY_AGG over the same types additionally runs on Flink 2.2;
 it is absent from released Flink 1.18.1.
 
@@ -2534,7 +2537,8 @@ On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN 
 single-phase Rust group aggregate with sequence state. Only the exact builtin operator is recognized; user-defined functions with that name
 retain their existing signature gates. Scalar inputs and non-character aggregate result fields
 are required. Character grouping keys use the verified serialized-key boundary below. Other
-element types and nested collection results retain fallback. ARRAY_AGG is
+element types outside the [DATE/TIME extension](#date-and-time-collection-elements), and nested
+collection results retain fallback. ARRAY_AGG is
 explicitly N/A on released Flink 1.18.1. Mini-batch, async-state, approximate, ordered and specialized forms keep their
 existing restrictions.
 
@@ -2647,7 +2651,7 @@ acceleration claim.
 ## Rust collection state validation
 
 The focused runtime-source matrix passes 112 checks on Flink 2.2.1 and 57 checks with 55
-version skips on 1.18.1. The Rust group-state tests pass 104 cases, including typed collection
+version skips on 1.18.1. The Rust group-state tests pass 105 cases, including typed collection
 snapshots, signed-count overflow, first-match retractions and bounded map-order reinsertion.
 The SQL tests require consumed work from the Rust group itself; empty filtered projections
 require the filter/Calc witness instead. Separate tests cover shared DISTINCT/COUNT filters,
@@ -2659,3 +2663,33 @@ under the suite agent. The two synchronous backend variants require consumed Rus
 work; every other variant retains its exact fallback contract. The focused execution uses
 canonical released Maven test artifacts without changing upstream source or configuration.
 See [the optimization](../optimizations/native-collection-state.md) for the native state boundary.
+
+
+## DATE and TIME collection elements
+
+DATE and TIME COLLECT use the existing Rust counted multiset on both supported Flink lines.
+Nullable DATE/TIME ARRAY_AGG uses Rust arrival-order state on Flink 2.2; ARRAY_AGG remains N/A
+on released 1.18.1. Values retain epoch days and millisecond-of-day units. Dedicated snapshot
+and DISTINCT membership tags keep DATE, TIME and INT state incompatible even though all three
+use 32-bit payloads. No additional operator, JNI call or ownership protocol is introduced.
+
+Runtime sources cover years 0001–9999, the epoch, 1900/2000 leap boundaries, midnight and
+subsecond TIME values, NULL/all-NULL groups, duplicates, all four RowKinds, DISTINCT/FILTER,
+empty grouped/global results and string formatting. Heap and native RocksDB tests restore
+twice across nonempty accumulation/retraction prefixes and require consumed native group work.
+Nullable arrays also feed native Top-N and UNNEST; legacy external-row consumers exercise
+STRING grouping keys and parallelism one/three. Rust tests cover sliced input buffers, typed
+DISTINCT membership, snapshot compatibility and output ownership. The collection regression set
+passes 98 checks on 2.2 and 58 with 40 capability skips on 1.18; the unchanged upstream COLLECT
+fixture additionally passes all seven/six variants with its existing execution contracts.
+
+NOT NULL-element DATE/TIME ARRAY_AGG retains planning-time fallback: repeated released
+array copying can reject a primitive temporal array, and its generic/binary copy category is
+not verified on this native boundary. DATE/TIME collection arguments also require a nullable declared type: actual NULL slots
+beneath a NOT NULL source hint succeed on stock Flink but fail Arrow batch import. NOT NULL
+arguments, including COALESCE-derived arguments, retain planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous single-phase,
+representation-consumer and native-writer gates remain. This does not extend updating retained
+MAP/MULTISET payloads deferred in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
+
+[Release comparisons](../benchmarks/collection-aggregates.md#date-and-time-elements) retain
+stock and previous-code controls, both perimeter conversions and the two-pass profiling limit.

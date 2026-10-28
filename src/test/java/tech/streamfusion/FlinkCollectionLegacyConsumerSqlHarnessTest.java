@@ -25,35 +25,52 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
     METRICS.close();
   }
 
-  private static StreamTableEnvironment environment(int parallelism) {
+  private static StreamTableEnvironment environment(int parallelism, String type) {
     var env = METRICS.environment(new Configuration(), parallelism, 0);
     env.getConfig().enableObjectReuse();
     var table = StreamTableEnvironment.create(env);
     table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
     table.getConfig().set("streamfusion.transpose.batchRows", "3");
+    var rows =
+        new ArrayList<>(
+            List.of(
+                Row.of("", -128L),
+                Row.of("", -128L),
+                Row.of("", null),
+                Row.of(null, 32767L),
+                Row.of("é🙂", null),
+                Row.of("?", Long.MIN_VALUE),
+                Row.of("\ud800", Long.MAX_VALUE),
+                Row.ofKind(RowKind.UPDATE_BEFORE, "", -128L),
+                Row.ofKind(RowKind.UPDATE_AFTER, "", 127L),
+                Row.ofKind(RowKind.DELETE, "", -128L),
+                Row.ofKind(RowKind.DELETE, "é🙂", null),
+                Row.of("é🙂", 7L)));
+    for (Row row : rows) {
+      Long value = (Long) row.getField(1);
+      if (value == null) continue;
+      if (type.equals("DATE"))
+        row.setField(1, java.time.LocalDate.ofEpochDay(Math.floorMod(value, 730000) - 365000));
+      if (type.equals("TIME"))
+        row.setField(1, java.time.LocalTime.ofNanoOfDay(Math.floorMod(value, 86400000) * 1_000_000L));
+    }
     var input =
         tech.streamfusion.compat.FlinkTestSources.fromData(
             env,
-            Types.ROW_NAMED(new String[] {"k", "v"}, Types.STRING, Types.LONG),
-            Row.of("", -128L),
-            Row.of("", -128L),
-            Row.of("", null),
-            Row.of(null, 32767L),
-            Row.of("é🙂", null),
-            Row.of("?", Long.MIN_VALUE),
-            Row.of("\ud800", Long.MAX_VALUE),
-            Row.ofKind(RowKind.UPDATE_BEFORE, "", -128L),
-            Row.ofKind(RowKind.UPDATE_AFTER, "", 127L),
-            Row.ofKind(RowKind.DELETE, "", -128L),
-            Row.ofKind(RowKind.DELETE, "é🙂", null),
-            Row.of("é🙂", 7L));
+            rows,
+            Types.ROW_NAMED(
+                new String[] {"k", "v"},
+                Types.STRING,
+                type.equals("DATE")
+                    ? Types.LOCAL_DATE
+                    : type.equals("TIME") ? Types.LOCAL_TIME : Types.LONG));
     table.createTemporaryView(
         "src",
         table.fromChangelogStream(
             input,
             Schema.newBuilder()
                 .column("k", DataTypes.STRING())
-                .column("v", DataTypes.BIGINT())
+                .column("v", DataTypes.of(type.equals("TIME") ? "TIME(3)" : type))
                 .build()));
     return table;
   }
@@ -101,6 +118,19 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
   }
 
   @ParameterizedTest
+  @CsvSource({"COLLECT,DATE", "COLLECT,TIME", "ARRAY_AGG,DATE", "ARRAY_AGG,TIME"})
+  void temporalCollectionsRetainLegacyRowsAcrossExchanges(String function, String type)
+      throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    String sql =
+        "SELECT k," + function + "(v)," + function + "(DISTINCT v),COUNT(*) FROM src GROUP BY k";
+    for (int parallelism : new int[] {1, 3})
+      assertEquals(
+          perKey(collect(type, sql, parallelism, false, false)),
+          perKey(collect(type, sql, parallelism, true, true)));
+  }
+
+  @ParameterizedTest
   @ValueSource(strings = {"COLLECT", "ARRAY_AGG"})
   void emptyGlobalLegacyResultsKeepTheirReleasedSemantics(String function) throws Exception {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
@@ -136,11 +166,22 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
   private static List<List<Object>> collect(
       String sql, int parallelism, boolean nativeEnabled, boolean expectNative, String... consumed)
       throws Exception {
+    return collect("BIGINT", sql, parallelism, nativeEnabled, expectNative, consumed);
+  }
+
+  private static List<List<Object>> collect(
+      String type,
+      String sql,
+      int parallelism,
+      boolean nativeEnabled,
+      boolean expectNative,
+      String... consumed)
+      throws Exception {
     var previous =
         METRICS.nativeOperators().stream()
             .map(row -> row.get("jobId"))
             .collect(java.util.stream.Collectors.toSet());
-    var table = environment(parallelism);
+    var table = environment(parallelism, type);
     var scan = nativeEnabled ? NativePlanner.install(table) : null;
     var result = new ArrayList<List<Object>>();
     var query = table.sqlQuery(sql);

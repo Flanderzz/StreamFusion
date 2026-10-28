@@ -62,6 +62,8 @@ enum PrimitiveType {
     I16,
     I32,
     I64,
+    Date,
+    Time,
 }
 impl PrimitiveType {
     fn new(ty: &DataType) -> Self {
@@ -71,6 +73,8 @@ impl PrimitiveType {
             DataType::Int16 => Self::I16,
             DataType::Int32 => Self::I32,
             DataType::Int64 => Self::I64,
+            DataType::Date32 => Self::Date,
+            DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => Self::Time,
             _ => unreachable!("verified collection element"),
         }
     }
@@ -81,6 +85,8 @@ impl PrimitiveType {
             Self::I16 => DataType::Int16,
             Self::I32 => DataType::Int32,
             Self::I64 => DataType::Int64,
+            Self::Date => DataType::Date32,
+            Self::Time => DataType::Time32(arrow::datatypes::TimeUnit::Millisecond),
         }
     }
     fn scalar(self, value: Option<i64>) -> ScalarValue {
@@ -90,6 +96,8 @@ impl PrimitiveType {
             Self::I16 => ScalarValue::Int16(value.map(|v| v as i16)),
             Self::I32 => ScalarValue::Int32(value.map(|v| v as i32)),
             Self::I64 => ScalarValue::Int64(value),
+            Self::Date => ScalarValue::Date32(value.map(|v| v as i32)),
+            Self::Time => ScalarValue::Time32Millisecond(value.map(|v| v as i32)),
         }
     }
 }
@@ -100,6 +108,7 @@ fn primitive(value: &ScalarValue) -> Option<i64> {
         ScalarValue::Int16(v) => v.map(i64::from),
         ScalarValue::Int32(v) => v.map(i64::from),
         ScalarValue::Int64(v) => *v,
+        ScalarValue::Date32(v) | ScalarValue::Time32Millisecond(v) => v.map(i64::from),
         _ => unreachable!("verified collection membership"),
     }
 }
@@ -262,6 +271,20 @@ impl CollectionState {
                 DataType::Int64 => {
                     Arc::new(Int64Array::from(values.into_iter().collect::<Vec<_>>()))
                 }
+                DataType::Date32 => Arc::new(arrow::array::Date32Array::from(
+                    values
+                        .into_iter()
+                        .map(|v| v.map(|v| v as i32))
+                        .collect::<Vec<_>>(),
+                )),
+                DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
+                    Arc::new(arrow::array::Time32MillisecondArray::from(
+                        values
+                            .into_iter()
+                            .map(|v| v.map(|v| v as i32))
+                            .collect::<Vec<_>>(),
+                    ))
+                }
                 _ => unreachable!("verified collection element type"),
             }
         }
@@ -359,6 +382,8 @@ pub(super) enum CollectionColumn<'a> {
     I16(&'a Int16Array),
     I32(&'a Int32Array),
     I64(&'a Int64Array),
+    Date(&'a arrow::array::Date32Array),
+    Time(&'a arrow::array::Time32MillisecondArray),
 }
 impl<'a> CollectionColumn<'a> {
     pub(super) fn new(array: &'a ArrayRef) -> Self {
@@ -368,6 +393,10 @@ impl<'a> CollectionColumn<'a> {
             DataType::Int16 => Self::I16(array.as_any().downcast_ref().unwrap()),
             DataType::Int32 => Self::I32(array.as_any().downcast_ref().unwrap()),
             DataType::Int64 => Self::I64(array.as_any().downcast_ref().unwrap()),
+            DataType::Date32 => Self::Date(array.as_any().downcast_ref().unwrap()),
+            DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
+                Self::Time(array.as_any().downcast_ref().unwrap())
+            }
             _ => unreachable!("verified collection input"),
         }
     }
@@ -383,6 +412,8 @@ impl<'a> CollectionColumn<'a> {
             Self::I16(a) => read!(a),
             Self::I32(a) => read!(a),
             Self::I64(a) => read!(a),
+            Self::Date(a) => read!(a),
+            Self::Time(a) => read!(a),
         }
     }
 }
@@ -416,6 +447,8 @@ mod tests {
             DataType::Int16,
             DataType::Int32,
             DataType::Int64,
+            DataType::Date32,
+            DataType::Time32(arrow::datatypes::TimeUnit::Millisecond),
         ] {
             for kind in 48..=53 {
                 let mut state = CollectionState::new(kind, &ty);
@@ -447,6 +480,56 @@ mod tests {
                     .restore(state.snapshot())
                     .is_err());
             }
+        }
+    }
+
+    #[test]
+    fn temporal_columns_keep_slices_and_distinct_membership_types() {
+        for (ty, array) in [
+            (
+                DataType::Date32,
+                Arc::new(arrow::array::Date32Array::from(vec![
+                    Some(99),
+                    Some(-719162),
+                    None,
+                    Some(2932896),
+                ])) as ArrayRef,
+            ),
+            (
+                DataType::Time32(arrow::datatypes::TimeUnit::Millisecond),
+                Arc::new(arrow::array::Time32MillisecondArray::from(vec![
+                    Some(99),
+                    Some(0),
+                    None,
+                    Some(86399999),
+                ])) as ArrayRef,
+            ),
+        ] {
+            let input = array.slice(1, 3);
+            let column = CollectionColumn::new(&input);
+            let mut state = CollectionState::new(51, &ty);
+            for row in 0..3 {
+                let value = column.at(row);
+                state.update(value, false, StateTtl::disabled(), false);
+                state.update(value, false, StateTtl::disabled(), false);
+                assert_eq!(state.distinct_count(&state.element.scalar(value)), 2);
+            }
+            let output = state.emit(&result_type(51, &ty));
+            let ScalarValue::List(list) = output else {
+                unreachable!()
+            };
+            assert_eq!(list.values().as_ref(), input.as_ref());
+            let mut restored = CollectionState::new(51, &ty);
+            restored.restore(state.snapshot()).unwrap();
+            for (value, count) in restored.distinct_entries() {
+                assert_eq!(value.data_type(), ty);
+                assert_eq!(count, 2);
+                restored.forget_distinct(&value);
+                assert_eq!(restored.distinct_count(&value), 0);
+            }
+            assert!(CollectionState::new(51, &DataType::Int32)
+                .restore(state.snapshot())
+                .is_err());
         }
     }
 
