@@ -2964,7 +2964,8 @@ the recursive generated-container bridge and released serializers, rather than
 introducing separate native accumulators per container. Child types keep the existing
 generated-container gates, including version-specific fixed BINARY exclusions.
 
-The input transpose and exchange retain the preserving schema; collection outputs
+The input transpose and exchange retain the preserving schema, including transposes
+created before the group consumer was selected; collection outputs
 use the same representation on exit. Verified contexts include NULL parents,
 NULL map keys/values, multiset counts, malformed strings, direct generic/binary maps,
 object reuse, three-row batches, FILTER, scalar numeric coresults, global/keyed and

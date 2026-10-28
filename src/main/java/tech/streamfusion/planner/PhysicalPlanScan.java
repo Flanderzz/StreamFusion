@@ -917,6 +917,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     RelNode result = changed ? node.copy(node.getTraitSet(), inputs) : node;
     if (result instanceof StreamPhysicalRowDataToArrow) {
       result = ((StreamPhysicalRowDataToArrow) result).withPreferredBatchRows(inheritedBatchRows);
+      if (preserveCollections)
+        result = ((StreamPhysicalRowDataToArrow) result).withCollectionRepresentation();
       if (inheritedStringCaches) result = ((StreamPhysicalRowDataToArrow) result).withStringCaches();
     }
     return result;

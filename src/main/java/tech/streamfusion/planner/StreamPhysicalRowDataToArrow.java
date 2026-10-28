@@ -109,6 +109,21 @@ public class StreamPhysicalRowDataToArrow extends StreamPhysicalNativeSingleRel
             preserveStringCaches);
   }
 
+  StreamPhysicalRowDataToArrow withCollectionRepresentation() {
+    return preserveCollections
+        ? this
+        : new StreamPhysicalRowDataToArrow(
+            getCluster(),
+            getTraitSet(),
+            getInput(),
+            carryRowKind,
+            prunedType,
+            true,
+            preferredBatchRows,
+            jsonDocuments,
+            preserveStringCaches);
+  }
+
   boolean preservesCollections() {
     return preserveCollections;
   }

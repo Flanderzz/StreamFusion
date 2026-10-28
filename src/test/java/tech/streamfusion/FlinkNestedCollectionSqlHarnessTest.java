@@ -408,6 +408,19 @@ class FlinkNestedCollectionSqlHarnessTest {
     return table;
   }
 
+  @ParameterizedTest
+  @CsvSource({"COLLECT,MAP", "ARRAY_AGG,MAP", "COLLECT,MULTISET", "ARRAY_AGG,MULTISET"})
+  void preservingGroupInputsUpgradeTheExistingSourceTranspose(String function, String shape) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    String sql = "SELECT k," + function + "(v),COUNT(*) FROM src GROUP BY k";
+    var table = internalEnvironment(shape, false);
+    var scan = tech.streamfusion.planner.NativePlanner.install(table);
+    String plan = tech.streamfusion.planner.NativePlanner.explain(table, sql);
+    assertTrue(scan.substitutions() > 0, plan);
+    assertTrue(plan.contains("RowDataToArrow(collectionRepresentation=[true]"), plan);
+    check(function, () -> internalEnvironment(shape, false), sql, true);
+  }
+
   private static void check(
       String function, Supplier<TableEnvironment> factory, String sql, boolean keyed) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);

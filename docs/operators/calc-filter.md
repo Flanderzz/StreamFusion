@@ -3511,3 +3511,10 @@ aggregate elements without widening unrelated stateful consumers or user-functio
 argument contracts. ARRAY, ROW and STRUCTURED aggregate elements remain unverified;
 array support requires a container copy-class representation that also covers empty
 arrays.
+
+A preserving consumer's layout requirement also upgrades an existing source transpose
+through a direct native projection and exchange. An earlier pruning pass may have
+created that transpose before the consumer was selected; the transition pass carries
+the inherited requirement into its final schema. Existing batch-size, source-pruning,
+JSON and scalar string-cache settings survive the upgrade. This fixes the requested
+representation boundary without changing collection element admission.
