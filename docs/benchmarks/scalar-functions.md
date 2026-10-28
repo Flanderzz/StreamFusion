@@ -3095,3 +3095,188 @@ encoder must be first on the classpath for the previous control. Runtime parity 
 consumed-work witnesses cover both types on Flink 1.18.1/2.2.1 and JDK 11/17. Explicit
 widening of TINYINT/SMALLINT is verified, while direct calls retain stock compilation
 failures. Unchanged released `testTruncate` fixtures pass on both lines.
+
+## DECIMAL ABS
+
+Measured on 2026-10-28 against canonical main `d89e03b5`, with released Flink 1.18.1
+and 2.2.1, JDK 17, Apple M4 Pro, Rust 1.94.0 and a release/no-default-features native
+build with the system allocator. All core Java production sources and compatibility
+sources are compiled from the candidate with `--release 11`. This replaces generated
+JVM computation inside an already-admitted Calc without changing operator/type admission.
+
+Stock executes the released generated expression over prepared GenericRowData or
+BinaryRowData. Previous and candidate execute production Calc over equal Arrow values,
+types and NULLs, with the timer inside Rust. Setup, Arrow import/export and perimeter
+transposes are excluded from this prepared control. The previous control uses the scalar
+generated-expression callback emitted by main (kind 17), including decimal argument and
+result marshalling; the earlier whole-row callback control is superseded. Intrinsic conversions,
+result allocation and equivalent signum consumption remain timed. Full schema/Arrow
+output equality is checked before timing, and each measured output contributes to a
+checksum. Schemas are nullable; enabled NULL values occur every seventh row. Inputs
+alternate signs, include precision maxima, and include values beyond 2^53 for noncompact
+types. Sixteen warmups and eleven measured trials of 65,536 rows rotate engine order.
+No other test or benchmark runs concurrently. Values are median [min, max] ns/row:
+
+| Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 6.771 [6.255, 33.129] | 38.748 [31.810, 46.170] | 1.277 [1.254, 1.657] | 5.30x | 30.34x |
+| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 6.641 [5.821, 31.708] | 46.051 [41.422, 67.759] | 1.778 [1.691, 1.986] | 3.74x | 25.91x |
+| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.556 [4.824, 8.092] | 596.312 [564.630, 711.404] | 25.133 [23.392, 26.421] | 0.22x | 23.73x |
+| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 31.134 [23.839, 47.973] | 66.718 [48.780, 139.852] | 1.256 [1.146, 1.330] | 24.78x | 53.11x |
+| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 8.194 [7.320, 9.511] | 96.540 [75.018, 127.890] | 1.782 [1.696, 1.970] | 4.60x | 54.17x |
+| 1.18.1, DECIMAL(19,3), true, binary, 16 | 18.159 [17.847, 23.510] | 685.521 [571.056, 760.549] | 23.739 [22.762, 24.487] | 0.76x | 28.88x |
+| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 25.438 [22.809, 48.136] | 58.722 [44.867, 91.820] | 1.297 [1.263, 1.371] | 19.61x | 45.27x |
+| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 8.318 [7.112, 30.991] | 89.708 [78.290, 132.299] | 1.781 [1.743, 2.115] | 4.67x | 50.37x |
+| 1.18.1, DECIMAL(38,18), true, binary, 16 | 18.058 [16.403, 22.636] | 594.976 [570.112, 623.375] | 24.618 [24.240, 25.860] | 0.73x | 24.17x |
+| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 27.431 [24.631, 49.947] | 66.619 [46.130, 134.900] | 1.331 [1.214, 1.488] | 20.60x | 50.04x |
+| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 7.809 [6.671, 30.333] | 94.542 [83.144, 120.974] | 1.834 [1.743, 4.465] | 4.26x | 51.56x |
+| 1.18.1, DECIMAL(38,38), true, binary, 16 | 19.852 [17.552, 23.687] | 624.911 [583.037, 760.024] | 24.169 [23.059, 28.229] | 0.82x | 25.86x |
+| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 8.650 [6.227, 34.993] | 53.272 [44.177, 86.080] | 1.297 [1.142, 1.580] | 6.67x | 41.07x |
+| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 7.817 [6.538, 14.962] | 64.180 [36.743, 212.652] | 2.127 [1.836, 3.219] | 3.67x | 30.17x |
+| 2.2.1, DECIMAL(18,3), true, binary, 16 | 5.786 [4.878, 8.431] | 596.074 [567.899, 718.964] | 22.915 [22.058, 24.011] | 0.25x | 26.01x |
+| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 26.063 [24.449, 52.284] | 66.973 [49.121, 126.535] | 1.317 [1.204, 1.621] | 19.79x | 50.86x |
+| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 8.820 [7.537, 10.936] | 93.368 [72.261, 150.984] | 1.766 [1.605, 2.389] | 4.99x | 52.86x |
+| 2.2.1, DECIMAL(19,3), true, binary, 16 | 19.715 [18.974, 20.285] | 596.653 [570.852, 694.953] | 24.459 [23.104, 25.412] | 0.81x | 24.39x |
+| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 25.969 [25.345, 49.030] | 71.037 [49.401, 127.594] | 1.300 [1.154, 1.346] | 19.97x | 54.64x |
+| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 7.465 [7.186, 34.662] | 75.359 [47.146, 168.208] | 1.760 [1.705, 2.176] | 4.24x | 42.81x |
+| 2.2.1, DECIMAL(38,18), true, binary, 16 | 19.304 [17.955, 27.007] | 581.214 [573.262, 902.620] | 24.179 [23.502, 26.571] | 0.80x | 24.04x |
+| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 23.404 [22.887, 24.978] | 66.765 [54.471, 96.620] | 1.295 [1.149, 1.497] | 18.07x | 51.55x |
+| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 7.948 [7.013, 10.184] | 66.031 [48.108, 108.056] | 1.802 [1.633, 1.963] | 4.41x | 36.65x |
+| 2.2.1, DECIMAL(38,38), true, binary, 16 | 18.920 [17.187, 22.478] | 587.500 [567.618, 703.150] | 26.159 [24.940, 27.522] | 0.72x | 22.46x |
+
+At 1,024 rows the candidate is 3.67-24.78x faster than stock and
+25.91-54.64x faster than the preceding callback. Sixteen-row
+controls still lose to stock (0.22-0.82x), while improving the previous
+native-Calc route by 22.46-28.88x. These are sampled prepared-batch
+gains; they do not establish universal small-batch acceleration. The nullable 1,024-row
+allocation probe records 20 allocations / 17,575 requested bytes, with 16,384 new value
+bytes and 128 shared validity bytes. Generic Calc/batch/result handling retains fixed
+costs alongside the allocation-free per-element transform. Remaining small-batch and
+row/Arrow perimeter work stays in
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+The independent complete job uses 1M DECIMAL(18,3) rows, parallelism one, a bounded
+row source, both transposes and a rowwise blackhole sink. The previous control loads
+the actual `d89e03b5` encoder ahead of candidate classes and requires its JVM route;
+candidate requires `jvm=[]`. Both require positive consumed NativeCalc work.
+Each engine runs two warmups and five measured jobs in separate sequential JVMs.
+Seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.138626 [0.123898, 0.143039] | 0.183183 [0.176360, 0.212639] | 0.139391 [0.137642, 0.155442] |
+
+The complete candidate improves previous StreamFusion by
+23.9% but remains
+0.6% slower than stock
+by median in this workload. Startup, submission, JIT, source conversion and both
+transposes remain included; their individual contributions are not isolated here.
+The prepared-batch gain is not a whole-job acceleration claim. The
+[result record](results/decimal-abs-2026-10-28.json) retains every trial,
+checksum, environment and allocation observation.
+
+After test-compiling with the `bench` Maven profile, set `SF_NATIVE_BENCH_CLASSPATH`
+to test classes, production classes and Maven dependencies, and `SF_NATIVE_LIB_DIR`
+to the release library directory. Build/run the shared control from `native/`:
+
+```sh
+cargo build --release -p streamfusion --no-default-features --example decimal_unary
+./target/release/examples/decimal_unary 18 3 true false 1024 64 16 11
+```
+
+Arguments are precision, scale, actual NULL values, BinaryRowData input, batch rows,
+loops, warmups and measured trials. Complete controls use `DecimalUnaryPipelineBenchmark`
+with `SF_BENCHMARK=true` and `-Ddecimal.unary.pipeline.engine=flink|previous|native`;
+previous requires the baseline encoder first on the classpath. Runtime tests verify
+results, resolved types, consumed native work and no JVM binding on both Flink lines
+and JDK 11/17. Rust/encoding checks cover all legal precision/scale pairs. Unchanged
+released `testAbs` fixtures pass on both lines.
+
+## DECIMAL unary minus
+
+Measured on 2026-10-28 against canonical main `d89e03b5`, with released Flink 1.18.1
+and 2.2.1, JDK 17, Apple M4 Pro, Rust 1.94.0 and a release/no-default-features native
+build with the system allocator. All core Java production sources and compatibility
+sources are compiled from the candidate with `--release 11`. This replaces generated
+JVM computation inside an already-admitted Calc without changing operator/type admission.
+
+Stock executes the released generated expression over prepared GenericRowData or
+BinaryRowData. Previous and candidate execute production Calc over equal Arrow values,
+types and NULLs, with the timer inside Rust. Setup, Arrow import/export and perimeter
+transposes are excluded from this prepared control. The previous control uses the scalar
+generated-expression callback emitted by main (kind 17), including decimal argument and
+result marshalling; the earlier whole-row callback control is superseded. Intrinsic conversions,
+result allocation and equivalent signum consumption remain timed. Full schema/Arrow
+output equality is checked before timing, and each measured output contributes to a
+checksum. Schemas are nullable; enabled NULL values occur every seventh row. Inputs
+alternate signs, include precision maxima, and include values beyond 2^53 for noncompact
+types. Sixteen warmups and eleven measured trials of 65,536 rows rotate engine order.
+No other test or benchmark runs concurrently. Values are median [min, max] ns/row:
+
+| Flink, type, NULL values, stock format, batch rows | Stock ns/row | Previous ns/row | Native ns/row | vs stock | vs previous |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1, DECIMAL(18,3), false, binary, 1024 | 5.608 [5.397, 30.964] | 38.780 [36.360, 48.179] | 1.424 [1.360, 1.448] | 3.94x | 27.23x |
+| 1.18.1, DECIMAL(18,3), true, generic, 1024 | 5.138 [4.994, 5.221] | 39.243 [30.175, 62.565] | 2.113 [2.067, 2.254] | 2.43x | 18.57x |
+| 1.18.1, DECIMAL(18,3), true, binary, 16 | 5.169 [5.025, 9.325] | 589.500 [563.921, 610.549] | 25.894 [24.883, 27.327] | 0.20x | 22.77x |
+| 1.18.1, DECIMAL(19,3), false, binary, 1024 | 25.869 [24.083, 45.725] | 60.425 [53.040, 101.635] | 1.488 [1.422, 1.619] | 17.39x | 40.62x |
+| 1.18.1, DECIMAL(19,3), true, generic, 1024 | 17.958 [16.544, 35.588] | 120.014 [115.727, 146.039] | 2.097 [2.040, 2.342] | 8.56x | 57.24x |
+| 1.18.1, DECIMAL(19,3), true, binary, 16 | 18.345 [17.713, 19.267] | 584.371 [578.275, 610.158] | 25.778 [25.321, 27.777] | 0.71x | 22.67x |
+| 1.18.1, DECIMAL(38,18), false, binary, 1024 | 34.512 [21.738, 44.704] | 64.531 [43.767, 72.120] | 1.458 [1.367, 1.554] | 23.67x | 44.26x |
+| 1.18.1, DECIMAL(38,18), true, generic, 1024 | 7.675 [7.338, 7.944] | 41.761 [39.220, 59.480] | 2.070 [1.995, 2.111] | 3.71x | 20.17x |
+| 1.18.1, DECIMAL(38,18), true, binary, 16 | 18.198 [16.834, 23.837] | 576.080 [568.844, 607.250] | 26.079 [25.583, 26.886] | 0.70x | 22.09x |
+| 1.18.1, DECIMAL(38,38), false, binary, 1024 | 30.949 [22.371, 51.205] | 51.428 [45.383, 66.168] | 1.465 [1.390, 1.631] | 21.13x | 35.11x |
+| 1.18.1, DECIMAL(38,38), true, generic, 1024 | 7.643 [7.118, 8.465] | 42.615 [39.193, 86.474] | 2.089 [2.033, 2.347] | 3.66x | 20.40x |
+| 1.18.1, DECIMAL(38,38), true, binary, 16 | 18.907 [17.902, 19.407] | 581.264 [573.115, 596.482] | 27.077 [26.356, 28.397] | 0.70x | 21.47x |
+| 2.2.1, DECIMAL(18,3), false, binary, 1024 | 8.586 [7.102, 8.956] | 90.221 [35.983, 179.781] | 1.551 [1.473, 1.753] | 5.54x | 58.18x |
+| 2.2.1, DECIMAL(18,3), true, generic, 1024 | 6.987 [6.547, 7.708] | 51.341 [36.867, 91.749] | 2.126 [2.028, 2.342] | 3.29x | 24.15x |
+| 2.2.1, DECIMAL(18,3), true, binary, 16 | 6.000 [5.145, 6.451] | 620.616 [588.384, 971.621] | 25.933 [25.349, 34.006] | 0.23x | 23.93x |
+| 2.2.1, DECIMAL(19,3), false, binary, 1024 | 23.132 [21.831, 42.864] | 46.033 [42.233, 72.575] | 1.542 [1.408, 1.836] | 15.00x | 29.85x |
+| 2.2.1, DECIMAL(19,3), true, generic, 1024 | 9.666 [8.183, 11.278] | 44.669 [40.233, 67.673] | 2.143 [2.030, 2.563] | 4.51x | 20.84x |
+| 2.2.1, DECIMAL(19,3), true, binary, 16 | 19.288 [18.641, 25.727] | 585.044 [571.290, 591.088] | 27.367 [26.751, 28.982] | 0.70x | 21.38x |
+| 2.2.1, DECIMAL(38,18), false, binary, 1024 | 23.328 [22.225, 42.695] | 48.661 [43.836, 67.923] | 1.458 [1.418, 1.911] | 15.99x | 33.36x |
+| 2.2.1, DECIMAL(38,18), true, generic, 1024 | 8.416 [7.359, 14.885] | 51.033 [42.275, 80.820] | 2.165 [2.050, 2.892] | 3.89x | 23.57x |
+| 2.2.1, DECIMAL(38,18), true, binary, 16 | 24.755 [18.713, 33.524] | 585.119 [570.680, 1058.025] | 27.826 [26.473, 78.137] | 0.89x | 21.03x |
+| 2.2.1, DECIMAL(38,38), false, binary, 1024 | 23.077 [21.238, 45.155] | 47.891 [43.574, 75.425] | 1.476 [1.308, 1.616] | 15.63x | 32.44x |
+| 2.2.1, DECIMAL(38,38), true, generic, 1024 | 8.402 [7.579, 13.434] | 57.577 [43.598, 75.661] | 2.181 [2.028, 2.316] | 3.85x | 26.39x |
+| 2.2.1, DECIMAL(38,38), true, binary, 16 | 19.016 [18.543, 19.412] | 599.046 [577.167, 607.373] | 25.196 [24.239, 26.623] | 0.75x | 23.78x |
+
+At 1,024 rows the candidate is 2.43-23.67x faster than stock and
+18.57-58.18x faster than the preceding callback. Sixteen-row
+controls still lose to stock (0.20-0.89x), while improving the previous
+native-Calc route by 21.03-23.93x. These are sampled prepared-batch
+gains; they do not establish universal small-batch acceleration. The nullable 1,024-row
+allocation probe records 20 allocations / 17,575 requested bytes, with 16,384 new value
+bytes and 128 shared validity bytes. Generic Calc/batch/result handling retains fixed
+costs alongside the allocation-free per-element transform. Remaining small-batch and
+row/Arrow perimeter work stays in
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+The independent complete job uses 1M DECIMAL(18,3) rows, parallelism one, a bounded
+row source, both transposes and a rowwise blackhole sink. The previous control loads
+the actual `d89e03b5` encoder ahead of candidate classes and requires its JVM route;
+candidate requires `jvm=[]`. Both require positive consumed NativeCalc work.
+Each engine runs two warmups and five measured jobs in separate sequential JVMs.
+Seconds are median [min, max]:
+
+| Stock | Previous callback | Candidate |
+| ---: | ---: | ---: |
+| 0.131800 [0.119555, 0.133355] | 0.174760 [0.167390, 0.180106] | 0.150979 [0.145502, 0.164335] |
+
+The complete candidate improves previous StreamFusion by
+13.6% but remains
+14.6% slower than stock
+by median in this workload. Startup, submission, JIT, source conversion and both
+transposes remain included; their individual contributions are not isolated here.
+The prepared-batch gain is not a whole-job acceleration claim. The
+[result record](results/decimal-negate-2026-10-28.json) retains every trial,
+checksum, environment and allocation observation.
+
+Use the shared release example with `SF_DECIMAL_UNARY_FUNCTION=NEGATE`. Complete-job
+controls select `-Ddecimal.unary.pipeline.function=NEGATE` and the engine property above.
+Previous requires the baseline encoder first on the classpath; relabeling an unchanged
+candidate is rejected. Runtime regressions cover precision/scale endpoints, extrema,
+NULL/non-NULL data, widening/nesting, string/Boolean consumers, unselected failures and
+empty filtered batches, with positive consumed NativeCalc work on both Flink lines and
+JDK 11/17. Rust/encoding tests cover every legal decimal precision/scale pair. Unchanged
+released `ScalarOperatorsTest.testUnaryPlusMinus` and `DecimalTypeTest.testUnaryPlusMinus`
+fixtures pass on both lines.

@@ -23,6 +23,7 @@ import org.apache.calcite.rex.RexProgram;
 import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlJsonConstructorNullClause;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.SqlSyntax;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -2178,6 +2179,10 @@ final class RexExpression {
       return emitHostExpression(call, false);
     }
     if (call.getKind() == SqlKind.MINUS_PREFIX) {
+      if (nativeDecimalUnary(
+          call, org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.UNARY_MINUS)) {
+        return emitBuiltinCall(call, 219);
+      }
       if (nativeIntegralNegate(call)) {
         // The admitted unary chain has one leaf; input references guarantee array evaluation.
         RexNode leaf = call.getOperands().get(0);
@@ -2780,7 +2785,7 @@ final class RexExpression {
       return emitDateFormat(call.getOperands());
     }
     if ("ABS".equals(functionName)) {
-      if (nativeIntegralAbs(call)) return emitBuiltinCall(call, 218);
+      if (nativeIntegralAbs(call) || nativeDecimalAbs(call)) return emitBuiltinCall(call, 218);
       return emitFloatUnary(call, 62);
     }
     if ("FLOOR".equals(functionName)) {
@@ -4305,10 +4310,14 @@ final class RexExpression {
         break;
     }
     boolean exact = integral || input == SqlTypeName.DECIMAL;
-    if (call.getKind() == SqlKind.MINUS_PREFIX) return exact && !nativeIntegralNegate(call);
+    if (call.getKind() == SqlKind.MINUS_PREFIX)
+      return exact
+          && !nativeIntegralNegate(call)
+          && !nativeDecimalUnary(
+              call, org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.UNARY_MINUS);
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
       case "ABS":
-        return exact && !nativeIntegralAbs(call);
+        return exact && !nativeIntegralAbs(call) && !nativeDecimalAbs(call);
       case "SIGN":
         return exact && !nativeIntegralSign(call);
       case "FLOOR":
@@ -4453,6 +4462,34 @@ final class RexExpression {
                 call.getType().getSqlTypeName())
             >= 0
         && nativeIntegralSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeDecimalAbs(RexCall call) {
+    return nativeDecimalUnary(
+        call, org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.ABS);
+  }
+
+  private static boolean nativeDecimalUnary(RexCall call, SqlOperator operator) {
+    return call.getOperator() == operator
+        && call.getOperands().size() == 1
+        && call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+        && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+            call.getType(), call.getOperands().get(0).getType())
+        && nativeDecimalUnaryOperand(call.getOperands().get(0), operator);
+  }
+
+  private static boolean nativeDecimalUnaryOperand(RexNode node, SqlOperator operator) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeDecimalUnary(call, operator)) return true;
+    if (call.getKind() != SqlKind.CAST || call.getOperands().size() != 1) return false;
+    RelDataType input = call.getOperands().get(0).getType();
+    return input.getSqlTypeName() == SqlTypeName.DECIMAL
+        && call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+        && call.getType().getPrecision() >= input.getPrecision()
+        && call.getType().getScale() == input.getScale()
+        && nativeDecimalUnaryOperand(call.getOperands().get(0), operator);
   }
 
   private static boolean nativeIntegralAbs(RexCall call) {

@@ -428,8 +428,9 @@ As with Flink's generated random fields, stream state belongs to the running ope
 not keyed checkpoint state.
 
 Floating-point unary negation also runs natively, including `-RAND(seed)`, and preserves signed
-zero, infinities, NaN and NULL. Integer and DECIMAL unary negation use Flink-generated
-expressions through the batch JVM bridge inside native Calc.
+zero, infinities, NaN and NULL. Verified integer and DECIMAL unary negation also runs in Rust;
+the [exact unary coverage](#exact-unary-and-integral-functions) describes the admitted producers
+and the composed expressions that retain Flink-generated evaluation inside native Calc.
 
 Release diagnostic on Apple M1 Max, JDK 17/Flink 2.2.1: two million rows, parallelism 1,
 two warmups and five interleaved trials, with rowwise source/sink and both transposes asserted:
@@ -1445,7 +1446,26 @@ with their enclosing negation. [Release measurements](../benchmarks/scalar-funct
 compare prepared inputs with stock and the previous callback, and separately report the
 complete row-source job with both transposes.
 
-DECIMAL unary minus, ABS and SIGN execute Flink's generated expression code through
+DECIMAL ABS also uses the exact Rust kernel for direct input references, typed literals,
+nested admitted ABS and recursive precision widening at the same scale. It preserves
+the declared precision (1 through 38), scale, NULLs and sliced validity; it never converts
+through floating point. Like Comet's decimal ABS, the kernel transforms the unscaled i128
+and explicitly retains its Arrow decimal type. Rescaling, precision narrowing, arithmetic
+and other unverified producers retain the enclosing generated expression. Existing
+value-dependent FLOOR/CEIL and runtime-scale rounding guards still apply before this matcher.
+The [DECIMAL ABS measurements](../benchmarks/scalar-functions.md#decimal-abs) compare
+stock, previous callback and native execution at prepared and complete-job boundaries.
+
+DECIMAL unary minus uses the same verified producer scope as decimal ABS: direct
+inputs/literals, recursive same-scale precision widening and nested admitted negation.
+It uses Arrow's decimal numeric negation for arrays and direct i128 scalar dispatch,
+retaining precision, scale and NULL without a JVM evaluator. All legal DECIMAL extrema
+have a representable negation. Arithmetic, rescaling, narrowing, mixed ABS/negation
+chains and other producers retain their whole generated expression; existing rounding
+metadata guards remain unchanged. See the
+[DECIMAL unary-minus controls](../benchmarks/scalar-functions.md#decimal-unary-minus).
+
+DECIMAL SIGN executes Flink's generated expression code through
 the existing batch JVM bridge. Unverified integer rounding producers and explicit-scale
 INT/BIGINT TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
 retains the host compilation
@@ -1453,6 +1473,14 @@ failure described under exact floating math below. This retains resolved widths,
 and Java overflow behavior. Adjacent supported
 host expressions fuse before crossing the Arrow boundary. These are host-evaluated functions
 inside a columnar native Calc, not pure-Rust kernels.
+
+Compact `DECIMAL(p,p)` SIGN and its affected character CAST stay in one generated evaluator,
+preserving the intermediate sign before an Arrow boundary can revalidate its precision.
+This is the preserving boundary shipped in [#542](https://github.com/datafusion-contrib/StreamFusion/pull/542)
+for [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536), described under
+[SIGN](#sign). Noncompact DECIMAL(19,19)/(38,38) retain released Flink's NULL sign
+results for nonzero values. The native ABS/negation producer whitelist does not admit SIGN;
+its character-consumer fusion and rounding guards remain in force.
 
 DECIMAL FLOOR/CEIL/CEILING run inside verified scalar consumers using one fused generated
 expression, so the intermediate decimal does not cross Arrow before its consumer executes.

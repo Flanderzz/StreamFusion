@@ -1,6 +1,6 @@
 # Host-exact builtins and verified Rust replacements
 
-**Applies to:** integral ABS, REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
+**Applies to:** exact ABS, REGEXP_EXTRACT, UPPER/LOWER, temporal parsing/formatting/arithmetic/casts, DOUBLE TRUNCATE
 
 ## Removing the callback for integral ABS
 
@@ -17,6 +17,24 @@ RowData, the preceding production JVM callback, and the compiled Rust Calc. Defa
 over the old callback but remain slower than stock; the generic Calc still constructs input
 projections and output batches per call. This optimization replaces an existing native-Calc
 computation; the small-batch and complete-job results do not establish universal acceleration.
+
+## DECIMAL ABS without a JVM evaluator
+
+Verified decimal ABS now extends the same scalar/array dispatch. Following Comet's decimal
+ABS structure, Arrow transforms the unscaled i128 values and retains the input decimal
+precision and scale explicitly. Every legal Flink DECIMAL value has a representable absolute
+value; no double conversion, rescale, or per-row DecimalData/BigDecimal construction is needed.
+The values buffer is new, validity remains shared, and the input is untouched.
+
+Released Flink 1.18.1 and 2.2.1 preserve the operand's decimal metadata in both compact and
+noncompact ABS. Admission therefore starts from direct inputs/literals, nested admitted ABS,
+and precision widening without a scale change. Other producers keep their complete generated
+expression. Decimal rounding metadata guards remain in force. This changes computation inside
+an existing native Calc, without a new switch, expression opcode, JNI contract or operator.
+See [release measurements and limitations](../benchmarks/scalar-functions.md#decimal-abs).
+The current previous-version control uses main's scalar generated callback and both decimal
+marshalling boundaries. It supersedes the earlier whole-row callback control, whose conversion
+costs differed from the emitted single-expression plan.
 
 ## Existing host-exact paths
 
@@ -55,11 +73,30 @@ per-row result adaptation. It does not change the native operator boundary or JN
 
 The matcher extracts only direct inputs/literals, lossless widening and nested admitted
 negation. Other producers stay in one generated expression so extracting their negation does
-not expose a different arithmetic overflow or division failure. DECIMAL remains generated.
+not expose a different arithmetic overflow or division failure. Verified DECIMAL producers
+use the separate exact path below; other DECIMAL producers remain generated.
 The [release controls](../benchmarks/scalar-functions.md#integral-unary-minus) compare stock,
 previous callback and candidate at equal prepared-input boundaries and separately measure the
 complete job. Small batches still pay generic Calc setup/materialization costs; native coverage
 does not imply a standalone speedup.
+
+## DECIMAL unary minus without a JVM evaluator
+
+Arrow's numeric negation kernel already preserves DECIMAL precision, scale and sliced
+validity, following the decimal branch of Comet's negative expression. The verified Flink
+domain (precision at most 38) fits both signs in i128, so it needs no floating conversion,
+rounding or BigDecimal allocation. Direct scalar dispatch also retains the decimal type
+without broadcasting a literal to an array.
+
+The planner shares the bounded decimal producer matcher with ABS, while admitting only
+same-function nesting for each operation. Direct columns/literals and precision widening
+at the same scale are verified; arithmetic, rescaling, narrowing and mixed unary producers
+keep one generated expression. Existing decimal-rounding metadata guards run first.
+This extends an existing expression kernel and introduces no opcode or configuration switch.
+The [release controls](../benchmarks/scalar-functions.md#decimal-unary-minus) retain both
+stock and preceding-callback measurements and the separate complete row-source job.
+The preceding prepared control uses the scalar callback emitted by main, rather than a
+whole-row evaluator; both decimal argument and result conversions remain timed.
 
 ## Canonical timestamp TRY_CAST
 
