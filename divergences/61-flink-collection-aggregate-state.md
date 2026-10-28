@@ -26,7 +26,12 @@ Their internal epoch-day/millisecond values use the same boxed-integer hash/equa
 while restore and DISTINCT membership preserve the logical type. NOT NULL temporal arrays
 retain Flink's generic copy category at aggregate output, through column projections and into
 JVM argument batches. The legacy JVM handler uses the same represented output carrier.
-Unverified state, UNNEST and native-writer consumers retain their representation guards.
+Verified scalar-array results can feed the existing generated UNNEST boundary using one
+structural producer check shared by native and legacy collection state. Nullable arrays retain
+the Arrow take route. Unverified state/order, character/nested array and native-writer consumers
+retain their representation guards; updating MAP/MULTISET payloads remain deferred. The generated
+expansion is still Java work inside the columnar operator, preserving released unchecked getters
+without another native ownership or callback protocol.
 
 Flink source NOT NULL declarations are logical hints, not runtime input validation. Actual
 NULL slots can reach a collection aggregate and succeed. Shared Arrow import therefore widens

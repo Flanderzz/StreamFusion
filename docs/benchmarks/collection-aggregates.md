@@ -671,3 +671,57 @@ arrays. `collect_float`/`array_agg_float` and the `decimal20` suffix additionall
 smokes and focused checks. Previous runs set `-Djvmagg.expectNative=false` and
 `-Djvmagg.expectedNativeCases=collect` (or `array_agg`) to require fallback for new types while
 retaining native control evidence. Flink 1.18 adds its Maven profile and runs COLLECT only.
+
+
+## Scalar array expansion boundary
+
+A shared structural producer check admits verified NOT NULL-element ARRAY_AGG results into
+the existing generated UNNEST consumer. All scalar families reuse the same array-copy metadata;
+there is no DATE/TIME-specific rule or new operator. Native Rust retains collection state,
+while expansion uses the released Java correlate generator inside its Arrow-input/Arrow-output
+operator. Nullable scalar arrays keep ordinary Arrow UNNEST. Coverage, representation guards
+and recovery are [specified with GROUP BY](../operators/group-by.md#scalar-array-results-through-generated-unnest).
+
+[All 120 complete jobs and paired controls](results/scalar-array-expansion-2026-10-28.json)
+compare stock, actual previous `4df58b80` Java code, and the new admission. Both revisions use
+identical benchmark fixtures and the frozen release+mimalloc collection DSO; there is no native
+implementation change here. The preceding code must fall back for every expanded case. All
+30 candidate group observations consume 32,768 source rows, and all 30 generated expansions
+consume positive work. No competing Java/native build or test was observed during measurement.
+
+Runs use Flink 2.2.1/OpenJDK 17.0.20.1, an 8 GiB heap, one task, 1,024-row perimeter batches,
+IPC exchange, zero accumulator cache entries, two warmups and three alternating measurements
+per engine. The append-only RowData source has eight seeds and NULL every eighth row; COALESCE
+produces a typed NOT NULL element. DOUBLE retains signed-zero/fractional seeds; DECIMAL(38,18)
+values cross the compact-integer range. Each intermediate growing array is expanded: 64 keys
+produce 8,404,992 element rows per native trial, and 4096 keys produce 147,456. Timing includes
+submission/planning, JNI, keyed state, Java expansion, both transposes and blackhole row output;
+initial EXPLAIN and cluster setup remain outside. Retraction/failure/recovery parity comes from
+the SQL regression matrix, separately from these append-source timings. ARRAY_AGG is N/A on 1.18.
+
+Median seconds (minimum–maximum). Previous StreamFusion is verified fallback; its separately
+paired stock controls remain in the artifact.
+
+| Keys / element | Paired stock | Previous StreamFusion | Shared producer boundary |
+| --- | ---: | ---: | ---: |
+| 64 / BIGINT | 5.773431 (5.763612–5.826561) | 5.721306 (5.647072–5.754609) | 1.002027 (0.939273–1.027504) |
+| 64 / DOUBLE | 7.178278 (7.159385–7.188569) | 6.749799 (6.689754–6.790683) | 0.998907 (0.992064–1.010254) |
+| 64 / DECIMAL(38,18) | 14.797527 (14.770691–14.797693) | 14.440044 (14.366825–14.535495) | 2.047731 (2.022990–2.605549) |
+| 4096 / BIGINT | 0.261172 (0.233455–0.319980) | 0.232991 (0.209535–0.238281) | 0.204004 (0.192032–0.277335) |
+| 4096 / DOUBLE | 0.220469 (0.188099–0.225747) | 0.211191 (0.197555–0.253218) | 0.147155 (0.102450–0.191357) |
+| 4096 / DECIMAL(38,18) | 0.140432 (0.133967–0.151380) | 0.153692 (0.132387–0.223562) | 0.120239 (0.111241–0.229741) |
+
+At 64 keys the new boundary beats paired stock by 5.76×/7.19×/7.23× for BIGINT/DOUBLE/wide
+DECIMAL. At 4096 keys the ratios are 1.28×/1.50×/1.17×; these shorter jobs include startup and
+have overlapping ranges in some cohorts. Retain the complete timings and controls rather than
+claiming universal sustained throughput. All six candidate medians improve paired stock and
+previous fallback. No new optimization or profiling pass follows: this reuses the already
+profiled collection state and generated representation boundaries, and the earlier two-capture
+timebox remains closed. Wider result/conversion work remains in
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+Reproduce with the complete-job command above, `-Djvmagg.cases=expanded_array_agg,expanded_array_agg_double,expanded_array_agg_decimal38`,
+`-Djvmagg.rows=32768`, `-Djvmagg.keys=64` (then 4096), `-Djvmagg.values=8`, two warmups and three
+runs. Candidate uses `-Djvmagg.expectNative=true`; the preceding production revision uses
+`false` and must execute no native operators. Other existing ARRAY_AGG suffixes also accept
+the `expanded_` prefix for focused route checks.
