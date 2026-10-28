@@ -264,7 +264,16 @@ attempt. Each attempt uses Maven's `-U` option to recheck missing releases, incl
 that failed during a previous attempt. Persistent download failures, invalid dependencies and
 timeouts remain blocking. Once resolution succeeds, the existing build and test commands run
 once with their original assertions and failure handling. Tests are never retried by this helper;
-their commands still use normal Maven resolution for any artifacts requested dynamically by plugins.
+their commands still use normal Maven resolution for any other artifacts requested dynamically by plugins.
+
+The Java matrix also prefetches the original transitive graphs of the JUnit Platform providers
+used by runtime Surefire 3.2.5 and the separate evidence agent's Surefire 3.5.3. These downloads
+use the same bounded setup retries in the independent runtime-dependencies POM, outside the
+application's dependency management. The providers can request older Platform artifacts even
+when the project has already resolved a newer JUnit version: the Flink 1.18/JDK 11 job for
+PR #549 failed downloading `junit-platform-engine:1.9.3` at Surefire startup after `go-offline`
+had succeeded. Resolving each provider's own graph before the lifecycle covers that gap without
+changing test dependency versions, skipping assertions or retrying tests.
 
 [PR #311's post-merge row-format job](https://github.com/datafusion-contrib/StreamFusion/actions/runs/37938400080/job/113846210991)
 failed before compilation because one runner reported published Flink 2.2.1 and Kafka dependencies
