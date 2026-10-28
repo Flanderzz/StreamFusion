@@ -178,9 +178,9 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
-    if (JvmGroupAggregateMatcher.unverifiedTemporalCollectionInput(root)) {
+    if (JvmGroupAggregateMatcher.unverifiedCollectionInputMaterialization(root)) {
       recordFallback(
-          "NOT NULL temporal collection input materialization requires Flink physical getters");
+          "collection input materialization of NOT NULL hints requires Flink physical getters");
       return root;
     }
     if (CollectionValueIdentity.crossesBoundary(root, finalOutput)) {

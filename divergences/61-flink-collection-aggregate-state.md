@@ -13,7 +13,7 @@ own shared-filter TTL/write policy, separate from the retained aggregate result.
 therefore follows the released CollectAggFunction, ArrayAggFunction and StateMapView behavior,
 using the project's Java map-order model and shared DISTINCT retention machinery.
 
-The collection snapshot envelope carries a version, aggregate kind and primitive element type.
+The collection snapshot envelope carries a version, aggregate kind and typed element codec.
 JVM-managed collection state and this native format are intentionally separate. Restoring a
 JVM savepoint requires `streamfusion.experimental.rustCollectionAggregates=false`; automatic
 migration is not claimed. The existing JVM route also remains available for verified mixed
@@ -35,8 +35,17 @@ This follows Comet's existing C Data transfer/release pattern; it adds no copy o
 protocol. Cached declared schemas stay immutable. Sink NOT NULL enforcement and its failure
 remain observable at the released Flink boundary.
 
-NOT NULL temporal aggregate arguments crossing a materializing input Calc retain fallback.
+Collection aggregates crossing a materializing input Calc over supported NOT NULL scalar
+hints retain fallback.
 Flink's unchecked primitive getters can reveal a source-specific payload beneath actual NULLs;
 preserving an Arrow NULL does not reproduce that value or its TIME conversion failure. The
 collection admission guard covers predicates reading those hints and non-identity projections,
 while direct input, key-only identity filters and nullable-input COALESCE remain verified.
+
+
+The state algorithm is generic over a typed element codec. FLOAT/DOUBLE reuse the existing
+Java floating key comparison with separate retained payload bits; DECIMAL reuses the decimal
+hash model and unscaled i128 values. Accumulation, retraction, DISTINCT/TTL, map-copy order and
+checkpoint handling remain one implementation. Primitive version-one snapshot bytes remain
+compatible, verified against six prior-implementation fixtures. New codec tags retain width
+and decimal precision/scale rather than inferring them from stored bytes.

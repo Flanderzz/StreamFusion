@@ -3406,8 +3406,8 @@ retained/shared Java callbacks. Logical output types and element nullability rem
 computed expressions use their own result representation. Unverified stateful, UNNEST and
 native-writer collection boundaries keep their existing planning guards.
 
-Collection aggregation retains host execution when an input Calc reads a NOT NULL DATE/TIME
-hint in a predicate or materializes it in a non-identity projection. Released Flink can expose
+Collection aggregation retains host execution when an input Calc reads a NOT NULL supported
+scalar hint in a predicate or materializes it in a non-identity projection. Released Flink can expose
 the source row's unchecked primitive payload beneath an actual NULL slot, which Arrow validity
 does not retain. This guard is scoped to collection aggregate admission. Direct source hints,
 key-only identity filters and COALESCE from nullable input remain verified aggregate contexts.

@@ -8,9 +8,10 @@ back](#still-falls-back).
 Flink picks between the two plan shapes itself, based on `table.exec.mini-batch.enabled`; this page
 covers both, since a query only accelerates when whichever shape Flink chose is fully native.
 
-Integer/BOOLEAN and [DATE/TIME](#date-and-time-collection-elements) COLLECT use Rust counted multiset state behind Arrow batch boundaries;
+Verified integer, BOOLEAN, DATE/TIME and [floating/decimal](#shared-native-collection-elements)
+COLLECT use Rust counted multiset state behind Arrow batch boundaries;
 see [Integer COLLECT](#integer-collect) for its narrow type and representation gates.
-Integer/BOOLEAN and DATE/TIME ARRAY_AGG additionally use Rust sequence state on
+These element families additionally use Rust sequence state for ARRAY_AGG on
 Flink 2.2 as [described below](#integer-array_agg); richer collection results remain pending.
 
 When the selected aggregate uses a mini-batch trigger, translation uses the released host's
@@ -2501,8 +2502,9 @@ A counted multiset preserves Flink's signed 32-bit counts and Java map iteration
 including the fresh result-map materialization used by the released MapView. Input fields remain scalar, and aggregate result fields cannot
 contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
 boundary [described below](#character-grouping-keys). DATE and TIME use the
-[verified temporal extension](#date-and-time-collection-elements). Other COLLECT
-value types and nested results retain fallback. ARRAY_AGG over the same types additionally runs on Flink 2.2;
+[verified temporal extension](#date-and-time-collection-elements). FLOAT, DOUBLE and DECIMAL
+use the [same typed native state](#shared-native-collection-elements). Other COLLECT value types
+and nested results retain fallback. ARRAY_AGG over the same types additionally runs on Flink 2.2;
 it is absent from released Flink 1.18.1.
 
 NULL values do not contribute; repeated values keep their multiplicities. Retractions retain
@@ -2537,8 +2539,9 @@ On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN 
 single-phase Rust group aggregate with sequence state. Only the exact builtin operator is recognized; user-defined functions with that name
 retain their existing signature gates. Scalar inputs and non-character aggregate result fields
 are required. Character grouping keys use the verified serialized-key boundary below. Other
-element types outside the [DATE/TIME extension](#date-and-time-collection-elements), and nested
-collection results retain fallback. ARRAY_AGG is
+element types outside the [DATE/TIME](#date-and-time-collection-elements) and
+[floating/decimal](#shared-native-collection-elements) families, and nested collection results
+retain fallback. ARRAY_AGG is
 explicitly N/A on released Flink 1.18.1. Mini-batch, async-state, approximate, ordered and specialized forms keep their
 existing restrictions.
 
@@ -2690,7 +2693,7 @@ inconsistent physical field's nullability without changing its buffers or the SQ
 type. This keeps batch coalescing and parallel native exchange consistent with Flink; it does
 not suppress a downstream NOT NULL sink constraint failure.
 
-An input Calc that reads a NOT NULL DATE/TIME hint in its predicate or materializes it in a
+An input Calc that reads a NOT NULL collection-element hint in its predicate or materializes it in a
 non-identity projection keeps the collection query on Flink. Its unchecked primitive getter can
 expose a source-specific payload beneath a NULL slot; Arrow validity cannot reconstruct that
 payload. Tests retain the stock DATE values and TIME conversion failure for those contexts.
@@ -2708,3 +2711,47 @@ MAP/MULTISET payloads deferred in [#437](https://github.com/datafusion-contrib/S
 
 [Release comparisons](../benchmarks/collection-aggregates.md#date-and-time-elements) retain
 stock and previous-code controls, both perimeter conversions and the two-pass profiling limit.
+
+
+## Shared native collection elements
+
+COLLECT and Flink 2.2 ARRAY_AGG additionally admit FLOAT, DOUBLE and DECIMAL with matching
+result-element precision/scale. All verified element families share one native state algorithm
+for signed counts, arrival-order values, first-match retractions, unmatched retractions,
+DISTINCT transitions, retention, Java map-copy order, output ownership and snapshot/restore.
+Element codecs provide typed Arrow readers/builders and the released boxed comparison/hash
+rules. The integer/BOOLEAN/DATE/TIME codec and its version-one snapshot bytes remain compatible;
+six checkpoints emitted by the preceding implementation are retained as restore fixtures.
+
+Floating membership canonicalizes NaNs while retaining the first stored key's original bits;
+signed zeros remain distinct. Plain arrays retain each input payload and retraction removes the
+first boxed-equal element. Decimal values retain their full unscaled i128 and declared precision
+and scale. Map ordering reuses the existing Java floating comparison and BigDecimal hash model.
+The implementation downcasts inputs once per batch and does not allocate ScalarValue objects
+for each numeric input row or call back into Java to update collection state.
+
+The shared SQL matrix covers the primitive controls and floating/compact/wide decimal families,
+all four RowKinds, duplicate removals, NULL/all-NULL groups, negative/zero multiplicities,
+COALESCE, DISTINCT/FILTER and resolved types. Native tests separately inspect NaN payload bits,
+signed zeros, sliced arrays, ownership, incompatible decimal scales/widths and previous checkpoints.
+Heap and native RocksDB each exercise two nonempty restores. ARRAY_AGG remains explicitly N/A
+on released Flink 1.18.1.
+
+The input-materialization contract is checked before rewriting the island for every collection
+aggregate: predicates or non-identity projections reading NOT NULL supported scalar hints retain
+Flink execution when an unchecked source getter's hidden NULL-slot payload cannot be represented.
+Direct input hints, nullable-input COALESCE and key-only identity filters retain their verified
+routes. Stateful/order consumers of nullable primitive arrays retain their existing boundary;
+NOT NULL-element arrays and other sensitive results retain unverified state/UNNEST/writer guards.
+Character aggregate-result fields, non-scalar input schemas, asynchronous/mini-batch or multi-phase
+collection aggregation, unverified element families and nested collection results remain fallback.
+The updating MAP/MULTISET extension in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
+remains deferred.
+
+
+[Release measurements](../benchmarks/collection-aggregates.md#shared-typed-collection-state)
+retain stock and previous-code comparisons, native BIGINT controls, variability and the two-profile
+limit. The complete regression set executes 349 checks on 2.2 and 196 with 153 capability skips
+on 1.18, including the legacy row API at parallelism one/three. The unchanged released upstream
+COLLECT fixture passes all seven/six variants with its exact runtime contracts. Slower collection
+profiles remain documented groundwork, not a universal acceleration claim.
