@@ -1036,20 +1036,35 @@ remain owned by the input; result values are allocated and sliced validity is sh
 TINYINT/SMALLINT-to-INT/BIGINT widening is covered. Direct TINYINT/SMALLINT SIGN retains
 released Flink's generated-code compilation failure (the numeric result cannot be assigned to `byte/short`).
 Arithmetic, narrowing casts and other unverified producers retain the complete generated SIGN
-program so overflow, NULLs, lazy branches and selected failures do not change. DECIMAL SIGN
-also retains generated execution; decimal representation guards remain in force.
+program so overflow, NULLs, lazy branches and selected failures do not change.
 This replaces computation inside an already-admitted native Calc without adding a switch.
 See the [release measurements and limits](../benchmarks/scalar-functions.md#integral-sign).
 
+DECIMAL SIGN uses a typed Decimal128 kernel for `p > s`, and for precision 19 through 38
+when `p = s`. Direct inputs, typed literals/NULLs, same-scale lossless precision widening
+and nested admitted SIGN calls retain the resolved precision and scale without JVM evaluation.
+For `p > s`, the result is scaled `-1`, `0` or `1`. For noncompact `DECIMAL(p,p)`, nonzero
+values become NULL, zero remains scaled zero, and input NULLs remain NULL, matching released
+Flink. Arithmetic, precision narrowing, rescaling, other unverified producers and compact
+`DECIMAL(p,p)` SIGN keep complete generated evaluation. Widening a compact SIGN intermediate
+does not make it eligible. Array evaluation allocates result values without mutating the
+input; ordinary-decimal validity is shared and noncompact `p = s` derives result validity.
+See the [DECIMAL SIGN measurements](../benchmarks/scalar-functions.md#decimal-sign).
+
 For compact `DECIMAL(p,p)` with precision 1 through 18, STRING/CHAR/VARCHAR CAST
-consumers keep SIGN and its enclosing scalar expression in one generated evaluator.
+and DECIMAL CASE/IF consumers keep SIGN and its enclosing scalar expression in one generated
+evaluator. Flink's conditional branch conversion can reject the compact SIGN's out-of-precision
+value and return NULL; a separate native selection must not skip that conversion.
 Released Flink retains `1` or `-1` with the original scale even though those values exceed
-the declared precision; reconstructing the intermediate decimal would incorrectly produce NULL.
-Direct SIGN results, null predicates and TRY_CAST keep their existing routes. Noncompact precision
-19 through 38 retains released Flink's NULL result for nonzero `DECIMAL(p,p)` SIGN.
+the declared precision; reconstructing that intermediate before character formatting would
+incorrectly produce NULL.
+Compact direct SIGN results and null predicates keep generated evaluation; TRY_CAST retains
+its existing fallback. Noncompact precision 19 through 38 computes the released NULL result
+for nonzero `DECIMAL(p,p)` SIGN in Rust.
 Conditional branches, filters and the existing decimal-rounding representation guards still
-apply. This repairs [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536);
-JVM-free decimal execution remains separate work in
+apply. These guards repair [#536](https://github.com/datafusion-contrib/StreamFusion/issues/536)
+and [#547](https://github.com/datafusion-contrib/StreamFusion/issues/547).
+Remaining producer and compact-decimal native coverage is tracked in
 [#491](https://github.com/datafusion-contrib/StreamFusion/issues/491) and
 [#492](https://github.com/datafusion-contrib/StreamFusion/issues/492).
 
@@ -1470,8 +1485,8 @@ chains and other producers retain their whole generated expression; existing rou
 metadata guards remain unchanged. See the
 [DECIMAL unary-minus controls](../benchmarks/scalar-functions.md#decimal-unary-minus).
 
-DECIMAL SIGN executes Flink's generated expression code through
-the existing batch JVM bridge. Unverified integer rounding producers and explicit-scale
+DECIMAL SIGN uses the bounded native coverage described above. Unverified integer rounding
+producers and explicit-scale
 INT/BIGINT TRUNCATE use the same path, including per-row TRUNCATE positions. TINYINT/SMALLINT TRUNCATE
 retains the host compilation
 failure described under exact floating math below. This retains resolved widths, decimal precision/scale, NULL handling,
@@ -2872,7 +2887,9 @@ throughout this page.
 
 The table below is historical. Direct certified regex, LIKE ESCAPE, PARSE_URL and PRINTF
 subsets now avoid Java; see the [2026-10-26 comparison](../benchmarks/native-certified-scalars.md)
-for current measurements and remaining evaluator routes.
+for current measurements and remaining evaluator routes. Verified DECIMAL SIGN also now uses
+the [typed native kernel](../benchmarks/scalar-functions.md#decimal-sign); its historical
+generated-helper row below does not describe the new implementation.
 
 The generated functions above extend the expressions that can stay inside a columnar island.
 They are correctness/coverage work, not standalone scalar speedups: Flink still evaluates each

@@ -1,15 +1,21 @@
 This project attempts to run Apache Flink using Apache DataFusion + rust operators via JNI to accelerate stream
 processing throughput. It is a very similar project to DataFusion comet in spirit, but with stream processing.
 
-The canonical home of this repo is https://github.com/datafusion-contrib/StreamFusion (the `upstream` remote,
-branch `main`) — push every commit there.
+The canonical home is https://github.com/datafusion-contrib/StreamFusion (`upstream`, branch `main`).
+For ordinary development, create or use the authenticated contributor's personal GitHub fork, enable
+Actions there, and push feature branches to that fork. Open PRs from the personal fork into canonical
+`main`; do not push development branches to `datafusion-contrib/StreamFusion`. Fork push workflows
+run on the fork owner's Actions quota, avoiding the shared organization's runner backlog. Sync or
+rebase on current upstream `main` before pushing so the branch has the fork CI workflows. Verify
+both aggregate checks for the exact PR head before merging; see [docs/ci.md](docs/ci.md) for setup,
+result mirroring, and existing-PR migration. Direct changes to canonical `main` require explicit
+maintainer authorization.
 
-Do not create, use, or push to repository forks. Do not add fork remotes or depend on fork-hosted, locally
-published, snapshot, Git, or filesystem builds of third-party code; use released artifacts from the project's
-canonical registry. A pre-existing fork remote is not authorization to use it. Do not modify a sibling or other
-external repository while working on StreamFusion unless the user explicitly authorizes changes to that exact
-repository. If a fix requires an upstream change that is not yet released, keep StreamFusion on the released API,
-document the limitation, and ask before expanding scope.
+This personal-fork workflow applies only to StreamFusion contributions. Do not depend on fork-hosted,
+locally published, snapshot, Git, or filesystem builds of third-party code; use released artifacts from
+its canonical registry. Do not modify a sibling or other external repository unless the user explicitly
+authorizes changes to that exact repository. If a fix requires an upstream change that is not yet
+released, keep StreamFusion on the released API, document the limitation, and ask before expanding scope.
 
 We are aiming for IDENTICAL results in stream processing jobs to flink. To start, we'll focus on Flink SQL. As column
 oriented streaming sources pop up more and more (see Fluss, for example, or open table CDC), being able to run jobs

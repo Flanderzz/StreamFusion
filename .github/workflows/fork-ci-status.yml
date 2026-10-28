@@ -1,0 +1,36 @@
+name: Fork CI status
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  pull-requests: read
+
+concurrency:
+  group: fork-ci-status-${{ github.event.pull_request.number || 'refresh' }}
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    if: github.repository == 'datafusion-contrib/StreamFusion'
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    steps:
+      # pull_request_target has write permissions: execute only trusted default-branch code.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Test fork result reporting
+        run: python3 -m unittest discover -s bin -p test_fork_ci_status.py
+      - name: Mirror fork results for the current PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/fork-ci-status.py

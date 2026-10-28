@@ -1,7 +1,8 @@
 name: JVM aggregate release diagnostics
 
 on:
-  pull_request:
+  push:
+    branches: ['**']
     paths:
       - '.github/workflows/jvm-aggregates.yml'
       - 'bin/bench-jvm-aggregates.py'
@@ -27,6 +28,7 @@ concurrency:
 
 jobs:
   release-diagnostics:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     name: JVM aggregate diagnostics (Flink ${{ matrix.line }})
     runs-on: ubuntu-24.04
     timeout-minutes: 150

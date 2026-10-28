@@ -2,30 +2,8 @@ name: Paimon 1.0.0 compatibility
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'streamfusion-paimon1/**'
-      - 'streamfusion-paimon/**'
-      - 'src/main/java/tech/streamfusion/paimon/**'
-      - 'src/main/java/tech/streamfusion/planner/*Paimon*'
-      - 'src/main/java/tech/streamfusion/arrow/**'
-      - 'src/main/java/tech/streamfusion/parquet/**'
-      - 'src/main/java/tech/streamfusion/orc/**'
-      - 'src/main/java/tech/streamfusion/operator/**'
-      - 'native/paimon/**'
-      - 'native/parquet/**'
-      - 'native/orc/**'
-      - 'dev/flink-suite/agent/**'
-      - 'dev/flink-suite/paimon-log4j2.properties'
-      - 'native/engine/src/keyed_upsert/**'
-      - 'native/bridge/**'
-      - 'bin/ci-free-disk.py'
-      - 'bin/paimon1-suite.sh'
-      - 'bin/test_paimon1_ci.py'
-      - 'pom.xml'
-      - '.github/workflows/paimon1.yml'
   push:
-    branches: [main]
+    branches: ['**']
     paths:
       - 'streamfusion-paimon1/**'
       - 'streamfusion-paimon/**'
@@ -50,10 +28,11 @@ on:
 
 concurrency:
   group: paimon1-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   parity:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:

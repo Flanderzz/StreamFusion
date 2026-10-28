@@ -1,19 +1,23 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: ['**']
+  workflow_dispatch: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: read
 
 env:
   RUST_BACKTRACE: "1"
 
 jobs:
   native-build:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     name: Shared debug native libraries
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -58,6 +62,7 @@ jobs:
           retention-days: 7
 
   native-tests:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -75,6 +80,9 @@ jobs:
         with:
           workspaces: native
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test fork result reporting
+        run: python3 -m unittest discover -s bin -p test_fork_ci_status.py
 
       - name: Run native test suite
         working-directory: native
@@ -332,6 +340,7 @@ jobs:
           retention-days: 7
 
   image-integration:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     name: Flink image integration (optimized native build)${{ matrix.suffix }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -446,7 +455,7 @@ jobs:
 
   all-tests:
     name: All CI tests
-    if: ${{ always() && !cancelled() }}
+    if: ${{ (always() && !cancelled()) && (github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main') }}
     needs: [native-build, native-tests, java-tests, lake-module-tests, image-integration, doris-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

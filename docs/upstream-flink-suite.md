@@ -639,9 +639,11 @@ FLINK_SUITE_TEST='org.apache.paimon.flink.AppendTableITCase#testPartitionDynamic
   bin/flink-suite.sh paimon
 ```
 
-The Flink checkout remains byte-for-byte unchanged. Every push to `main` and every pull request
+The Flink checkout remains byte-for-byte unchanged. Every canonical push to `main` and every branch push in a personal fork
 runs all eight upstream suites in GitHub Actions: planner runtime, formats, Parquet, ORC, Kafka,
-Paimon, Delta and state/recovery. The weekly schedule and manual dispatch run the same complete matrix.
+Paimon, Delta and state/recovery. The weekly schedule and ordinary manual dispatch run the same complete matrix.
+PRs use the exact-head fork push result, mirrored upstream by the lightweight reporter;
+see [fork setup and migration](ci.md#contributing-from-a-personal-fork).
 Each run rebuilds StreamFusion once per Flink line from that revision in the isolated suite directory
 and shares the prepared build with its test jobs. Each job uploads its complete test log with the
 commit SHA. These checks complement the released-artifact
@@ -649,7 +651,8 @@ SQL parity tests in ordinary CI; a passing local Maven suite alone does not esta
 integration compatibility.
 
 Merges to `main` require **All CI tests** and **All upstream integration tests**, enforced by
-the repository's **Require all test suites** ruleset with no bypass actors, including administrators.
+the repository's **Require all test suites** ruleset with the configured maintainer bypass. The fork reporter supplies these same required checks
+without rerunning the test matrix upstream.
 The first check waits for Rust, Java/SQL parity, every format/connector module, both Paimon formats,
 Delta and both deployed Flink image integration jobs. The Flink 1.18 image job also packages the
 qualified release artifacts and runs the loader/mixed-line identity tests, reusing its optimized
@@ -666,7 +669,7 @@ Paimon jobs compile the runtime and its shared test fixtures but pass `-Dsf.runt
 to avoid repeating that suite in each lake connector job. Each lake job still runs its complete
 connector suite; **All CI tests** requires both the Java job and every lake job. Ordinary `mvn test`
 continues to run the runtime tests, and the standard `-DskipTests` still skips all test execution.
-Updating a pull request or `main` cancels its superseded upstream run so the current revision can start. Merge requirements always apply to the
+Pushing a newer commit to a fork branch or canonical `main` cancels its superseded run so the current revision can start. Merge requirements always apply to the
 pull request's current revision.
 
 Before committing operator changes, run the relevant unchanged upstream integration classes
@@ -779,9 +782,10 @@ hash. Maven still runs the same build commands to validate and install its outpu
 compilation reuse, not a cached test result or a skipped StreamFusion build. A cache miss takes the
 normal cold-build path. Only main-branch preparation jobs save the compiled Flink and isolated Maven
 caches, before any upstream tests run, and shared artifacts continue to exclude test reports.
-Rust caches in ordinary CI, upstream preparation, and Paimon 1.0 compatibility are saved only on `main`. PRs restore
-available caches but do not save their own copies of these large caches; sibling PRs cannot reuse
-those copies. Main-branch runs seed caches available to PRs. The ordinary Maven dependency cache
+Rust caches in ordinary CI, upstream preparation, and Paimon 1.0 compatibility are saved only on each
+repository's `main`. Fork feature branches restore available caches but do not save their own copies
+of these large caches; sibling branches cannot reuse those copies. Syncing and pushing `main` in a
+fork seeds that fork's default-branch caches. Forks do not share the canonical repository's caches. The ordinary Maven dependency cache
 managed by `setup-java` retains its existing policy.
 
 The optimized image jobs cache `native/target/release-staging`, the actual Cargo target directory
@@ -884,7 +888,7 @@ modules. Each command retains its original selector, native-execution audit, dia
 a failed command does not prevent the remaining suites from running, and any failure fails the
 job. Paimon and native state suites remain independent, as do the four runtime shards per line.
 Inventory dispatches retain their runtime/connectors/all selections. New commits cancel obsolete
-runs for the same PR or main branch, following Flink's own per-ref cancellation policy. Manual SQL
+runs for the same fork feature branch or canonical main branch, following Flink's own per-ref cancellation policy. Manual SQL
 inventories have separate concurrency groups by scope so routine pushes do not cancel them. The
 latest main revision and each current PR head still require the complete suite.
 
