@@ -25,7 +25,9 @@ final class JvmGroupAggregateMatcher {
           SqlTypeName.DOUBLE,
           SqlTypeName.DECIMAL,
           SqlTypeName.DATE,
-          SqlTypeName.TIME);
+          SqlTypeName.TIME,
+          SqlTypeName.TIMESTAMP,
+          SqlTypeName.TIMESTAMP_WITH_LOCAL_TIME_ZONE);
 
   private JvmGroupAggregateMatcher() {}
 
@@ -51,7 +53,7 @@ final class JvmGroupAggregateMatcher {
     if ((!collect && !tech.streamfusion.compat.FlinkCompat.isBuiltinArrayAgg(call.getAggregation()))
         || call.getArgList().size() != 1) return false;
     var value = node.getInput().getRowType().getFieldList().get(call.getArgList().get(0)).getType();
-    return COLLECTION_ELEMENTS.contains(value.getSqlTypeName())
+    return collectionElement(value)
         && call.getType().getSqlTypeName()
             == (collect
                 ? org.apache.calcite.sql.type.SqlTypeName.MULTISET
@@ -60,6 +62,13 @@ final class JvmGroupAggregateMatcher {
         && (value.getSqlTypeName() != org.apache.calcite.sql.type.SqlTypeName.DECIMAL
             || value.getPrecision() == call.getType().getComponentType().getPrecision()
                 && value.getScale() == call.getType().getComponentType().getScale());
+  }
+
+  private static boolean collectionElement(org.apache.calcite.rel.type.RelDataType type) {
+    var family = type.getSqlTypeName().getFamily();
+    return COLLECTION_ELEMENTS.contains(type.getSqlTypeName())
+        || family == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_YEAR_MONTH
+        || family == org.apache.calcite.sql.type.SqlTypeFamily.INTERVAL_DAY_TIME;
   }
 
   static boolean unverifiedCollectionInputMaterialization(RelNode node) {
@@ -105,8 +114,7 @@ final class JvmGroupAggregateMatcher {
           @Override
           public Void visitInputRef(org.apache.calcite.rex.RexInputRef input) {
             var type = input.getType();
-            if (!type.isNullable() && COLLECTION_ELEMENTS.contains(type.getSqlTypeName()))
-              found[0] = true;
+            if (!type.isNullable() && collectionElement(type)) found[0] = true;
             return null;
           }
         });

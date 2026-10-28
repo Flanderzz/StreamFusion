@@ -42,16 +42,25 @@ class JvmAggregateBenchmark {
       boolean expanded = shape.startsWith("expanded_");
       String collectionShape = collectionShape(shape);
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
-          collectionShape.endsWith("_date")
-              ? Types.LOCAL_DATE
-              : collectionShape.endsWith("_time")
-                  ? Types.LOCAL_TIME
-                  : collectionShape.endsWith("_float")
-                      ? Types.FLOAT
-                      : collectionShape.endsWith("_double")
-                          ? Types.DOUBLE
-                          : collectionShape.contains("_decimal") ? Types.BIG_DEC : Types.LONG;
+          collectionShape.contains("_timestamp")
+              ? Types.LOCAL_DATE_TIME
+              : collectionShape.contains("_ltz")
+                  ? Types.INSTANT
+                  : collectionShape.endsWith("_interval_month")
+                      ? Types.INT
+                      : collectionShape.endsWith("_date")
+                          ? Types.LOCAL_DATE
+                          : collectionShape.endsWith("_time")
+                              ? Types.LOCAL_TIME
+                              : collectionShape.endsWith("_float")
+                                  ? Types.FLOAT
+                                  : collectionShape.endsWith("_double")
+                                      ? Types.DOUBLE
+                                      : collectionShape.contains("_decimal")
+                                          ? Types.BIG_DEC
+                                          : Types.LONG;
       boolean udf = shape.equals("udaf");
+      boolean minTimestamp = shape.equals("min_timestamp3");
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
       boolean jvm = udf || collect || arrayAgg;
@@ -80,11 +89,16 @@ class JvmAggregateBenchmark {
         throw new IllegalArgumentException("Legacy collection case required: " + shape);
       String sql =
           "SELECT k, "
-              + (udf ? "test_aggregate" : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : "SUM")
+              + (udf
+                  ? "test_aggregate"
+                  : collect
+                      ? "COLLECT"
+                      : arrayAgg ? "ARRAY_AGG" : minTimestamp ? "MIN" : "SUM")
               + "("
               + argument
               + ")"
               + (expanded ? " AS a" : "")
+              + (minTimestamp ? ",COUNT(*)" : "")
               + " FROM src GROUP BY k";
       if (expanded) sql = "SELECT k,x FROM (" + sql + ") s CROSS JOIN UNNEST(a) AS u(x)";
       double[][] elapsed = new double[2][runs];
@@ -99,6 +113,7 @@ class JvmAggregateBenchmark {
             env.setParallelism(1);
             var table = StreamTableEnvironment.create(env);
             table.getConfig().set("table.optimizer.agg-phase-strategy", "ONE_PHASE");
+            table.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
             var sequence = env.fromSequence(0, Math.max(0, rows - 1)).filter(i -> i < rows);
             org.apache.flink.streaming.api.datastream.DataStream<Row> source;
             switch (keyType) {
@@ -133,16 +148,15 @@ class JvmAggregateBenchmark {
               default:
                 throw new IllegalArgumentException("Unsupported key type: " + keyType);
             }
-            if (notNull || collectionShape.contains("_decimal")) {
-              var logicalValueType =
-                  collectionShape.contains("_decimal")
-                      ? org.apache.flink.table.api.DataTypes.DECIMAL(
-                          decimalPrecision(collectionShape), decimalScale(collectionShape))
-                      : collectionShape.endsWith("_date")
-                          ? org.apache.flink.table.api.DataTypes.DATE()
-                          : org.apache.flink.table.api.DataTypes.TIME(3);
+            if (notNull
+                || collectionShape.contains("_decimal")
+                || temporalCollection(collectionShape)) {
+              var logicalValueType = declaredCollectionType(collectionShape);
               if (notNull) {
-                assertTrue(collectionShape.endsWith("_date") || collectionShape.endsWith("_time"));
+                assertTrue(
+                    collectionShape.endsWith("_date")
+                        || collectionShape.endsWith("_time")
+                        || temporalCollection(collectionShape));
                 logicalValueType = logicalValueType.notNull();
               }
               table.createTemporaryView(
@@ -311,11 +325,48 @@ class JvmAggregateBenchmark {
       if ((value & 1) != 0) unscaled = unscaled.negate();
       return new java.math.BigDecimal(unscaled, decimalScale(shape));
     }
+    if (shape.contains("_timestamp") || shape.contains("_ltz")) {
+      int year = value % 3 == 0 ? 1 : value % 3 == 1 ? 1970 : 9999;
+      var timestamp =
+          java.time.LocalDateTime.of(year, 1, 1, 0, 0, 0, 123456789)
+              .plusSeconds(Math.floorMod(value, 64));
+      return shape.contains("_ltz") ? timestamp.toInstant(java.time.ZoneOffset.UTC) : timestamp;
+    }
+    if (shape.endsWith("_interval_month")) return Integer.valueOf(value.intValue() - 3);
+    if (shape.endsWith("_interval_day")) return value * 100000000003L - 3;
     if (shape.endsWith("_date")) return java.time.LocalDate.ofEpochDay(value - 3);
     if (shape.endsWith("_time"))
       return java.time.LocalTime.ofNanoOfDay(
           Math.floorMod(value * 1000 + 1, 86_400_000) * 1_000_000L);
     return value;
+  }
+
+  private static boolean temporalCollection(String shape) {
+    return shape.contains("_timestamp") || shape.contains("_ltz") || shape.contains("_interval_");
+  }
+
+  private static org.apache.flink.table.types.DataType declaredCollectionType(String shape) {
+    if (shape.contains("_timestamp"))
+      return org.apache.flink.table.api.DataTypes.TIMESTAMP(shape.charAt(shape.length() - 1) - '0');
+    if (shape.contains("_ltz"))
+      return org.apache.flink.table.api.DataTypes.TIMESTAMP_LTZ(
+          shape.charAt(shape.length() - 1) - '0');
+    if (shape.endsWith("_interval_month"))
+      return org.apache.flink.table.api.DataTypes.INTERVAL(
+              org.apache.flink.table.api.DataTypes.YEAR(4),
+              org.apache.flink.table.api.DataTypes.MONTH())
+          .bridgedTo(Integer.class);
+    if (shape.endsWith("_interval_day"))
+      return org.apache.flink.table.api.DataTypes.INTERVAL(
+              org.apache.flink.table.api.DataTypes.DAY(2),
+              org.apache.flink.table.api.DataTypes.SECOND(3))
+          .bridgedTo(Long.class);
+    if (shape.contains("_decimal"))
+      return org.apache.flink.table.api.DataTypes.DECIMAL(
+          decimalPrecision(shape), decimalScale(shape));
+    return shape.endsWith("_date")
+        ? org.apache.flink.table.api.DataTypes.DATE()
+        : org.apache.flink.table.api.DataTypes.TIME(3);
   }
 
   private static int decimalPrecision(String shape) {
@@ -338,7 +389,15 @@ class JvmAggregateBenchmark {
             "collect_double",
             "collect_decimal8",
             "collect_decimal20",
-            "collect_decimal38")
+            "collect_decimal38",
+            "collect_timestamp0",
+            "collect_timestamp3",
+            "collect_timestamp9",
+            "collect_ltz0",
+            "collect_ltz3",
+            "collect_ltz9",
+            "collect_interval_month",
+            "collect_interval_day")
         .contains(collectionShape(shape));
   }
 
@@ -356,11 +415,26 @@ class JvmAggregateBenchmark {
             "array_agg_decimal8",
             "array_agg_decimal20",
             "array_agg_decimal38",
-            "array_agg_not_null")
+            "array_agg_not_null",
+            "array_agg_timestamp0",
+            "array_agg_timestamp3",
+            "array_agg_timestamp9",
+            "array_agg_ltz0",
+            "array_agg_ltz3",
+            "array_agg_ltz9",
+            "array_agg_interval_month",
+            "array_agg_interval_day")
         .contains(collectionShape(shape));
   }
 
   private static String collectionZero(String shape) {
+    if (shape.contains("_timestamp") || shape.contains("_ltz"))
+      return "CAST(TIMESTAMP '1970-01-01 00:00:00' AS "
+          + declaredCollectionType(shape).getLogicalType().asSerializableString()
+          + ")";
+    if (shape.endsWith("_interval_month")) return "INTERVAL '0' MONTH";
+    if (shape.endsWith("_interval_day")) return "INTERVAL '0' SECOND";
+
     if (shape.endsWith("_date")) return "DATE '1970-01-01'";
     if (shape.endsWith("_time")) return "TIME '00:00:00'";
     if (shape.endsWith("_boolean")) return "FALSE";

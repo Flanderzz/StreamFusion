@@ -55,6 +55,26 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
         row.setField(
             1, java.time.LocalTime.ofNanoOfDay(Math.floorMod(value, 86400000) * 1_000_000L));
     }
+    boolean timestamp = type.startsWith("TIMESTAMP");
+    boolean yearMonth =
+        type.startsWith("INTERVAL") && (type.contains("YEAR") || type.contains("MONTH"));
+    boolean interval = type.startsWith("INTERVAL");
+    if (timestamp) table.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
+    for (Row row : rows) {
+      if (row.getField(1) == null) continue;
+      if (timestamp) {
+        long value = (Long) row.getField(1);
+        var date =
+            java.time.LocalDateTime.of(value < 0 ? 1 : 9999, 1, 1, 0, 0, 0, 123456789)
+                .plusSeconds(Math.floorMod(value, 86400));
+        row.setField(
+            1, type.startsWith("TIMESTAMP_LTZ") ? date.toInstant(java.time.ZoneOffset.UTC) : date);
+      } else if (yearMonth)
+        row.setField(1, Integer.valueOf((int) ((Long) row.getField(1)).longValue()));
+    }
+    var logicalValueType = DataTypes.of(type.equals("TIME") ? "TIME(3)" : type);
+    if (interval)
+      logicalValueType = logicalValueType.bridgedTo(yearMonth ? Integer.class : Long.class);
     var input =
         tech.streamfusion.compat.FlinkTestSources.fromData(
             env,
@@ -62,16 +82,22 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
             Types.ROW_NAMED(
                 new String[] {"k", "v"},
                 Types.STRING,
-                type.equals("DATE")
-                    ? Types.LOCAL_DATE
-                    : type.equals("TIME") ? Types.LOCAL_TIME : Types.LONG));
+                type.startsWith("TIMESTAMP_LTZ")
+                    ? Types.INSTANT
+                    : timestamp
+                        ? Types.LOCAL_DATE_TIME
+                        : yearMonth
+                            ? Types.INT
+                            : type.equals("DATE")
+                                ? Types.LOCAL_DATE
+                                : type.equals("TIME") ? Types.LOCAL_TIME : Types.LONG));
     table.createTemporaryView(
         "src",
         table.fromChangelogStream(
             input,
             Schema.newBuilder()
                 .column("k", DataTypes.STRING())
-                .column("v", DataTypes.of(type.equals("TIME") ? "TIME(3)" : type))
+                .column("v", logicalValueType)
                 .build()));
     return table;
   }
@@ -139,6 +165,29 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
       assertEquals(
           perKey(collect(type, sql, parallelism, false, false)),
           perKey(collect(type, sql, parallelism, true, true)));
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("temporalCollectionProfiles")
+  void timestampAndIntervalCollectionsKeepLegacyRows(String function, String type)
+      throws Exception {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    String sql =
+        "SELECT k," + function + "(v)," + function + "(DISTINCT v),COUNT(*) FROM src GROUP BY k";
+    for (int parallelism : new int[] {1, 3})
+      assertEquals(
+          perKey(collect(type, sql, parallelism, false, false)),
+          perKey(collect(type, sql, parallelism, true, true)));
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      temporalCollectionProfiles() {
+    return FlinkPrimitiveCollectionSqlHarnessTest.collectionSignatures()
+        .filter(
+            args -> {
+              String type = (String) args.get()[1];
+              return type.startsWith("TIMESTAMP") || type.startsWith("INTERVAL");
+            });
   }
 
   @ParameterizedTest

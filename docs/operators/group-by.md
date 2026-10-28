@@ -2793,3 +2793,45 @@ regressions; the matrix and benchmark counters provide positive execution eviden
 retain all 120 jobs and ranges. At 64 keys, BIGINT/DOUBLE/wide DECIMAL pipelines take
 1.002/0.999/2.048 s versus paired stock's 5.773/7.178/14.798 s. Shorter 4096-key cases also
 improve medians but have overlapping ranges; no universal sustained-throughput claim is made.
+
+
+## Timestamp and interval collection elements
+
+The same native collection state also admits TIMESTAMP and TIMESTAMP_LTZ, plus year-month and
+day-time interval qualifiers. Timestamp elements use the existing full-range millisecond plus
+nanosecond-remainder reader and retain owned i128 keys. Equality/order and Java TimestampData
+hashing share the counted/sequence algorithm. Output builders use the declared element type,
+preserving component metadata. Intervals reuse the existing I32 month and I64 millisecond codecs;
+the planner supplies those physical codes instead of the generic retained-value placeholder.
+No per-type accumulation, DISTINCT, retraction, TTL or recovery algorithm is added.
+
+Timestamp precisions 0/3/9, YEAR(4), MONTH, YEAR(4) TO MONTH, DAY(2), DAY(2) TO SECOND(3) and
+HOUR TO SECOND(3) extend the shared matrix. Native and released SQL checks include year 1/9999,
+pre-epoch fractions, exact nanosecond payloads, all four changelog kinds, NULL/all-NULL groups,
+shared COUNT DISTINCT, formatting and two nonempty heap/native RocksDB restores. Real NOT NULL
+source hints, nullable-array Top-N, generated NOT NULL-array UNNEST and the explicit legacy state
+route retain their existing verified contexts. Legacy row APIs also cover character grouping keys
+and parallelism one/three. ARRAY_AGG remains N/A on Flink 1.18.
+
+Direct DAY(4) and DAY(4) TO SECOND(3) aggregates also run natively. Their COALESCE/CAST forms
+retain the released planning error `DAY_INTERVAL_TYPES precision is not supported: 4` on both
+lines, before native substitution. Comparisons in the shared matrix explicitly cast thresholds
+to the input timestamp kind; the existing installed-planner mixed timestamp compatibility on
+1.18 remains [documented with Calc](calc-filter.md#flink-118-mixed-timestamp-comparison-compatibility).
+
+Compact timestamp payloads cross a verified native exchange copy boundary: Flink's row-shuffle
+serializer clears the sub-millisecond remainder for precision at most three. The native exchange
+performs the same operation on top-level timestamp fields before either its single-channel fast
+path or partitioning. Milliseconds and parent validity remain intact; component buffers retain
+owned Arrow references. The change also preserves COLLECT's map-copy/formatting order, whose hash
+would otherwise observe hidden fractional bits. Precisions above three retain both components.
+Existing array/ROW/MAP representation and writer gates remain in force. The source-hint Calc
+materialization gate covers timestamp and interval families as well. This does not extend #437.
+
+
+The final release library passes 660 consolidated checks on 2.2 and 253 with 407 capability
+skips on 1.18, plus 124 native checks and the unchanged upstream COLLECT variants with exact
+native/fallback contracts. [Release comparisons and the closed timebox](../benchmarks/collection-aggregates.md#timestamp-and-interval-element-families)
+retain all 1,080 jobs and 420 native grouped witnesses. Timestamp COLLECT remains slower than
+stock; measured 64-key timestamp/interval arrays improve paired stock medians. Historical
+compact payload/checkpoint upgrade limits are [specified at the exchange boundary](../optimizations/native-columnar-exchange.md#compact-timestamp-payload-copy-semantics).

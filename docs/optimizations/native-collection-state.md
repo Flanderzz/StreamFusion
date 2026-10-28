@@ -63,3 +63,12 @@ retains 480 complete jobs, 150 positive native group witnesses and previous nati
 At 64 groups DOUBLE and compact decimal ARRAY_AGG beat paired stock by 2.92×/1.73×; wide decimal
 arrays and the measured numeric COLLECT cases retain losses. Two CPU captures close the bounded
 investigation: output emission and Java decimal reconstruction/copying remain costs in #239.
+
+
+Timestamp and interval families reuse this typed backend. Timestamp output arrays retain the
+existing full-range components and declared field metadata. An exact-type timestamp cast now
+returns its existing Arrow array reference before rebuilding component ArrayData. This removes
+redundant buffer/field wrapper reconstruction from owned collection emission, while other
+target types continue through the existing conversion and range checks. The bounded timestamp
+investigation retains its before/after timings and two CPU captures with the aggregate benchmark
+results. This does not change the original primitive checkpoint envelope or ownership model.

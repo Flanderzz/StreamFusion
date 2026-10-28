@@ -24,6 +24,7 @@ public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
 
   private final int[] keyColumns;
   private final int[] timestampPrecisions;
+  private final int[] compactTimestampColumns;
   private final int maxParallelism;
   private final boolean recoverable;
 
@@ -40,18 +41,24 @@ public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
   private transient long parentEpochLow;
   private transient long parentSequence;
 
-  public SplitByKeyGroupOperator(
-      int[] keyColumns, int[] timestampPrecisions, int maxParallelism) {
+  public SplitByKeyGroupOperator(int[] keyColumns, int[] timestampPrecisions, int maxParallelism) {
     this(keyColumns, timestampPrecisions, maxParallelism, false);
+  }
+
+  public SplitByKeyGroupOperator(
+      int[] keyColumns, int[] timestampPrecisions, int maxParallelism, boolean recoverable) {
+    this(keyColumns, timestampPrecisions, maxParallelism, recoverable, new int[0]);
   }
 
   public SplitByKeyGroupOperator(
       int[] keyColumns,
       int[] timestampPrecisions,
       int maxParallelism,
-      boolean recoverable) {
+      boolean recoverable,
+      int[] compactTimestampColumns) {
     this.keyColumns = keyColumns;
     this.timestampPrecisions = timestampPrecisions;
+    this.compactTimestampColumns = compactTimestampColumns;
     this.maxParallelism = maxParallelism;
     this.recoverable = recoverable;
   }
@@ -67,8 +74,9 @@ public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
     dictionaries = NativeAllocator.DICTIONARIES;
     handleOwner = ArrowBatchHandles.newOwner();
     long owner = handleOwner;
-    getRuntimeContext().registerUserCodeClassLoaderReleaseHookIfAbsent(
-        "streamfusion-arrow-handles-" + owner, () -> ArrowBatchHandles.forgetOwner(owner));
+    getRuntimeContext()
+        .registerUserCodeClassLoaderReleaseHookIfAbsent(
+            "streamfusion-arrow-handles-" + owner, () -> ArrowBatchHandles.forgetOwner(owner));
     elapsedCompute = getMetricGroup().counter("elapsed_compute");
     repartTime = getMetricGroup().counter("repart_time");
     getMetricGroup().gauge("target_channels", () -> parallelism);
@@ -98,6 +106,8 @@ public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
     inputBatches.inc();
     ColumnarRecordMetrics.countIngested(getMetricGroup(), element.getValue().rowCount());
     VectorSchemaRoot in = element.getValue().root();
+    if (compactTimestampColumns.length != 0 && in.getRowCount() != 0)
+      in = copyCompactTimestamps(in);
     if (!recoverable && parallelism == 1) {
       try {
         if (in.getRowCount() == 0) {
@@ -167,6 +177,25 @@ public class SplitByKeyGroupOperator extends FlinkStreamOperator<ArrowBatch>
     } finally {
       Native.closeSplit(handle);
       elapsedCompute.inc(System.nanoTime() - computeStarted);
+    }
+  }
+
+  private VectorSchemaRoot copyCompactTimestamps(VectorSchemaRoot in) {
+    BufferAllocator inAllocator = in.getFieldVectors().get(0).getAllocator();
+    try (ArrowArray inArray = ArrowArray.allocateNew(inAllocator);
+        ArrowSchema inSchema = ArrowSchema.allocateNew(inAllocator);
+        ArrowArray outArray = ArrowArray.allocateNew(allocator);
+        ArrowSchema outSchema = ArrowSchema.allocateNew(allocator)) {
+      Data.exportVectorSchemaRoot(inAllocator, in, dictionaries, inArray, inSchema);
+      Native.copyCompactTimestampFields(
+          inArray.memoryAddress(),
+          inSchema.memoryAddress(),
+          outArray.memoryAddress(),
+          outSchema.memoryAddress(),
+          compactTimestampColumns);
+      return Data.importVectorSchemaRoot(allocator, outArray, outSchema, dictionaries);
+    } finally {
+      in.close();
     }
   }
 }

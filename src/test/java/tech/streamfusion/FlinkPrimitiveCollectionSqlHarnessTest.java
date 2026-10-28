@@ -32,7 +32,19 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
           "DOUBLE",
           "DECIMAL(8,2)",
           "DECIMAL(20,4)",
-          "DECIMAL(38,18)");
+          "DECIMAL(38,18)",
+          "TIMESTAMP(0)",
+          "TIMESTAMP(3)",
+          "TIMESTAMP(9)",
+          "TIMESTAMP_LTZ(0)",
+          "TIMESTAMP_LTZ(3)",
+          "TIMESTAMP_LTZ(9)",
+          "INTERVAL YEAR(4)",
+          "INTERVAL MONTH",
+          "INTERVAL YEAR(4) TO MONTH",
+          "INTERVAL DAY(2)",
+          "INTERVAL DAY(2) TO SECOND(3)",
+          "INTERVAL HOUR TO SECOND(3)");
 
   static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
       collectionSignatures() {
@@ -93,13 +105,22 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
 
   private static Schema schema(String type, int precision, boolean notNull, boolean notNullKey) {
     var value = DataTypes.of(type.equals("TIME") ? "TIME(" + precision + ")" : type);
+    if (type.startsWith("INTERVAL"))
+      value = value.bridgedTo(yearMonth(type) ? Integer.class : Long.class);
     return Schema.newBuilder()
         .column("k", notNullKey ? DataTypes.INT().notNull() : DataTypes.INT())
         .column("v", notNull ? value.notNull() : value)
         .build();
   }
 
+  private static boolean yearMonth(String type) {
+    return type.startsWith("INTERVAL") && (type.contains("YEAR") || type.contains("MONTH"));
+  }
+
   private static TypeInformation<?> valueType(String type) {
+    if (type.startsWith("TIMESTAMP_LTZ")) return Types.INSTANT;
+    if (type.startsWith("TIMESTAMP")) return Types.LOCAL_DATE_TIME;
+    if (type.startsWith("INTERVAL")) return yearMonth(type) ? Types.INT : Types.LONG;
     if (type.startsWith("DECIMAL")) return Types.BIG_DEC;
     switch (type) {
       case "FLOAT":
@@ -134,6 +155,13 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   private static Object value(String type, int value) {
+    if (type.startsWith("TIMESTAMP_LTZ")) return java.time.Instant.ofEpochSecond(value, 123456789);
+    if (type.startsWith("TIMESTAMP"))
+      return java.time.LocalDateTime.ofEpochSecond(value, 123456789, java.time.ZoneOffset.UTC);
+    if (type.startsWith("INTERVAL")) {
+      if (yearMonth(type)) return value;
+      return (long) value;
+    }
     if (type.startsWith("DECIMAL"))
       return new java.math.BigDecimal(
           java.math.BigInteger.valueOf(value),
@@ -259,11 +287,21 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
 
   private static TableEnvironment environment(
       String type, int precision, boolean notNull, int parallelism, boolean notNullKey) {
+    return environment(type, precision, notNull, parallelism, notNullKey, rows(type));
+  }
+
+  private static TableEnvironment environment(
+      String type,
+      int precision,
+      boolean notNull,
+      int parallelism,
+      boolean notNullKey,
+      List<Row> inputRows) {
     var env = METRICS.environment(new Configuration(), parallelism, 0);
     env.getConfig().enableObjectReuse();
     var table = onePhase(StreamTableEnvironment.create(env));
+    if (type.startsWith("TIMESTAMP")) table.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
     table.getConfig().set("streamfusion.transpose.batchRows", "3");
-    var inputRows = rows(type);
     if (notNull) java.util.Collections.rotate(inputRows, -4);
     table.createTemporaryView(
         "src",
@@ -347,7 +385,13 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             + "(v) FILTER (WHERE "
             + (type.equals("DATE")
                 ? "v>=DATE '1970-01-01'"
-                : type.equals("TIME") ? "v>=TIME '12:00:00'" : type.equals("BOOLEAN") ? "v" : "v>0")
+                : type.equals("TIME")
+                    ? "v>=TIME '12:00:00'"
+                    : type.equals("BOOLEAN")
+                        ? "v"
+                        : type.startsWith("TIMESTAMP") || type.startsWith("INTERVAL")
+                            ? "v>=CAST(" + zeroLiteral(type) + " AS " + type + ")"
+                            : "v>0")
             + "),COUNT(*) FROM src GROUP BY k",
         "NativeColumnarGroupAggregate");
     String nonNull =
@@ -355,13 +399,9 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             + function
             + "(v) AS STRING),"
             + function
-            + "(COALESCE(v,CAST("
-            + (type.equals("DATE")
-                ? "DATE '1970-01-01'"
-                : type.equals("TIME") ? "TIME '00:00:00'" : type.equals("BOOLEAN") ? "FALSE" : "0")
-            + " AS "
-            + type
-            + "))) FROM src GROUP BY k";
+            + "("
+            + nonNullArgument(type)
+            + ") FROM src GROUP BY k";
     check(type, nonNull, "NativeColumnarGroupAggregate");
     if (type.equals("DATE") || type.equals("TIME"))
       check(
@@ -374,6 +414,74 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
           type,
           "SELECT k,ARRAY_AGG(v) IGNORE NULLS,ARRAY_AGG(v) RESPECT NULLS FROM src GROUP BY k",
           "NativeColumnarGroupAggregate");
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> timestampProfiles() {
+    return collectionSignatures().filter(args -> ((String) args.get()[1]).startsWith("TIMESTAMP"));
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("timestampProfiles")
+  void timestampExtremesKeepFullRangeFractionAndSharedDistinct(String function, String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    var values = new ArrayList<Row>();
+    for (var date :
+        List.of(
+            java.time.LocalDateTime.of(1, 1, 1, 0, 0, 0, 123456789),
+            java.time.LocalDateTime.of(1900, 2, 28, 23, 59, 59, 999999999),
+            java.time.LocalDateTime.of(1969, 12, 31, 23, 59, 59, 999999999),
+            java.time.LocalDateTime.of(1970, 1, 1, 0, 0, 0, 1),
+            java.time.LocalDateTime.of(9999, 12, 31, 23, 59, 59, 123456789))) {
+      Object value =
+          type.startsWith("TIMESTAMP_LTZ") ? date.toInstant(java.time.ZoneOffset.UTC) : date;
+      values.add(Row.ofKind(RowKind.INSERT, 0, value));
+      values.add(Row.ofKind(RowKind.INSERT, 0, value));
+      values.add(Row.ofKind(RowKind.UPDATE_BEFORE, 0, value));
+      values.add(Row.ofKind(RowKind.UPDATE_AFTER, 0, value));
+      values.add(Row.ofKind(RowKind.DELETE, 0, value));
+    }
+    values.add(Row.ofKind(RowKind.INSERT, 0, null));
+    values.add(Row.ofKind(RowKind.INSERT, 1, null));
+    values.add(Row.ofKind(RowKind.DELETE, 1, null));
+    var runs =
+        check(
+            () -> environment(type, 3, false, 1, false, values),
+            "SELECT k,"
+                + function
+                + "(v),"
+                + function
+                + "(DISTINCT v),CAST("
+                + function
+                + "(v) AS STRING),COUNT(DISTINCT v),COUNT(*) FROM src GROUP BY k",
+            "NativeColumnarGroupAggregate",
+            "NativeCalc");
+    if (type.endsWith("(9)"))
+      assertTrue(
+          runs.host().rows().toString().contains("123456789"),
+          "the released source must retain sub-millisecond payloads");
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "COLLECT,INTERVAL DAY(4)",
+    "ARRAY_AGG,INTERVAL DAY(4)",
+    "COLLECT,INTERVAL DAY(4) TO SECOND(3)",
+    "ARRAY_AGG,INTERVAL DAY(4) TO SECOND(3)"
+  })
+  void fourDigitDayIntervalsKeepDirectValuesAndReleasedCastFailure(String function, String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    check(
+        type,
+        "SELECT k," + function + "(v)," + function + "(DISTINCT v),COUNT(*) FROM src GROUP BY k",
+        "NativeColumnarGroupAggregate");
+    NativeFailureParity.run(
+            () -> environment(type),
+            "SELECT k," + function + "(" + nonNullArgument(type) + ") FROM src GROUP BY k")
+        .assertFailure(
+            org.apache.flink.table.api.TableException.class,
+            "DAY_INTERVAL_TYPES precision is not supported: 4",
+            NativeFailureParity.Phase.PLANNING,
+            NativeFailureParity.Route.UNPLANNED);
   }
 
   @ParameterizedTest
@@ -447,14 +555,17 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
+  private static String zeroLiteral(String type) {
+    if (type.startsWith("TIMESTAMP")) return "TIMESTAMP '1970-01-01 00:00:00'";
+    if (type.startsWith("INTERVAL"))
+      return yearMonth(type) ? "INTERVAL '0' MONTH" : "INTERVAL '0' SECOND";
+    return type.equals("DATE")
+        ? "DATE '1970-01-01'"
+        : type.equals("TIME") ? "TIME '00:00:00'" : type.equals("BOOLEAN") ? "FALSE" : "0";
+  }
+
   private static String nonNullArgument(String type) {
-    return "COALESCE(v,CAST("
-        + (type.equals("DATE")
-            ? "DATE '1970-01-01'"
-            : type.equals("TIME") ? "TIME '00:00:00'" : type.equals("BOOLEAN") ? "FALSE" : "0")
-        + " AS "
-        + type
-        + "))";
+    return "COALESCE(v,CAST(" + zeroLiteral(type) + " AS " + type + "))";
   }
 
   @ParameterizedTest
@@ -804,11 +915,11 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
-  private static void check(String type, String sql, String... consumed) {
-    check(() -> environment(type), sql, consumed);
+  private static NativeFailureParity.Comparison check(String type, String sql, String... consumed) {
+    return check(() -> environment(type), sql, consumed);
   }
 
-  private static void check(
+  private static NativeFailureParity.Comparison check(
       java.util.function.Supplier<TableEnvironment> environment, String sql, String... consumed) {
     var previous =
         METRICS.nativeOperators().stream()
@@ -823,6 +934,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList());
     for (String operator : consumed) RecoveryExecutionMetrics.assertConsumed(work, operator);
+    return runs;
   }
 
   @ParameterizedTest

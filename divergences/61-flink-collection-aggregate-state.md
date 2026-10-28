@@ -54,3 +54,16 @@ hash model and unscaled i128 values. Accumulation, retraction, DISTINCT/TTL, map
 checkpoint handling remain one implementation. Primitive version-one snapshot bytes remain
 compatible, verified against six prior-implementation fixtures. New codec tags retain width
 and decimal precision/scale rather than inferring them from stored bytes.
+
+
+Timestamp elements reuse the full-range component reader and the same typed collection algorithm,
+with i128 membership and the released TimestampData hash model. Interval families reuse the
+primitive month/millisecond codecs. The declared output element type drives Arrow construction,
+so timestamp metadata survives. Original primitive version-one snapshots remain byte-compatible.
+
+A required exchange copy boundary clears compact timestamp sub-millisecond remainders as Flink's
+row serialization does, including before a one-channel fast path. Source buffers remain immutable;
+component milliseconds, validity and schema metadata are retained through Arrow references and
+the established Comet C Data transfer pattern. Without this boundary, compact COLLECT values/counts
+could match while subsequent formatted map iteration differed. This changes no key-group routing,
+checkpoint namespace or recovery protocol. Existing nested/state/writer guards and #437 remain.
