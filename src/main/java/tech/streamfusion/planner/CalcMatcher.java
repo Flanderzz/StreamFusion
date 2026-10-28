@@ -34,11 +34,16 @@ final class CalcMatcher {
         && FilterCalcMatcher.matches(calc)) {
       return false;
     }
-    if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {
+    if (!FilterCalcMatcher.convertibleRow(
+        calc.getInput().getRowType(),
+        RexExpression.containsGeneratedCollectionFunction(calc.getProgram()))) {
       return false;
     }
     RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
-    return encoded != null && outputTypeMismatch(calc, encoded) == null;
+    return encoded != null
+        && FilterCalcMatcher.convertibleRow(
+            calc.getInput().getRowType(), encoded.supportsStructuredInput())
+        && outputTypeMismatch(calc, encoded) == null;
   }
 
   private static String outputTypeMismatch(Calc calc, RexExpression encoded) {
@@ -201,10 +206,16 @@ final class CalcMatcher {
   private static String reason(Calc calc) {
     if (CollectionValueIdentity.unverifiedInput(calc))
       return "collection input representation is unverified for this columnar producer";
-    if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {
+    if (!FilterCalcMatcher.convertibleRow(
+        calc.getInput().getRowType(),
+        RexExpression.containsGeneratedCollectionFunction(calc.getProgram()))) {
       return "unsupported input column type";
     }
     RexExpression encoded = RexExpression.encodeCalc(calc);
+    if (encoded != null
+        && !FilterCalcMatcher.convertibleRow(
+            calc.getInput().getRowType(), encoded.supportsStructuredInput()))
+      return "unsupported input column type outside a preserving collection program";
     return encoded == null ? RexExpression.reasonForCalc(calc) : outputTypeMismatch(calc, encoded);
   }
 }

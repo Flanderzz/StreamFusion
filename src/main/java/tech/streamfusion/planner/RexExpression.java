@@ -208,6 +208,10 @@ final class RexExpression {
     return preserveCollections;
   }
 
+  boolean supportsStructuredInput() {
+    return preserveCollections || skipMapKeyCaches;
+  }
+
   Set<Integer> referencedInputs() {
     Set<Integer> inputs = new LinkedHashSet<>();
     for (int i = 0; i < kinds.size(); i++) {
@@ -856,7 +860,6 @@ final class RexExpression {
         break;
       case STRUCTURED:
         if (!preserveCollections) return -1;
-      // Only computed structured results are admitted; the input converter keeps its type gate.
       case ROW:
         nested =
             type.getFieldList().stream()
@@ -1087,9 +1090,18 @@ final class RexExpression {
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
         && call.getOperands().size() == 1) {
       var source = call.getOperands().get(0).getType().getSqlTypeName();
-      return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
+      return Set.of(
+                  SqlTypeName.ARRAY,
+                  SqlTypeName.MAP,
+                  SqlTypeName.MULTISET,
+                  SqlTypeName.ROW,
+                  SqlTypeName.STRUCTURED)
               .contains(source)
-          && (source == call.getType().getSqlTypeName() || isCharacter(call));
+          && (source == call.getType().getSqlTypeName()
+              || isCharacter(call)
+              || (source == SqlTypeName.ROW || source == SqlTypeName.STRUCTURED)
+                  && (call.getType().getSqlTypeName() == SqlTypeName.ROW
+                      || call.getType().getSqlTypeName() == SqlTypeName.STRUCTURED));
     }
     if (!"SPLIT".equals(call.getOperator().getName())
         || call.getOperands().size() != 2

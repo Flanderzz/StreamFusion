@@ -74,10 +74,15 @@ final class FilterCalcMatcher {
    * are admitted recursively because the boundary preserves their complete binary representation.
    */
   static boolean convertibleRow(RelDataType inputType) {
-    return inputType.getFieldList().stream().allMatch(f -> isConvertibleType(f.getType()));
+    return convertibleRow(inputType, false);
   }
 
-  private static boolean isConvertibleType(RelDataType type) {
+  static boolean convertibleRow(RelDataType inputType, boolean allowStructured) {
+    return inputType.getFieldList().stream()
+        .allMatch(f -> isConvertibleType(f.getType(), allowStructured));
+  }
+
+  private static boolean isConvertibleType(RelDataType type, boolean allowStructured) {
     switch (type.getSqlTypeName()) {
       case TINYINT:
       case SMALLINT:
@@ -111,11 +116,14 @@ final class FilterCalcMatcher {
         return true;
       case ARRAY:
       case MULTISET:
-        return isConvertibleType(type.getComponentType());
+        return isConvertibleType(type.getComponentType(), allowStructured);
       case MAP:
-        return isConvertibleType(type.getKeyType()) && isConvertibleType(type.getValueType());
+        return isConvertibleType(type.getKeyType(), allowStructured)
+            && isConvertibleType(type.getValueType(), allowStructured);
+      case STRUCTURED:
+        if (!allowStructured) return false;
       case ROW:
-        return convertibleRow(type);
+        return convertibleRow(type, allowStructured);
       default:
         return false;
     }
