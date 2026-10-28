@@ -1890,6 +1890,11 @@ final class RexExpression {
       if (!validateDecimalRoundingBoundary(call)) return false;
       return emitHostExpression(call, true);
     }
+    if (call.getKind() == SqlKind.CAST
+        && SqlTypeFamily.CHARACTER.contains(call.getType())
+        && call.getOperands().stream().anyMatch(RexExpression::containsCompactDecimalSign)) {
+      return emitHostExpression(call, true);
+    }
     if ((call.getKind() == SqlKind.AND || call.getKind() == SqlKind.OR)
         && containsExactScalarFunction(call)) {
       return emitHostExpression(call, true);
@@ -4482,6 +4487,20 @@ final class RexExpression {
             || ((RexCall) node)
                 .getOperands().stream()
                     .anyMatch(RexExpression::containsMetadataDependentDecimalRounding));
+  }
+
+  private static boolean containsCompactDecimalSign(RexNode node) {
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    var type = call.getType();
+    // Compact SIGN can retain +/-1 with a declared DECIMAL(p,p). Reconstructing that
+    // intermediate from BigDecimal would reject its precision before the cast sees it.
+    return call.getOperator()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.SIGN
+            && type.getSqlTypeName() == SqlTypeName.DECIMAL
+            && type.getPrecision() <= 18
+            && type.getPrecision() == type.getScale()
+        || call.getOperands().stream().anyMatch(RexExpression::containsCompactDecimalSign);
   }
 
   private static boolean isDecimalIntegralRounding(RexCall call) {
