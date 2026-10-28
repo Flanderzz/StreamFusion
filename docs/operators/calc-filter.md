@@ -3366,3 +3366,20 @@ cannot serve as evidence that a runtime TRY_CAST kernel executed. The collection
 the named root function plus an empty JVM list and consumed native Calc input. Runtime STRING
 ELEMENT checks use source arrays, including cardinality failures, rather than relying only on
 a singleton constructor expression.
+
+
+### Temporal collection copy categories
+
+Direct column projections retain source field metadata through pruning, aliases, reordering
+and repeated references. Generated JVM argument batches retain that metadata as well. This
+preserves the generic copy category of NOT NULL DATE/TIME arrays emitted by collection
+aggregates, including mixed array projections, formatting, conditional expressions and
+retained/shared Java callbacks. Logical output types and element nullability remain Flink's;
+computed expressions use their own result representation. Unverified stateful, UNNEST and
+native-writer collection boundaries keep their existing planning guards.
+
+Collection aggregation retains host execution when an input Calc reads a NOT NULL DATE/TIME
+hint in a predicate or materializes it in a non-identity projection. Released Flink can expose
+the source row's unchecked primitive payload beneath an actual NULL slot, which Arrow validity
+does not retain. This guard is scoped to collection aggregate admission. Direct source hints,
+key-only identity filters and COALESCE from nullable input remain verified aggregate contexts.

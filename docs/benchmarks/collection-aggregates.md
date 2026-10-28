@@ -534,3 +534,53 @@ Previous-code controls use the same benchmark source and release payload with
 `#profileCollect` / `#profileArrayAgg`, choose the corresponding single case and cardinality,
 and pass `-Djvmagg.seconds=8 -Dprofile.asprof=/path/to/asprof`. Profile timings are excluded
 from the trial table.
+
+
+### NOT NULL temporal inputs and array copy boundaries
+
+`-Djvmagg.notNull=true` declares DATE/TIME source values NOT NULL while retaining actual
+NULL slots every eighth input, as accepted by released Flink. This measures the newly admitted
+hint and array-output signatures against stock Flink and the actual previous `c5053af5`
+whole-query fallback. The previous planner and frozen release library use the identical new
+benchmark source; the candidate uses release+mimalloc. The method and sizes above remain:
+200,000 COLLECT rows / 50,000 ARRAY_AGG rows, eight values, 64/4096 INT groups, one task,
+an 8 GiB heap, two warmups and three alternating measurements per engine. Both transposes,
+JNI, state and rowwise blackhole sinks remain in the complete-job timer.
+
+[Raw trials, source/library hashes, paired previous stock controls and native-work evidence](results/not-null-temporal-collections-2026-10-28.json)
+retain 160 complete jobs. All 40 candidate group observations consume their configured row
+count; previous runs require fallback. No competing Java/native build or test was observed.
+Median seconds (minimum–maximum):
+
+| Function / element / groups | Paired stock | Previous fallback | Rust collection state |
+| --- | ---: | ---: | ---: |
+| collect_date / 64 | 0.380618 (0.328244–0.433813) | 0.313670 (0.291502–0.387066) | 0.376697 (0.363646–0.381369) |
+| collect_time / 64 | 0.306514 (0.301279–0.308044) | 0.298521 (0.296325–0.316540) | 0.365302 (0.364272–0.368782) |
+| collect_date / 4096 | 0.404228 (0.393031–0.456042) | 0.379955 (0.345099–0.416522) | 0.396124 (0.385839–0.461975) |
+| collect_time / 4096 | 0.378920 (0.358894–0.379612) | 0.348410 (0.342260–0.365321) | 0.392731 (0.382941–0.404248) |
+| array_agg_date / 64 | 0.625983 (0.578292–0.627684) | 0.704084 (0.557210–0.738284) | 0.275298 (0.264657–0.293576) |
+| array_agg_time / 64 | 0.662617 (0.661261–0.670525) | 0.819756 (0.697039–0.863708) | 0.310644 (0.300989–0.324547) |
+| array_agg_date / 4096 | 0.210439 (0.195651–0.231240) | 0.168335 (0.159814–0.199816) | 0.175561 (0.096228–0.223750) |
+| array_agg_time / 4096 | 0.112775 (0.097534–0.124491) | 0.100451 (0.090856–0.125149) | 0.100338 (0.099196–0.107628) |
+
+At 64 groups DATE/TIME ARRAY_AGG improve paired stock medians by 2.27×/2.13× and previous
+fallback by 2.56×/2.64×. At 4096 groups the DATE array job beats its paired stock control but
+slightly exceeds the previous fallback; TIME is effectively tied with previous fallback.
+TIME COLLECT exceeds both controls at both cardinalities. DATE COLLECT is close to its paired
+stock controls and slower than previous fallback. These short-job measurements include startup
+and planner variability and do not establish universal sustained throughput. Slower cases ship
+as bounded correctness groundwork under the accepted collection tradeoff, with no acceleration
+claim. The two temporal CPU profiles above already closed the optimization timebox; generic
+output assembly and startup remain in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+No additional optimization or profiling pass was made for these representation fixes.
+
+The same benchmark command above reproduces this matrix with `-Djvmagg.notNull=true`; use
+50,000 rows and the two `array_agg_*` cases for arrays, and repeat with 4096 keys. Independent
+SQL checks verify key-only filtered input, parallel exchange, actual NULL slots beneath the hint,
+mixed/repeated consumers and retained/shared Java callbacks. Heap/native RocksDB each restore
+twice. The explicit JVM aggregate handler also retains the represented array copy category.
+
+The final planner additionally guards NOT NULL temporal arguments whose input Calc materializes
+a hidden NULL-slot payload. That guard does not affect this direct-source benchmark signature;
+the artifact retains the measured source hashes separately from the final guarded planner.
+Predicates reading those hints and non-identity input projections retain stock values/failures.

@@ -10,7 +10,7 @@ covers both, since a query only accelerates when whichever shape Flink chose is 
 
 Integer/BOOLEAN and [DATE/TIME](#date-and-time-collection-elements) COLLECT use Rust counted multiset state behind Arrow batch boundaries;
 see [Integer COLLECT](#integer-collect) for its narrow type and representation gates.
-Integer/BOOLEAN and nullable DATE/TIME ARRAY_AGG additionally use Rust sequence state on
+Integer/BOOLEAN and DATE/TIME ARRAY_AGG additionally use Rust sequence state on
 Flink 2.2 as [described below](#integer-array_agg); richer collection results remain pending.
 
 When the selected aggregate uses a mini-batch trigger, translation uses the released host's
@@ -2668,7 +2668,7 @@ See [the optimization](../optimizations/native-collection-state.md) for the nati
 ## DATE and TIME collection elements
 
 DATE and TIME COLLECT use the existing Rust counted multiset on both supported Flink lines.
-Nullable DATE/TIME ARRAY_AGG uses Rust arrival-order state on Flink 2.2; ARRAY_AGG remains N/A
+DATE/TIME ARRAY_AGG uses Rust arrival-order state on Flink 2.2; ARRAY_AGG remains N/A
 on released 1.18.1. Values retain epoch days and millisecond-of-day units. Dedicated snapshot
 and DISTINCT membership tags keep DATE, TIME and INT state incompatible even though all three
 use 32-bit payloads. No additional operator, JNI call or ownership protocol is introduced.
@@ -2679,16 +2679,31 @@ empty grouped/global results and string formatting. Heap and native RocksDB test
 twice across nonempty accumulation/retraction prefixes and require consumed native group work.
 Nullable arrays also feed native Top-N and UNNEST; legacy external-row consumers exercise
 STRING grouping keys and parallelism one/three. Rust tests cover sliced input buffers, typed
-DISTINCT membership, snapshot compatibility and output ownership. The collection regression set
-passes 98 checks on 2.2 and 58 with 40 capability skips on 1.18; the unchanged upstream COLLECT
-fixture additionally passes all seven/six variants with its existing execution contracts.
+DISTINCT membership, snapshot compatibility and output ownership. The unchanged upstream
+COLLECT fixture additionally passes all seven/six variants with its existing execution contracts.
+NOT NULL source hints also cover parallelism three, key-only
+filters and two successive nonempty restores on both native state backends.
 
-NOT NULL-element DATE/TIME ARRAY_AGG retains planning-time fallback: repeated released
-array copying can reject a primitive temporal array, and its generic/binary copy category is
-not verified on this native boundary. DATE/TIME collection arguments also require a nullable declared type: actual NULL slots
-beneath a NOT NULL source hint succeed on stock Flink but fail Arrow batch import. NOT NULL
-arguments, including COALESCE-derived arguments, retain planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous single-phase,
-representation-consumer and native-writer gates remain. This does not extend updating retained
+Nullable and NOT NULL DATE/TIME arguments are admitted, including COALESCE-derived
+arguments and real NULL source slots beneath a NOT NULL hint. Arrow import widens an
+inconsistent physical field's nullability without changing its buffers or the SQL logical
+type. This keeps batch coalescing and parallel native exchange consistent with Flink; it does
+not suppress a downstream NOT NULL sink constraint failure.
+
+An input Calc that reads a NOT NULL DATE/TIME hint in its predicate or materializes it in a
+non-identity projection keeps the collection query on Flink. Its unchecked primitive getter can
+expose a source-specific payload beneath a NULL slot; Arrow validity cannot reconstruct that
+payload. Tests retain the stock DATE values and TIME conversion failure for those contexts.
+Nullable-input COALESCE expressions and identity projections with key-only filters remain verified.
+
+NOT NULL-element arrays retain their generic copy-category marker through native projections
+and generated JVM argument batches. Mixed primitive arrays, aliases, repeated consumers,
+formatting, reverse/distinct/slice, CASE and retained/shared Java callbacks are verified.
+The explicit legacy JVM aggregate handler uses the same represented array boundary. NOT NULL
+temporal arrays crossing unverified stateful, UNNEST or native-writer boundaries still retain
+planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous
+single-phase, representation-consumer and native-writer gates remain. This does not extend
+updating retained
 MAP/MULTISET payloads deferred in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
 [Release comparisons](../benchmarks/collection-aggregates.md#date-and-time-elements) retain

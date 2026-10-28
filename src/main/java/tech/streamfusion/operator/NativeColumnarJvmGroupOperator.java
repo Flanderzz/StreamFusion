@@ -70,7 +70,19 @@ public final class NativeColumnarJvmGroupOperator extends FlinkStreamOperator<Ar
   public void open() throws Exception {
     super.open();
     NativeAllocator.initializeFor(this);
-    outputSchema = ArrowConversion.toArrowSchema(outputType);
+    boolean temporalArrays =
+        outputType.getChildren().stream()
+            .anyMatch(
+                type -> {
+                  if (!(type instanceof org.apache.flink.table.types.logical.ArrayType))
+                    return false;
+                  var element =
+                      ((org.apache.flink.table.types.logical.ArrayType) type).getElementType();
+                  return !element.isNullable()
+                      && (element.getTypeRoot() == LogicalTypeRoot.DATE
+                          || element.getTypeRoot() == LogicalTypeRoot.TIME_WITHOUT_TIME_ZONE);
+                });
+    outputSchema = ArrowConversion.toArrowSchema(outputType, temporalArrays);
     collector =
         new Collector<RowData>() {
           @Override

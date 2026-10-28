@@ -2289,7 +2289,14 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         let mut fields: Vec<Field> = arrays
             .iter()
             .enumerate()
-            .map(|(i, a)| Field::new(format!("arg{i}"), a.data_type().clone(), true))
+            .map(|(i, a)| {
+                Field::new(format!("arg{i}"), a.data_type().clone(), true).with_metadata(
+                    args.arg_fields
+                        .get(i)
+                        .map(|field| field.metadata().clone())
+                        .unwrap_or_default(),
+                )
+            })
             .collect();
         for (index, cache) in string_caches {
             fields.push(streamfusion_bridge::string_cache::string_cache_field(

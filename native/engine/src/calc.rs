@@ -357,11 +357,12 @@ impl CalcExpression {
             // Scalar arguments can fail before a kernel sees the empty array. Flink never
             // evaluates a projection without a surviving row, but the output must keep its type.
             let array = evaluate_projection(projection, &filtered);
-            fields.push(Field::new(
-                &self.output_names[i],
-                array.data_type().clone(),
-                true,
-            ));
+            let mut field = Field::new(&self.output_names[i], array.data_type().clone(), true);
+            if let Some(column) = projection.downcast_ref::<Column>() {
+                field =
+                    field.with_metadata(filtered.schema().field(column.index()).metadata().clone());
+            }
+            fields.push(field);
             columns.push(array);
         }
         // Carry the changelog tag through: a Calc transforms each row independently (per-row
@@ -372,8 +373,14 @@ impl CalcExpression {
             fields.push(Field::new(ROW_KIND_COLUMN, DataType::Int8, false));
             columns.push(kind.clone());
         }
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-            .expect("failed to build output")
+        RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                fields,
+                filtered.schema().metadata().clone(),
+            )),
+            columns,
+        )
+        .expect("failed to build output")
     }
 }
 
@@ -439,6 +446,66 @@ fn row_udf_output(
 mod row_udf_tests {
     use super::*;
     use arrow::buffer::NullBuffer;
+
+    #[test]
+    fn aliases_reordered_and_repeated_columns_keep_representation_metadata_and_buffers() {
+        let arrays: ArrayRef = Arc::new(arrow::array::ListArray::from_iter_primitive::<
+            arrow::datatypes::Date32Type,
+            _,
+            _,
+        >([
+            Some(vec![Some(-1), None]),
+            Some(vec![Some(1)]),
+        ]));
+        let metadata = [("streamfusion.array-copy".into(), "1".into())].into();
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("unused", DataType::Int64, false),
+                Field::new("arrays", arrays.data_type().clone(), true).with_metadata(metadata),
+                Field::new("key", DataType::Int32, false)
+                    .with_metadata([("role".into(), "key".into())].into()),
+            ],
+            [("origin".into(), "projection".into())].into(),
+        ));
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![8, 9])),
+                arrays.clone(),
+                Arc::new(Int32Array::from(vec![1, 2])),
+            ],
+        )
+        .unwrap();
+        let mut calc = CalcExpression {
+            kinds: vec![0, 0, 0, 1],
+            payload: vec![1, 2, 1, 0],
+            child_counts: vec![0; 4],
+            longs: vec![9],
+            doubles: vec![],
+            strings: vec![],
+            projection_roots: vec![0, 1, 2, 3],
+            condition_root: -1,
+            output_names: vec!["a".into(), "k".into(), "again".into(), "constant".into()],
+            compiled: None,
+        };
+        let output = calc.evaluate(input);
+        assert_eq!(
+            output.schema().field(0).metadata(),
+            schema.field(1).metadata()
+        );
+        assert_eq!(
+            output.schema().field(1).metadata(),
+            schema.field(2).metadata()
+        );
+        assert_eq!(
+            output.schema().field(2).metadata(),
+            schema.field(1).metadata()
+        );
+        assert!(output.schema().field(3).metadata().is_empty());
+        assert_eq!(output.schema().metadata(), schema.metadata());
+        assert!(Arc::ptr_eq(output.column(0), &arrays));
+        assert!(Arc::ptr_eq(output.column(2), &arrays));
+    }
 
     #[test]
     fn rejected_rows_do_not_violate_nonnullable_output_fields() {
