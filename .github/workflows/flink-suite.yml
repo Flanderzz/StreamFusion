@@ -2,8 +2,7 @@ name: Upstream Flink suite
 
 on:
   push:
-    branches: [main]
-  pull_request: {}
+    branches: ['**']
   workflow_dispatch:
     inputs:
       sql_inventory:
@@ -24,10 +23,11 @@ permissions:
 
 concurrency:
   group: upstream-flink-suite-${{ github.ref }}-${{ inputs.sql_inventory && inputs.inventory_scope || 'tests' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   upstream-line:
+    if: ${{ github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main' }}
     name: Flink ${{ matrix.line }}
     strategy:
       fail-fast: false
@@ -45,7 +45,7 @@ jobs:
       inventory_scope: ${{ inputs.inventory_scope || 'all' }}
 
   legacy-delta-audit:
-    if: ${{ !inputs.sql_inventory }}
+    if: ${{ (!inputs.sql_inventory) && (github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main') }}
     name: Delta 3.3 / Flink 1.18 host audit
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -72,7 +72,7 @@ jobs:
 
   all-tests:
     name: All upstream integration tests
-    if: ${{ always() && !cancelled() }}
+    if: ${{ (always() && !cancelled()) && (github.repository != 'datafusion-contrib/StreamFusion' || github.ref == 'refs/heads/main') }}
     needs: [upstream-line, legacy-delta-audit]
     runs-on: ubuntu-24.04
     timeout-minutes: 10

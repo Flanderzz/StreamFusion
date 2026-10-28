@@ -1,20 +1,66 @@
 # CI setup and failure handling
 
-Ordinary CI runs Rust tests, Java tests on Flink 2.2 and
-1.18, optional lake and format/connector suites, and optimized image integration tests.
-The upstream Flink workflow runs separately; both aggregate gates must pass before merging.
-Confirm the actual post-merge workflows as well as the PR checks when verifying a repair.
+Contributor builds and tests run in **personal forks**, using each fork owner's GitHub Actions
+quota instead of the shared `datafusion-contrib` quota. Opening or updating a PR does not launch
+the test matrix in the canonical repository. Canonical `main` still runs the complete post-merge
+checks, the upstream Flink weekly run remains available, and publishing stays upstream.
 
-CI, upstream Flink, and Paimon compatibility workflows cancel older test runs when a newer
-push or PR update targets the same ref. The latest main commit includes the earlier changes
-and receives the complete checks, without waiting behind tests for superseded main commits.
-Release publishing retains its non-canceling concurrency policy.
+## Contributing from a personal fork
 
-Documentation changes run `mkdocs build --strict` on pull requests as well as `main`, so broken
-links and navigation fail before merging. PR runs have read-only repository permissions and
-do not upload or deploy a Pages artifact. Only non-PR runs on `main` deploy, with Pages/OIDC
-permissions confined to the deployment job. PR updates cancel their own obsolete docs checks;
-main deployments remain serialized.
+1. Fork `datafusion-contrib/StreamFusion` into your personal account. If that name is already
+   occupied by an unrelated repository, choose another fork name.
+2. Enable workflows in the fork's **Actions** tab before pushing your branch. GitHub disables
+   Actions in new forks until the owner enables them.
+3. Keep `upstream` pointed at the canonical repository and add your fork as `fork` (or use it
+   as `origin`). Fetch upstream and rebase your feature branch on current `upstream/main` so it
+   contains these workflow changes. Push the feature branch to your fork, then open a PR into
+   `datafusion-contrib/StreamFusion:main`.
+4. Wait for **CI** and **Upstream Flink suite** on the exact branch head to pass, plus any
+   path-selected compatibility, diagnostic or documentation workflows. Include fork run links
+   in the PR so reviewers can inspect jobs and artifacts directly. Rebase and rerun after
+   incorporating new upstream changes before merging.
+
+For example, after adding the fork remote:
+
+```sh
+git fetch upstream
+git rebase upstream/main
+git push -u fork HEAD
+gh pr create --repo datafusion-contrib/StreamFusion --base main --head YOUR_LOGIN:YOUR_BRANCH
+```
+
+Pushes to any branch in a fork run CI and the upstream Flink suite. Paimon and release diagnostics
+retain their path filters; docs changes build the strict MkDocs site in the fork. Branch pushes
+in the canonical repository skip those jobs unless the branch is `main`; development branches
+belong in personal forks. Tags do not trigger these branch test workflows. Manual CI dispatches
+are available for retries. For the upstream Flink merge gate, use or rerun a **push** run: a manual
+SQL-inventory dispatch may execute only part of the matrix and is never accepted as full-suite evidence.
+
+The lightweight **Fork CI status** workflow reads public fork runs on PR updates, every 15 minutes,
+and on manual dispatch in the canonical repository. It reports the existing **All CI tests** and
+**All upstream integration tests** checks for the exact PR head SHA and branch. It also mirrors the
+CI result under the legacy **Rust tests** and **Java tests (debug native build)** names required by
+the older ruleset. Each mirrored CI check requires the entire CI workflow to succeed. Failed,
+canceled, skipped or neutral workflows cannot satisfy the gates; missing or disabled workflows
+report action required. Existing GitHub rulesets stay in place. The reporter checks out only
+trusted default-branch code and never executes PR code with its write-capable token.
+
+Existing PRs need the new workflow configuration on their feature branch. For a PR whose head is
+already in a personal fork, rebase on current upstream `main`, enable Actions and push again. For
+a PR whose head is a canonical-repository branch, push the rebased branch to your fork and open a
+replacement PR referencing the original, then close the original. GitHub cannot change an existing
+PR's head repository. The reporter marks same-repository PRs as requiring migration rather than
+running their expensive jobs upstream. Runs queued before this change are not automatically moved
+or canceled; cancel obsolete PR runs in the canonical Actions tab when migrating them.
+
+CI, upstream Flink, and Paimon compatibility cancel older push runs on the same branch. The latest
+main commit receives complete checks, without waiting behind superseded main commits. Release
+publishing retains its non-canceling concurrency policy.
+
+Docs builds have read-only repository permissions. Only canonical `main` uploads a Pages artifact
+and deploys, with Pages/OIDC permissions confined to deployment. Forks build without publishing.
+Fork docs pushes cancel obsolete builds; canonical main deployments remain serialized. Release
+tag validation and all dependent release publishing jobs are also restricted to the canonical repo.
 
 The ordinary CI and upstream Flink aggregate gates run after successful or failed jobs,
 but skip canceled workflows (`always() && !cancelled()`). An unconditional `always()`
