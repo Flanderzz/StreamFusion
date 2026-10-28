@@ -1,6 +1,6 @@
 # Rust collection aggregate state
 
-Verified integer/BOOLEAN and DATE/TIME COLLECT and Flink 2.2 ARRAY_AGG execute their accumulation,
+Verified integer/BOOLEAN, DATE/TIME, FLOAT/DOUBLE and DECIMAL COLLECT and Flink 2.2 ARRAY_AGG execute their accumulation,
 retraction and result materialization inside the existing Rust keyed aggregate. Arrow batches
 cross JNI once per push, avoiding the preceding generated JVM handler's rowwise aggregate work.
 The source/sink transposes remain at the native island's perimeter.
@@ -40,3 +40,26 @@ DATE and TIME reuse this state layout with separate logical type tags and the ex
 boxed-integer hashing/order contract. Arrow date/time columns are downcast once per batch;
 no temporal-to-integer row conversion is introduced inside the operator. Their nullable-array
 and representation gates are [documented separately](../operators/group-by.md#date-and-time-collection-elements).
+
+
+## One state algorithm with typed element codecs
+
+All verified scalar element families use the same collection state machine. Codecs supply
+compact owned values, typed Arrow conversion and Java boxed hashing/comparison. Floating codecs
+reuse the existing map-order key: comparisons canonicalize NaNs and distinguish signed zero,
+while retained raw bits survive output and checkpoints. Decimal codecs reuse the BigDecimal
+hash model and retain unscaled i128 values plus precision/scale. This adds families without
+copying accumulation, retraction, DISTINCT, TTL or Java map-copy logic.
+
+Typed readers are selected once per batch; per-row updates remain native and do not construct
+ScalarValue objects. The primitive codec preserves the existing version-one JSON envelope and
+field layout byte for byte. Floating snapshots encode comparator/raw bit patterns losslessly;
+decimal snapshots carry the exact logical parameters and reject other scales/precisions.
+The existing Arrow batch ownership and heap/RocksDB state boundaries remain unchanged.
+
+
+The [shared-backend comparison](../benchmarks/collection-aggregates.md#shared-typed-collection-state)
+retains 480 complete jobs, 150 positive native group witnesses and previous native BIGINT controls.
+At 64 groups DOUBLE and compact decimal ARRAY_AGG beat paired stock by 2.92×/1.73×; wide decimal
+arrays and the measured numeric COLLECT cases retain losses. Two CPU captures close the bounded
+investigation: output emission and Java decimal reconstruction/copying remain costs in #239.

@@ -52,7 +52,8 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
       if (type.equals("DATE"))
         row.setField(1, java.time.LocalDate.ofEpochDay(Math.floorMod(value, 730000) - 365000));
       if (type.equals("TIME"))
-        row.setField(1, java.time.LocalTime.ofNanoOfDay(Math.floorMod(value, 86400000) * 1_000_000L));
+        row.setField(
+            1, java.time.LocalTime.ofNanoOfDay(Math.floorMod(value, 86400000) * 1_000_000L));
     }
     var input =
         tech.streamfusion.compat.FlinkTestSources.fromData(
@@ -86,7 +87,17 @@ class FlinkCollectionLegacyConsumerSqlHarnessTest {
     "ARRAY_AGG,SMALLINT",
     "ARRAY_AGG,INT",
     "ARRAY_AGG,BIGINT",
-    "ARRAY_AGG,BOOLEAN"
+    "ARRAY_AGG,BOOLEAN",
+    "COLLECT,FLOAT",
+    "COLLECT,DOUBLE",
+    "COLLECT,'DECIMAL(8,2)'",
+    "COLLECT,'DECIMAL(20,4)'",
+    "COLLECT,'DECIMAL(38,18)'",
+    "ARRAY_AGG,FLOAT",
+    "ARRAY_AGG,DOUBLE",
+    "ARRAY_AGG,'DECIMAL(8,2)'",
+    "ARRAY_AGG,'DECIMAL(20,4)'",
+    "ARRAY_AGG,'DECIMAL(38,18)'"
   })
   void legacyExternalRowsKeepOrderedChangesAndValues(String function, String type)
       throws Exception {

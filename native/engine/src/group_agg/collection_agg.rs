@@ -1,6 +1,8 @@
 use super::java_map_order::JavaMapOrder;
 use crate::*;
 use serde::{Deserialize, Serialize};
+mod elements;
+use elements::{DecimalElement, FloatElement};
 
 pub(super) fn is_collection(kind: i64) -> bool {
     (48..=53).contains(&kind)
@@ -113,24 +115,204 @@ fn primitive(value: &ScalarValue) -> Option<i64> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+enum CollectionStorage {
+    Primitive(TypedCollectionState<PrimitiveType>),
+    Float(TypedCollectionState<FloatElement>),
+    Decimal(TypedCollectionState<DecimalElement>),
+}
+
 pub(crate) struct CollectionState {
-    kind: i64,
-    element: PrimitiveType,
-    values: Vec<Option<i64>>,
-    pending: Vec<Option<i64>>,
-    counts: std::collections::BTreeMap<i64, i32>,
-    #[serde(with = "entries")]
-    distinct: std::collections::BTreeMap<Option<i64>, i64>,
-    times: std::collections::BTreeMap<i64, i64>,
-    order: JavaMapOrder<i64>,
+    storage: CollectionStorage,
+}
+
+macro_rules! with_storage {
+    ($storage:expr, $state:ident, $body:expr) => {
+        match $storage {
+            CollectionStorage::Primitive($state) => $body,
+            CollectionStorage::Float($state) => $body,
+            CollectionStorage::Decimal($state) => $body,
+        }
+    };
 }
 
 impl CollectionState {
     pub(super) fn new(kind: i64, ty: &DataType) -> Self {
+        let storage = match ty {
+            DataType::Float32 | DataType::Float64 => {
+                CollectionStorage::Float(TypedCollectionState::new(kind, ty))
+            }
+            DataType::Decimal128(_, _) => {
+                CollectionStorage::Decimal(TypedCollectionState::new(kind, ty))
+            }
+            _ => CollectionStorage::Primitive(TypedCollectionState::new(kind, ty)),
+        };
+        Self { storage }
+    }
+
+    pub(super) fn update(
+        &mut self,
+        column: &CollectionColumn<'_>,
+        row: usize,
+        retract: bool,
+        ttl: StateTtl,
+        append_distinct: bool,
+    ) -> bool {
+        use super::numeric_map_order::FloatingKey;
+        match (&mut self.storage, column) {
+            (CollectionStorage::Primitive(state), column) => {
+                state.update(column.at(row), retract, ttl, append_distinct)
+            }
+            (CollectionStorage::Float(state), CollectionColumn::F32(column)) => state.update(
+                (!column.is_null(row)).then(|| FloatingKey::from_f32(column.value(row))),
+                retract,
+                ttl,
+                append_distinct,
+            ),
+            (CollectionStorage::Float(state), CollectionColumn::F64(column)) => state.update(
+                (!column.is_null(row)).then(|| FloatingKey::from_f64(column.value(row))),
+                retract,
+                ttl,
+                append_distinct,
+            ),
+            (CollectionStorage::Decimal(state), CollectionColumn::Decimal(column)) => state.update(
+                (!column.is_null(row)).then(|| column.value(row)),
+                retract,
+                ttl,
+                append_distinct,
+            ),
+            _ => unreachable!("collection column and codec must agree"),
+        }
+    }
+
+    pub(super) fn expire(&mut self, ttl: StateTtl) -> bool {
+        with_storage!(&mut self.storage, state, state.expire(ttl))
+    }
+    pub(super) fn accepts_null(&self) -> bool {
+        with_storage!(&self.storage, state, state.accepts_null())
+    }
+    pub(super) fn forget_distinct(&mut self, value: &ScalarValue) {
+        with_storage!(&mut self.storage, state, state.forget_distinct(value))
+    }
+    pub(super) fn distinct_count(&self, value: &ScalarValue) -> i64 {
+        with_storage!(&self.storage, state, state.distinct_count(value))
+    }
+    pub(super) fn distinct_entries(&self) -> Vec<(ScalarValue, i64)> {
+        with_storage!(&self.storage, state, state.distinct_entries())
+    }
+    pub(super) fn emit(&self, result: &DataType) -> ScalarValue {
+        with_storage!(&self.storage, state, state.emit(result))
+    }
+    pub(super) fn snapshot(&self) -> ScalarValue {
+        with_storage!(&self.storage, state, state.snapshot())
+    }
+    pub(super) fn restore(&mut self, value: ScalarValue) -> Result<(), DataFusionError> {
+        with_storage!(&mut self.storage, state, state.restore(value))
+    }
+    pub(super) fn bytes(&self) -> usize {
+        with_storage!(
+            &self.storage,
+            state,
+            state.bytes() + std::mem::size_of::<Self>() - std::mem::size_of_val(state)
+        )
+    }
+}
+
+trait CollectionElement: Clone + PartialEq {
+    type Value: Copy + Ord;
+    fn from_type(ty: &DataType) -> Self;
+    fn scalar(&self, value: Option<Self::Value>) -> ScalarValue;
+    fn value(&self, value: &ScalarValue) -> Option<Self::Value>;
+    fn hash(&self, value: Self::Value) -> i32;
+    fn array(&self, values: impl IntoIterator<Item = Option<Self::Value>>) -> ArrayRef;
+}
+
+impl CollectionElement for PrimitiveType {
+    type Value = i64;
+    fn from_type(ty: &DataType) -> Self {
+        Self::new(ty)
+    }
+    fn scalar(&self, value: Option<i64>) -> ScalarValue {
+        (*self).scalar(value)
+    }
+    fn value(&self, value: &ScalarValue) -> Option<i64> {
+        primitive(value)
+    }
+    fn hash(&self, value: i64) -> i32 {
+        hash(value, &self.data_type())
+    }
+    fn array(&self, values: impl IntoIterator<Item = Option<i64>>) -> ArrayRef {
+        let ty = &self.data_type();
+        match ty {
+            DataType::Boolean => Arc::new(BooleanArray::from(
+                values
+                    .into_iter()
+                    .map(|v| v.map(|v| v != 0))
+                    .collect::<Vec<_>>(),
+            )),
+            DataType::Int8 => Arc::new(Int8Array::from(
+                values
+                    .into_iter()
+                    .map(|v| v.map(|v| v as i8))
+                    .collect::<Vec<_>>(),
+            )),
+            DataType::Int16 => Arc::new(Int16Array::from(
+                values
+                    .into_iter()
+                    .map(|v| v.map(|v| v as i16))
+                    .collect::<Vec<_>>(),
+            )),
+            DataType::Int32 => Arc::new(Int32Array::from(
+                values
+                    .into_iter()
+                    .map(|v| v.map(|v| v as i32))
+                    .collect::<Vec<_>>(),
+            )),
+            DataType::Int64 => Arc::new(Int64Array::from(values.into_iter().collect::<Vec<_>>())),
+            DataType::Date32 => Arc::new(arrow::array::Date32Array::from(
+                values
+                    .into_iter()
+                    .map(|v| v.map(|v| v as i32))
+                    .collect::<Vec<_>>(),
+            )),
+            DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
+                Arc::new(arrow::array::Time32MillisecondArray::from(
+                    values
+                        .into_iter()
+                        .map(|v| v.map(|v| v as i32))
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            _ => unreachable!("verified collection element type"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "C: Serialize, C::Value: Serialize",
+    deserialize = "C: Deserialize<'de>, C::Value: Deserialize<'de>"
+))]
+struct TypedCollectionState<C: CollectionElement> {
+    kind: i64,
+    element: C,
+    values: Vec<Option<C::Value>>,
+    pending: Vec<Option<C::Value>>,
+    counts: std::collections::BTreeMap<C::Value, i32>,
+    #[serde(with = "entries")]
+    distinct: std::collections::BTreeMap<Option<C::Value>, i64>,
+    times: std::collections::BTreeMap<C::Value, i64>,
+    order: JavaMapOrder<C::Value>,
+}
+
+impl<C> TypedCollectionState<C>
+where
+    C: CollectionElement + Serialize + serde::de::DeserializeOwned,
+    C::Value: Serialize + serde::de::DeserializeOwned,
+{
+    pub(super) fn new(kind: i64, ty: &DataType) -> Self {
         Self {
             kind,
-            element: PrimitiveType::new(ty),
+            element: C::from_type(ty),
             values: Vec::new(),
             pending: Vec::new(),
             counts: Default::default(),
@@ -154,8 +336,7 @@ impl CollectionState {
         for key in &expired {
             self.times.remove(key);
             self.counts.remove(key);
-            self.order
-                .remove(*key, hash(*key, &self.element.data_type()));
+            self.order.remove(*key, self.element.hash(*key));
         }
         self.order.compact();
         !expired.is_empty()
@@ -166,10 +347,13 @@ impl CollectionState {
     }
 
     pub(super) fn forget_distinct(&mut self, value: &ScalarValue) {
-        self.distinct.remove(&primitive(value));
+        self.distinct.remove(&self.element.value(value));
     }
     pub(super) fn distinct_count(&self, value: &ScalarValue) -> i64 {
-        self.distinct.get(&primitive(value)).copied().unwrap_or(0)
+        self.distinct
+            .get(&self.element.value(value))
+            .copied()
+            .unwrap_or(0)
     }
     pub(super) fn distinct_entries(&self) -> Vec<(ScalarValue, i64)> {
         self.distinct
@@ -180,7 +364,7 @@ impl CollectionState {
 
     pub(super) fn update(
         &mut self,
-        value: Option<i64>,
+        value: Option<C::Value>,
         retract: bool,
         ttl: StateTtl,
         append_distinct: bool,
@@ -215,8 +399,7 @@ impl CollectionState {
             if retract && old == Some(1) {
                 self.counts.remove(&value);
                 self.times.remove(&value);
-                self.order
-                    .remove(value, hash(value, &self.element.data_type()));
+                self.order.remove(value, self.element.hash(value));
             } else {
                 let next = old.unwrap_or(0).wrapping_add(if retract { -1 } else { 1 });
                 self.counts.insert(value, next);
@@ -224,8 +407,7 @@ impl CollectionState {
                     self.times.insert(value, ttl.now());
                 }
                 if old.is_none() {
-                    self.order
-                        .insert(value, hash(value, &self.element.data_type()));
+                    self.order.insert(value, self.element.hash(value));
                 }
             }
         } else if retract {
@@ -242,54 +424,6 @@ impl CollectionState {
     }
 
     pub(super) fn emit(&self, result: &DataType) -> ScalarValue {
-        fn array(values: impl IntoIterator<Item = Option<i64>>, ty: &DataType) -> ArrayRef {
-            match ty {
-                DataType::Boolean => Arc::new(BooleanArray::from(
-                    values
-                        .into_iter()
-                        .map(|v| v.map(|v| v != 0))
-                        .collect::<Vec<_>>(),
-                )),
-                DataType::Int8 => Arc::new(Int8Array::from(
-                    values
-                        .into_iter()
-                        .map(|v| v.map(|v| v as i8))
-                        .collect::<Vec<_>>(),
-                )),
-                DataType::Int16 => Arc::new(Int16Array::from(
-                    values
-                        .into_iter()
-                        .map(|v| v.map(|v| v as i16))
-                        .collect::<Vec<_>>(),
-                )),
-                DataType::Int32 => Arc::new(Int32Array::from(
-                    values
-                        .into_iter()
-                        .map(|v| v.map(|v| v as i32))
-                        .collect::<Vec<_>>(),
-                )),
-                DataType::Int64 => {
-                    Arc::new(Int64Array::from(values.into_iter().collect::<Vec<_>>()))
-                }
-                DataType::Date32 => Arc::new(arrow::array::Date32Array::from(
-                    values
-                        .into_iter()
-                        .map(|v| v.map(|v| v as i32))
-                        .collect::<Vec<_>>(),
-                )),
-                DataType::Time32(arrow::datatypes::TimeUnit::Millisecond) => {
-                    Arc::new(arrow::array::Time32MillisecondArray::from(
-                        values
-                            .into_iter()
-                            .map(|v| v.map(|v| v as i32))
-                            .collect::<Vec<_>>(),
-                    ))
-                }
-                _ => unreachable!("verified collection element type"),
-            }
-        }
-        let ty = self.element.data_type();
-        let ty = &ty;
         if self.kind <= 49 {
             // StateMapView.getMap materializes a fresh HashMap for each result.
             let capacity = (self.order.len().saturating_mul(4).div_ceil(3))
@@ -301,7 +435,7 @@ impl CollectionState {
             } else {
                 copy = JavaMapOrder::with_capacity(16);
                 for key in self.order.iter() {
-                    copy.insert(key, hash(key, ty));
+                    copy.insert(key, self.element.hash(key));
                 }
                 &copy
             };
@@ -316,7 +450,7 @@ impl CollectionState {
             let entries = arrow::array::StructArray::new(
                 fields.clone(),
                 vec![
-                    array(keys.into_iter().map(Some), ty),
+                    self.element.array(keys.into_iter().map(Some)),
                     Arc::new(Int32Array::from(counts)),
                 ],
                 None,
@@ -338,7 +472,7 @@ impl CollectionState {
             ScalarValue::List(Arc::new(arrow::array::ListArray::new(
                 field.clone(),
                 arrow::buffer::OffsetBuffer::from_lengths([self.values.len()]),
-                array(self.values.iter().copied(), ty),
+                self.element.array(self.values.iter().copied()),
                 None,
             )))
         }
@@ -368,15 +502,17 @@ impl CollectionState {
     pub(super) fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + (self.values.capacity() + self.pending.capacity())
-                * std::mem::size_of::<Option<i64>>()
-            + self.counts.len() * 48
-            + self.distinct.len() * 48
-            + self.times.len() * 48
+                * std::mem::size_of::<Option<C::Value>>()
+            + (self.counts.len() + self.distinct.len() + self.times.len())
+                * (40 + std::mem::size_of::<C::Value>())
             + self.order.bytes()
     }
 }
 
 pub(super) enum CollectionColumn<'a> {
+    F32(&'a arrow::array::Float32Array),
+    F64(&'a arrow::array::Float64Array),
+    Decimal(&'a arrow::array::Decimal128Array),
     Boolean(&'a BooleanArray),
     I8(&'a Int8Array),
     I16(&'a Int16Array),
@@ -388,6 +524,9 @@ pub(super) enum CollectionColumn<'a> {
 impl<'a> CollectionColumn<'a> {
     pub(super) fn new(array: &'a ArrayRef) -> Self {
         match array.data_type() {
+            DataType::Float32 => Self::F32(array.as_any().downcast_ref().unwrap()),
+            DataType::Float64 => Self::F64(array.as_any().downcast_ref().unwrap()),
+            DataType::Decimal128(_, _) => Self::Decimal(array.as_any().downcast_ref().unwrap()),
             DataType::Boolean => Self::Boolean(array.as_any().downcast_ref().unwrap()),
             DataType::Int8 => Self::I8(array.as_any().downcast_ref().unwrap()),
             DataType::Int16 => Self::I16(array.as_any().downcast_ref().unwrap()),
@@ -414,6 +553,7 @@ impl<'a> CollectionColumn<'a> {
             Self::I64(a) => read!(a),
             Self::Date(a) => read!(a),
             Self::Time(a) => read!(a),
+            _ => unreachable!("primitive collection column"),
         }
     }
 }
@@ -421,16 +561,16 @@ impl<'a> CollectionColumn<'a> {
 mod entries {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
-    pub fn serialize<S: Serializer>(
-        map: &BTreeMap<Option<i64>, i64>,
+    pub fn serialize<K: Serialize, S: Serializer>(
+        map: &BTreeMap<Option<K>, i64>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         map.iter().collect::<Vec<_>>().serialize(serializer)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub fn deserialize<'de, K: Ord + Deserialize<'de>, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<Option<i64>, i64>, D::Error> {
-        Ok(Vec::<(Option<i64>, i64)>::deserialize(deserializer)?
+    ) -> Result<BTreeMap<Option<K>, i64>, D::Error> {
+        Ok(Vec::<(Option<K>, i64)>::deserialize(deserializer)?
             .into_iter()
             .collect())
     }
@@ -439,6 +579,7 @@ mod entries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    type CollectionState = TypedCollectionState<PrimitiveType>;
     #[test]
     fn collection_retractions_nulls_and_versioned_restore() {
         for ty in [
@@ -579,5 +720,224 @@ mod tests {
         state.update(Some(9), false, ttl, false);
         assert_eq!(state.counts.get(&9), Some(&0));
         assert_eq!(state.order.iter().collect::<Vec<_>>(), vec![9]);
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    fn payloads(array: &dyn Array) -> Vec<Option<u128>> {
+        (0..array.len())
+            .map(|row| {
+                if array.is_null(row) {
+                    return None;
+                }
+                Some(match array.data_type() {
+                    DataType::Float32 => array
+                        .as_any()
+                        .downcast_ref::<arrow::array::Float32Array>()
+                        .unwrap()
+                        .value(row)
+                        .to_bits() as u128,
+                    DataType::Float64 => array
+                        .as_any()
+                        .downcast_ref::<arrow::array::Float64Array>()
+                        .unwrap()
+                        .value(row)
+                        .to_bits() as u128,
+                    DataType::Decimal128(_, _) => array
+                        .as_any()
+                        .downcast_ref::<arrow::array::Decimal128Array>()
+                        .unwrap()
+                        .value(row) as u128,
+                    _ => unreachable!(),
+                })
+            })
+            .collect()
+    }
+
+    fn samples() -> Vec<ArrayRef> {
+        vec![
+            Arc::new(arrow::array::Float32Array::from(vec![
+                Some(f32::from_bits(0x7f800001)),
+                Some(f32::from_bits(0xffc00002)),
+                Some(-0.0),
+                Some(0.0),
+                None,
+            ])),
+            Arc::new(arrow::array::Float64Array::from(vec![
+                Some(f64::from_bits(0x7ff0000000000001)),
+                Some(f64::from_bits(0xfff8000000000002)),
+                Some(-0.0),
+                Some(0.0),
+                None,
+            ])),
+            Arc::new(
+                arrow::array::Decimal128Array::from(vec![
+                    Some(12345),
+                    Some(12345),
+                    Some(-1),
+                    Some(0),
+                    None,
+                ])
+                .with_precision_and_scale(8, 2)
+                .unwrap(),
+            ),
+            Arc::new(
+                arrow::array::Decimal128Array::from(vec![
+                    Some(10i128.pow(38) - 1),
+                    Some(10i128.pow(38) - 1),
+                    Some(1 - 10i128.pow(38)),
+                    Some(0),
+                    None,
+                ])
+                .with_precision_and_scale(38, 18)
+                .unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn numeric_family_shares_typed_retractions_distinct_and_owned_restore() {
+        for original in samples() {
+            let input = original.slice(0, original.len());
+            let column = CollectionColumn::new(&input);
+            for kind in 48..=53 {
+                let mut state = CollectionState::new(kind, input.data_type());
+                for row in 0..input.len() {
+                    state.update(&column, row, false, StateTtl::disabled(), false);
+                }
+                let result = result_type(kind, input.data_type());
+                let output = state.emit(&result);
+                let before = match &output {
+                    ScalarValue::List(array) => {
+                        let mut expected = payloads(input.as_ref());
+                        if matches!(kind, 51 | 53) {
+                            expected.remove(1);
+                        }
+                        if kind >= 52 {
+                            expected.retain(Option::is_some);
+                        }
+                        assert_eq!(payloads(array.values().as_ref()), expected);
+                        payloads(array.values().as_ref())
+                    }
+                    ScalarValue::Map(array) => {
+                        let keys = payloads(array.keys().as_ref());
+                        assert!(keys.contains(&payloads(input.as_ref())[0]));
+                        assert_eq!(keys.len(), 3);
+                        let counts = array
+                            .values()
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap();
+                        let repeated = keys
+                            .iter()
+                            .position(|key| *key == payloads(input.as_ref())[0])
+                            .unwrap();
+                        assert_eq!(counts.value(repeated), if kind == 49 { 1 } else { 2 });
+                        keys
+                    }
+                    _ => unreachable!(),
+                };
+                let checkpoint = state.snapshot();
+                let mut restored = CollectionState::new(kind, input.data_type());
+                restored.restore(checkpoint.clone()).unwrap();
+                assert_eq!(checkpoint, restored.snapshot());
+                restored.update(&column, 1, true, StateTtl::disabled(), false);
+                state.update(&column, 1, true, StateTtl::disabled(), false);
+                assert_eq!(state.snapshot(), restored.snapshot());
+                if kind == 50 {
+                    let ScalarValue::List(array) = restored.emit(&result) else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        payloads(array.values().as_ref()),
+                        payloads(input.as_ref())[1..]
+                    );
+                }
+                let retained = match &output {
+                    ScalarValue::List(array) => payloads(array.values().as_ref()),
+                    ScalarValue::Map(array) => payloads(array.keys().as_ref()),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    before, retained,
+                    "later retractions must not mutate old output"
+                );
+                assert!(CollectionState::new(kind, &DataType::Int64)
+                    .restore(checkpoint)
+                    .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn previous_primitive_checkpoints_keep_the_exact_version_one_format() {
+        for (kind, fixture) in [
+            (
+                48,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-48.json")
+                    .as_slice(),
+            ),
+            (
+                49,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-49.json")
+                    .as_slice(),
+            ),
+            (
+                50,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-50.json")
+                    .as_slice(),
+            ),
+            (
+                51,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-51.json")
+                    .as_slice(),
+            ),
+            (
+                52,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-52.json")
+                    .as_slice(),
+            ),
+            (
+                53,
+                include_bytes!("../../../../src/test/resources/collection-state-v1/kind-53.json")
+                    .as_slice(),
+            ),
+        ] {
+            let mut state = CollectionState::new(kind, &DataType::Int64);
+            let snapshot = ScalarValue::Binary(Some(fixture.to_vec()));
+            state.restore(snapshot.clone()).unwrap();
+            assert_eq!(snapshot, state.snapshot());
+        }
+    }
+
+    #[test]
+    fn numeric_codecs_keep_slices_and_reject_other_widths_or_decimal_scales() {
+        for input in samples() {
+            let slice = input.slice(1, 3);
+            let column = CollectionColumn::new(&slice);
+            let mut state = CollectionState::new(50, input.data_type());
+            for row in 0..slice.len() {
+                state.update(&column, row, false, StateTtl::disabled(), false);
+            }
+            let ScalarValue::List(output) = state.emit(&result_type(50, input.data_type())) else {
+                unreachable!()
+            };
+            assert_eq!(payloads(output.values().as_ref()), payloads(slice.as_ref()));
+            for other in [
+                DataType::Float32,
+                DataType::Float64,
+                DataType::Decimal128(38, 0),
+                DataType::Decimal128(38, 18),
+            ] {
+                if &other != input.data_type() {
+                    assert!(CollectionState::new(50, &other)
+                        .restore(state.snapshot())
+                        .is_err());
+                }
+            }
+        }
     }
 }

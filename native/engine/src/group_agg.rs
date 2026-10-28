@@ -2692,7 +2692,8 @@ impl<S: KeyedStateStore<GroupKeyState>> GroupAggregator<S> {
                     result_changed[i] = true;
                     if let GroupAggState::Collection(collection) = &mut state.aggs[i] {
                         result_changed[i] = collection.update(
-                            collection_columns[i].as_ref().unwrap().at(row),
+                            collection_columns[i].as_ref().unwrap(),
+                            row,
                             retract,
                             ttl,
                             retained_modes[i] == Some(true),

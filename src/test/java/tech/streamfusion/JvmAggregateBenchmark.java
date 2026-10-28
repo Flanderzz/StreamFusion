@@ -16,6 +16,9 @@ import tech.streamfusion.planner.NativePlanner;
 
 @EnabledIfEnvironmentVariable(named = "SF_BENCHMARK", matches = "true")
 class JvmAggregateBenchmark {
+  private static final java.math.BigInteger DECIMAL20_BASE = java.math.BigInteger.TEN.pow(19);
+  private static final java.math.BigInteger DECIMAL38_BASE = java.math.BigInteger.TEN.pow(37);
+
   @Test
   void completeJobsRetainKeyedStateAndBothTransposes() throws Exception {
     assertEquals("false", System.getProperty("streamfusion.exchange.zeroCopyLocal"));
@@ -29,14 +32,24 @@ class JvmAggregateBenchmark {
     int prefixChars = Integer.getInteger("jvmagg.keyPrefixChars", 16);
     String prefix = prefixChars <= 0 ? "" : "é" + "x".repeat(prefixChars - 1);
     boolean expectedCache = Boolean.parseBoolean(System.getProperty("jvmagg.expectCache", "true"));
-    boolean expectedUdf = Boolean.parseBoolean(System.getProperty("jvmagg.expectNative", "false"));
+    boolean expectedAllNative =
+        Boolean.parseBoolean(System.getProperty("jvmagg.expectNative", "false"));
+    var expectedNativeCases =
+        Arrays.asList(System.getProperty("jvmagg.expectedNativeCases", "").split(","));
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
+      boolean expectedUdf = expectedAllNative || expectedNativeCases.contains(shape);
       boolean legacy = shape.startsWith("legacy_");
       String collectionShape = collectionShape(shape);
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
           collectionShape.endsWith("_date")
               ? Types.LOCAL_DATE
-              : collectionShape.endsWith("_time") ? Types.LOCAL_TIME : Types.LONG;
+              : collectionShape.endsWith("_time")
+                  ? Types.LOCAL_TIME
+                  : collectionShape.endsWith("_float")
+                      ? Types.FLOAT
+                      : collectionShape.endsWith("_double")
+                          ? Types.DOUBLE
+                          : collectionShape.contains("_decimal") ? Types.BIG_DEC : Types.LONG;
       boolean udf = shape.equals("udaf");
       boolean collect = collectCase(shape);
       boolean arrayAgg = arrayAggCase(shape);
@@ -112,18 +125,24 @@ class JvmAggregateBenchmark {
               default:
                 throw new IllegalArgumentException("Unsupported key type: " + keyType);
             }
-            if (notNull) {
-              assertTrue(collectionShape.endsWith("_date") || collectionShape.endsWith("_time"));
+            if (notNull || collectionShape.contains("_decimal")) {
+              var logicalValueType =
+                  collectionShape.contains("_decimal")
+                      ? org.apache.flink.table.api.DataTypes.DECIMAL(
+                          decimalPrecision(collectionShape), decimalScale(collectionShape))
+                      : collectionShape.endsWith("_date")
+                          ? org.apache.flink.table.api.DataTypes.DATE()
+                          : org.apache.flink.table.api.DataTypes.TIME(3);
+              if (notNull) {
+                assertTrue(collectionShape.endsWith("_date") || collectionShape.endsWith("_time"));
+                logicalValueType = logicalValueType.notNull();
+              }
               table.createTemporaryView(
                   "src",
                   source,
                   Schema.newBuilder()
                       .column("k", org.apache.flink.table.api.DataTypes.of(keyType))
-                      .column(
-                          "v",
-                          org.apache.flink.table.api.DataTypes.of(
-                                  collectionShape.endsWith("_date") ? "DATE" : "TIME(3)")
-                              .notNull())
+                      .column("v", logicalValueType)
                       .build());
             } else table.createTemporaryView("src", source);
             table.createTemporarySystemFunction("test_aggregate", new PortableSqlFixtures.Sum());
@@ -267,11 +286,33 @@ class JvmAggregateBenchmark {
   private static Object inputValue(long row, int keys, int values, String shape) {
     Long value = value(row, keys, values);
     if (value == null) return null;
+    if (shape.endsWith("_float") || shape.endsWith("_double")) {
+      double number = value == 0 ? -0.0 : value == 1 ? 0.0 : value - 1.5;
+      return shape.endsWith("_float")
+          ? (Object) Float.valueOf((float) number)
+          : Double.valueOf(number);
+    }
+    if (shape.contains("_decimal")) {
+      var unscaled = java.math.BigInteger.valueOf(value * 100003 - 3);
+      int precision = decimalPrecision(shape);
+      if (precision > 18)
+        unscaled = unscaled.add(precision == 20 ? DECIMAL20_BASE : DECIMAL38_BASE);
+      if ((value & 1) != 0) unscaled = unscaled.negate();
+      return new java.math.BigDecimal(unscaled, decimalScale(shape));
+    }
     if (shape.endsWith("_date")) return java.time.LocalDate.ofEpochDay(value - 3);
     if (shape.endsWith("_time"))
       return java.time.LocalTime.ofNanoOfDay(
           Math.floorMod(value * 1000 + 1, 86_400_000) * 1_000_000L);
     return value;
+  }
+
+  private static int decimalPrecision(String shape) {
+    return shape.endsWith("decimal8") ? 8 : shape.endsWith("decimal20") ? 20 : 38;
+  }
+
+  private static int decimalScale(String shape) {
+    return shape.endsWith("decimal8") ? 2 : shape.endsWith("decimal20") ? 4 : 18;
   }
 
   private static boolean collectCase(String shape) {
@@ -281,7 +322,12 @@ class JvmAggregateBenchmark {
             "collect_smallint",
             "collect_boolean",
             "collect_date",
-            "collect_time")
+            "collect_time",
+            "collect_float",
+            "collect_double",
+            "collect_decimal8",
+            "collect_decimal20",
+            "collect_decimal38")
         .contains(collectionShape(shape));
   }
 
@@ -294,6 +340,11 @@ class JvmAggregateBenchmark {
             "array_agg_boolean",
             "array_agg_date",
             "array_agg_time",
+            "array_agg_float",
+            "array_agg_double",
+            "array_agg_decimal8",
+            "array_agg_decimal20",
+            "array_agg_decimal38",
             "array_agg_not_null")
         .contains(collectionShape(shape));
   }

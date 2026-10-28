@@ -19,6 +19,60 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 class FlinkPrimitiveCollectionSqlHarnessTest {
   private static final RecoveryExecutionMetrics METRICS = new RecoveryExecutionMetrics();
+  private static final List<String> ELEMENT_TYPES =
+      List.of(
+          "TINYINT",
+          "SMALLINT",
+          "INT",
+          "BIGINT",
+          "BOOLEAN",
+          "DATE",
+          "TIME",
+          "FLOAT",
+          "DOUBLE",
+          "DECIMAL(8,2)",
+          "DECIMAL(20,4)",
+          "DECIMAL(38,18)");
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      collectionSignatures() {
+    return ELEMENT_TYPES.stream()
+        .flatMap(
+            type ->
+                java.util.stream.Stream.of("COLLECT", "ARRAY_AGG")
+                    .map(
+                        function ->
+                            org.junit.jupiter.params.provider.Arguments.of(function, type)));
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      collectionRecoveryProfiles() {
+    return collectionSignatures()
+        .flatMap(
+            signature ->
+                java.util.stream.Stream.of(
+                        "hashmap", "tech.streamfusion.state.RocksDBNativeStateBackendFactory")
+                    .map(
+                        backend ->
+                            org.junit.jupiter.params.provider.Arguments.of(
+                                signature.get()[0], signature.get()[1], backend)));
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      nonNullSourceHintProfiles() {
+    return collectionSignatures()
+        .flatMap(
+            signature ->
+                java.util.stream.Stream.of(1, 3)
+                    .map(
+                        parallelism ->
+                            org.junit.jupiter.params.provider.Arguments.of(
+                                signature.get()[0], signature.get()[1], parallelism)));
+  }
+
+  static java.util.stream.Stream<String> collectionElementTypes() {
+    return ELEMENT_TYPES.stream();
+  }
 
   @AfterAll
   static void closeCluster() {
@@ -46,7 +100,16 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   private static TypeInformation<?> valueType(String type) {
+    if (type.startsWith("DECIMAL")) return Types.BIG_DEC;
     switch (type) {
+      case "FLOAT":
+        return Types.FLOAT;
+      case "DOUBLE":
+        return Types.DOUBLE;
+      case "INT":
+        return Types.INT;
+      case "BIGINT":
+        return Types.LONG;
       case "DATE":
         return Types.LOCAL_DATE;
       case "TIME":
@@ -71,7 +134,22 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   private static Object value(String type, int value) {
+    if (type.startsWith("DECIMAL"))
+      return new java.math.BigDecimal(
+          java.math.BigInteger.valueOf(value),
+          ((org.apache.flink.table.types.logical.DecimalType)
+                  org.apache.flink.table.types.logical.utils.LogicalTypeParser.parse(
+                      type, FlinkPrimitiveCollectionSqlHarnessTest.class.getClassLoader()))
+              .getScale());
     switch (type) {
+      case "FLOAT":
+        return (float) value;
+      case "DOUBLE":
+        return (double) value;
+      case "INT":
+        return value;
+      case "BIGINT":
+        return (long) value;
       case "DATE":
         return java.time.LocalDate.ofEpochDay(value);
       case "TIME":
@@ -117,6 +195,48 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     if (type.equals("TIME"))
       for (int millis : new int[] {1, 999, 1000, 12_345_678, 86_399_999})
         result.add(row(type, RowKind.INSERT, 2, millis));
+    if (type.equals("FLOAT") || type.equals("DOUBLE")) {
+      for (long bits :
+          new long[] {
+            0x8000000000000000L,
+            0L,
+            0x7ff8000000000001L,
+            0xfff8000000000002L,
+            0x7ff0000000000000L,
+            0xfff0000000000000L,
+            1L
+          }) {
+        Object edge =
+            type.equals("FLOAT")
+                ? (Object)
+                    Float.intBitsToFloat(
+                        bits == 0x7ff8000000000001L
+                            ? 0x7fc00001
+                            : bits == 0xfff8000000000002L
+                                ? 0xffc00002
+                                : Float.floatToRawIntBits((float) Double.longBitsToDouble(bits)))
+                : Double.longBitsToDouble(bits);
+        result.add(Row.ofKind(RowKind.INSERT, 3, edge));
+        result.add(Row.ofKind(RowKind.INSERT, 3, edge));
+        result.add(Row.ofKind(RowKind.DELETE, 3, edge));
+      }
+    }
+    if (type.startsWith("DECIMAL")) {
+      var decimal =
+          (org.apache.flink.table.types.logical.DecimalType)
+              org.apache.flink.table.types.logical.utils.LogicalTypeParser.parse(
+                  type, FlinkPrimitiveCollectionSqlHarnessTest.class.getClassLoader());
+      var largest =
+          new java.math.BigDecimal(
+              new java.math.BigInteger("9".repeat(decimal.getPrecision())), decimal.getScale());
+      for (var edge :
+          List.of(
+              largest, largest.negate(), java.math.BigDecimal.ZERO.setScale(decimal.getScale()))) {
+        result.add(Row.ofKind(RowKind.INSERT, 3, edge));
+        result.add(Row.ofKind(RowKind.INSERT, 3, edge));
+        result.add(Row.ofKind(RowKind.DELETE, 3, edge));
+      }
+    }
     return result;
   }
 
@@ -143,27 +263,20 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     env.getConfig().enableObjectReuse();
     var table = onePhase(StreamTableEnvironment.create(env));
     table.getConfig().set("streamfusion.transpose.batchRows", "3");
+    var inputRows = rows(type);
+    if (notNull) java.util.Collections.rotate(inputRows, -4);
     table.createTemporaryView(
         "src",
         ((StreamTableEnvironment) table)
             .fromChangelogStream(
-                tech.streamfusion.compat.FlinkTestSources.fromData(env, rows(type), rowType(type)),
+                tech.streamfusion.compat.FlinkTestSources.fromData(env, inputRows, rowType(type)),
                 schema(type, precision, notNull, notNullKey)));
     return table;
   }
 
   @ParameterizedTest
-  @CsvSource({
-    "COLLECT,DATE,1",
-    "COLLECT,DATE,3",
-    "COLLECT,TIME,1",
-    "COLLECT,TIME,3",
-    "ARRAY_AGG,DATE,1",
-    "ARRAY_AGG,DATE,3",
-    "ARRAY_AGG,TIME,1",
-    "ARRAY_AGG,TIME,3"
-  })
-  void nonNullTemporalSourceHintsRetainReleasedNullSlots(
+  @org.junit.jupiter.params.provider.MethodSource("nonNullSourceHintProfiles")
+  void nonNullCollectionSourceHintsRetainReleasedNullSlots(
       String function, String type, int parallelism) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     check(
@@ -220,18 +333,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @CsvSource({
-    "COLLECT,TINYINT",
-    "COLLECT,SMALLINT",
-    "ARRAY_AGG,TINYINT",
-    "ARRAY_AGG,SMALLINT",
-    "COLLECT,BOOLEAN",
-    "ARRAY_AGG,BOOLEAN",
-    "COLLECT,DATE",
-    "ARRAY_AGG,DATE",
-    "COLLECT,TIME",
-    "ARRAY_AGG,TIME"
-  })
+  @org.junit.jupiter.params.provider.MethodSource("collectionSignatures")
   void primitiveElementsRetainValuesNullsAndChangelog(String function, String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     check(
@@ -275,18 +377,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @CsvSource({
-    "COLLECT,TINYINT",
-    "COLLECT,SMALLINT",
-    "ARRAY_AGG,TINYINT",
-    "ARRAY_AGG,SMALLINT",
-    "COLLECT,BOOLEAN",
-    "ARRAY_AGG,BOOLEAN",
-    "COLLECT,DATE",
-    "ARRAY_AGG,DATE",
-    "COLLECT,TIME",
-    "ARRAY_AGG,TIME"
-  })
+  @org.junit.jupiter.params.provider.MethodSource("collectionSignatures")
   void emptyGlobalAndGroupedResultsRetainResolvedTypes(String function, String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     check(type, "SELECT " + function + "(v),COUNT(*) FROM src WHERE k<0", "NativeFilter");
@@ -294,8 +385,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(
-      strings = {"TINYINT", "SMALLINT", "BOOLEAN", "DATE", "TIME"})
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
   void nullablePrimitiveArraysRetainVerifiedRankAndUnnestConsumers(String type) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
     check(
@@ -313,8 +403,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @org.junit.jupiter.params.provider.ValueSource(
-      strings = {"TINYINT", "SMALLINT", "BOOLEAN", "DATE", "TIME"})
+  @org.junit.jupiter.params.provider.MethodSource("collectionElementTypes")
   void updatingMultisetPayloadExtensionRemainsDeferred(String type) {
     NativeFailureParity.run(
             () -> environment(type),
@@ -411,7 +500,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             ? "SELECT CAST(k AS STRING),ARRAY_AGG(v),CAST(ARRAY_AGG(v) AS STRING),"
                 + "ARRAY_AGG(COALESCE(k,0)),ARRAY_AGG(k),COUNT(*) FROM src GROUP BY k"
             : "SELECT CAST(k AS STRING),COLLECT(v),COLLECT(COALESCE(k,0)),COUNT(*) FROM src GROUP"
-                  + " BY k";
+                + " BY k";
     var runs = NativeFailureParity.run(() -> environment(type, 3, true), sql);
     if (type.equals("TIME"))
       runs.assertFailure(
@@ -421,8 +510,101 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     else runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
     assertTrue(
         runs.nativeRun().fallbackReasons().stream()
-            .anyMatch(reason -> reason.contains("temporal collection input materialization")),
+            .anyMatch(reason -> reason.contains("collection input materialization")),
         runs.toString());
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("collectionSignatures")
+  void collectionInputMaterializationPreservesTheReleasedPhysicalGetters(
+      String function, String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    var runs =
+        NativeFailureParity.run(
+            () -> environment(type, 3, true),
+            "SELECT CAST(k AS STRING),"
+                + function
+                + "(v),"
+                + function
+                + "(COALESCE(k,0)),COUNT(*) FROM src GROUP BY k");
+    if (runs.host().failure() == null) runs.assertSuccess(NativeFailureParity.Route.FALLBACK);
+    else
+      runs.assertFailure(
+          runs.host().rootCause().getClass(),
+          runs.host().phase(),
+          NativeFailureParity.Route.FALLBACK);
+    assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
+    assertTrue(
+        runs.nativeRun().fallbackReasons().stream()
+            .anyMatch(reason -> reason.contains("collection input materialization")),
+        runs.toString());
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.MethodSource("decimalBoundarySignatures")
+  void decimalCollectionMetadataKeepsPrecisionAndScaleBoundaries(String function, String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
+    check(
+        type,
+        "SELECT k," + function + "(v)," + function + "(DISTINCT v),COUNT(*) FROM src GROUP BY k",
+        "NativeColumnarGroupAggregate");
+  }
+
+  static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
+      decimalBoundarySignatures() {
+    return java.util.stream.Stream.of(
+            "DECIMAL(1,1)", "DECIMAL(18,18)", "DECIMAL(19,0)", "DECIMAL(38,0)", "DECIMAL(38,38)")
+        .flatMap(
+            type ->
+                java.util.stream.Stream.of("COLLECT", "ARRAY_AGG")
+                    .map(
+                        function ->
+                            org.junit.jupiter.params.provider.Arguments.of(function, type)));
+  }
+
+  @org.apache.flink.table.annotation.FunctionHint(
+      input = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<FLOAT>"),
+      output = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<BIGINT>"))
+  public static class FloatArrayBits extends org.apache.flink.table.functions.ScalarFunction {
+    public Long[] eval(Float[] input) {
+      if (input == null) return null;
+      Long[] bits = new Long[input.length];
+      for (int i = 0; i < input.length; i++)
+        bits[i] =
+            input[i] == null ? null : Integer.toUnsignedLong(Float.floatToRawIntBits(input[i]));
+      return bits;
+    }
+  }
+
+  @org.apache.flink.table.annotation.FunctionHint(
+      input = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<DOUBLE>"),
+      output = @org.apache.flink.table.annotation.DataTypeHint("ARRAY<BIGINT>"))
+  public static class DoubleArrayBits extends org.apache.flink.table.functions.ScalarFunction {
+    public Long[] eval(Double[] input) {
+      if (input == null) return null;
+      Long[] bits = new Long[input.length];
+      for (int i = 0; i < input.length; i++)
+        bits[i] = input[i] == null ? null : Double.doubleToRawLongBits(input[i]);
+      return bits;
+    }
+  }
+
+  @ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(strings = {"FLOAT", "DOUBLE"})
+  void floatingCollectionPayloadBitsSurviveTheRealCallbackBoundary(String type) {
+    tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
+    check(
+        () -> {
+          var table = environment(type);
+          table.createTemporarySystemFunction(
+              "collection_bits",
+              type.equals("FLOAT") ? FloatArrayBits.class : DoubleArrayBits.class);
+          return table;
+        },
+        "SELECT k,collection_bits(ARRAY_AGG(v)),collection_bits(ARRAY_AGG(DISTINCT v)) "
+            + "FROM src GROUP BY k",
+        "NativeColumnarGroupAggregate",
+        "NativeCalc");
   }
 
   @org.apache.flink.table.annotation.FunctionHint(
@@ -512,28 +694,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
   }
 
   @ParameterizedTest
-  @CsvSource({
-    "COLLECT,TINYINT,hashmap",
-    "COLLECT,SMALLINT,hashmap",
-    "ARRAY_AGG,TINYINT,hashmap",
-    "ARRAY_AGG,SMALLINT,hashmap",
-    "COLLECT,BOOLEAN,hashmap",
-    "ARRAY_AGG,BOOLEAN,hashmap",
-    "COLLECT,DATE,hashmap",
-    "ARRAY_AGG,DATE,hashmap",
-    "COLLECT,TIME,hashmap",
-    "ARRAY_AGG,TIME,hashmap",
-    "COLLECT,TINYINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "COLLECT,SMALLINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,TINYINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,SMALLINT,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "COLLECT,BOOLEAN,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,BOOLEAN,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "COLLECT,DATE,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,DATE,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "COLLECT,TIME,tech.streamfusion.state.RocksDBNativeStateBackendFactory",
-    "ARRAY_AGG,TIME,tech.streamfusion.state.RocksDBNativeStateBackendFactory"
-  })
+  @org.junit.jupiter.params.provider.MethodSource("collectionRecoveryProfiles")
   void primitiveValuesRestoreAcrossTwoNonemptyPrefixes(String function, String type, String backend)
       throws Exception {
     restore(function, type, backend, false);

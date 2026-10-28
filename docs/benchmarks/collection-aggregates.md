@@ -584,3 +584,90 @@ The final planner additionally guards NOT NULL temporal arguments whose input Ca
 a hidden NULL-slot payload. That guard does not affect this direct-source benchmark signature;
 the artifact retains the measured source hashes separately from the final guarded planner.
 Predicates reading those hints and non-identity input projections retain stock values/failures.
+
+
+## Shared typed collection state
+
+FLOAT, DOUBLE and DECIMAL use the same native counted/sequence state algorithm as the verified
+primitive families. This is a coverage and state-reuse change; type-specific codecs supply
+Arrow conversion and Java boxed hash/comparison rules. Existing BIGINT cases remain controls
+for the primitive path. Floating snapshots preserve original bits separately from canonical
+NaN membership, and decimal snapshots preserve unscaled i128 values plus precision/scale.
+Six actual previous-version snapshots round-trip byte for byte through the primitive codec.
+
+[All 480 complete jobs, paired controls, ranges, source/library hashes and native witnesses](results/shared-collection-state-2026-10-28.json)
+compare stock Flink, actual previous `08df65ab`, and the candidate. The previous production
+code remains unchanged; only the identical new benchmark fixture is copied. New DOUBLE and
+decimal cases require previous fallback; BIGINT controls require native work in both revisions.
+All 150 expected native grouped observations consume the configured input row count. No
+competing Java/native build or test was observed during any measured cohort.
+
+Runs use release+mimalloc, OpenJDK 17.0.20.1, an 8 GiB heap, one task, 1,024-row perimeter
+batches, Arrow IPC exchange, zero accumulator-cache entries, two warmups and three alternating
+measurements per engine. COLLECT uses 200,000 rows; ARRAY_AGG uses 50,000 and is N/A on 1.18.
+Source Rows retain a NULL every eighth input and eight seed values. DOUBLE includes both signed
+zeros and fractional finite values. Decimal values use the declared scale; wide values cross
+64-bit range rather than exercising only compact numbers. Timers retain submission/planning,
+JNI, keyed state, both row/Arrow transposes and a blackhole row sink; initial explain and cluster
+setup remain outside. Shapes are grouped in one JVM to reduce repeated harness startup.
+
+Median seconds (minimum–maximum). Previous values are fallback for typed suffixes and native
+for the unsuffixed BIGINT controls. Both revisions' separately paired stock controls remain in
+the artifact.
+
+| Release / shape / groups | Paired stock | Previous StreamFusion | Shared state |
+| --- | ---: | ---: | ---: |
+| 2.2 / collect_double / 64 | 0.447284 (0.401610–0.525167) | 0.392560 (0.325728–0.464752) | 0.523337 (0.519383–0.583228) |
+| 2.2 / collect_decimal8 / 64 | 0.344394 (0.321062–0.349272) | 0.323729 (0.323534–0.341190) | 0.398548 (0.398037–0.416726) |
+| 2.2 / collect_decimal38 / 64 | 0.391792 (0.385648–0.393729) | 0.381659 (0.375550–0.386933) | 0.464878 (0.454744–0.471193) |
+| 2.2 / collect / 64 | 0.322664 (0.322370–0.327527) | 0.388467 (0.386504–0.395182) | 0.374418 (0.369746–0.386592) |
+| 2.2 / collect_double / 4096 | 0.433333 (0.361008–0.554675) | 0.434747 (0.392506–0.445260) | 0.580404 (0.523591–0.604660) |
+| 2.2 / collect_decimal8 / 4096 | 0.381987 (0.380420–0.395484) | 0.430005 (0.372494–0.432357) | 0.433432 (0.432452–0.434152) |
+| 2.2 / collect_decimal38 / 4096 | 0.449747 (0.436651–0.492483) | 0.437825 (0.429764–0.449290) | 0.494580 (0.486635–0.509529) |
+| 2.2 / collect / 4096 | 0.364951 (0.352917–0.369280) | 0.411887 (0.395651–0.417218) | 0.382462 (0.376194–0.390176) |
+| 2.2 / array_agg_double / 64 | 0.856105 (0.675581–1.018688) | 0.705018 (0.639266–0.816004) | 0.292919 (0.272674–0.307491) |
+| 2.2 / array_agg_decimal8 / 64 | 0.652435 (0.577167–0.683721) | 0.688930 (0.652835–0.721043) | 0.376501 (0.373664–0.410876) |
+| 2.2 / array_agg_decimal38 / 64 | 0.771371 (0.745136–0.892780) | 0.669858 (0.663811–0.677173) | 0.885451 (0.878665–0.903415) |
+| 2.2 / array_agg / 64 | 0.893083 (0.676079–0.937198) | 0.275803 (0.270813–0.281863) | 0.332886 (0.332700–0.356742) |
+| 2.2 / array_agg_double / 4096 | 0.184740 (0.114726–0.229193) | 0.159584 (0.101255–0.211135) | 0.196963 (0.126161–0.208190) |
+| 2.2 / array_agg_decimal8 / 4096 | 0.100048 (0.099886–0.103969) | 0.102902 (0.099556–0.105887) | 0.118528 (0.108007–0.132616) |
+| 2.2 / array_agg_decimal38 / 4096 | 0.122930 (0.109792–0.154237) | 0.107983 (0.103341–0.132501) | 0.115434 (0.105437–0.118485) |
+| 2.2 / array_agg / 4096 | 0.106525 (0.105036–0.114197) | 0.110360 (0.104355–0.114469) | 0.099312 (0.096592–0.106316) |
+| 1.18 / collect_double / 64 | 0.396160 (0.347136–0.478559) | 0.332004 (0.295293–0.372231) | 0.512784 (0.493059–0.514627) |
+| 1.18 / collect_decimal8 / 64 | 0.337501 (0.317636–0.344608) | 0.313152 (0.312919–0.318677) | 0.390574 (0.387210–0.393046) |
+| 1.18 / collect_decimal38 / 64 | 0.400177 (0.391385–0.463686) | 0.412225 (0.405946–0.548915) | 0.477503 (0.471246–0.493955) |
+| 1.18 / collect / 64 | 0.317300 (0.312208–0.322978) | 0.381509 (0.373063–0.382106) | 0.369054 (0.365454–0.374415) |
+| 1.18 / collect_double / 4096 | 0.408462 (0.354855–0.513331) | 0.378956 (0.376450–0.381669) | 0.539213 (0.525692–0.591038) |
+| 1.18 / collect_decimal8 / 4096 | 0.382804 (0.382686–0.394632) | 0.388842 (0.377629–0.400135) | 0.459443 (0.419943–0.461260) |
+| 1.18 / collect_decimal38 / 4096 | 0.489093 (0.480898–0.499109) | 0.460348 (0.458972–0.466923) | 0.494902 (0.485132–0.506136) |
+| 1.18 / collect / 4096 | 0.361231 (0.344852–0.373138) | 0.389040 (0.381889–0.409086) | 0.381120 (0.372878–0.392389) |
+
+At 64 groups DOUBLE ARRAY_AGG improves paired stock by 2.92× and compact decimal arrays by
+1.73×. Wide decimal arrays take 0.885 s versus stock's 0.771 s. COLLECT remains slower than
+stock in the representative numeric cohorts. At 4096 groups, wide decimal COLLECT is close to
+stock on 1.18, while short-array medians vary around parity. These complete jobs establish
+workload costs, not universal sustained throughput. BIGINT ARRAY_AGG/64 takes 0.333 s versus
+previous native 0.276 s; its paired stock also moves from 0.707 to 0.893 s, so retain both
+absolute results rather than attributing the entire cross-JVM difference to codec dispatch.
+The other BIGINT controls are close to or faster than preceding native medians.
+
+The bounded investigation ends after two eight-second CPU captures, each preceded by one
+native warmup. DOUBLE COLLECT/4096 has 15,056 samples: grouped processing appears in 1,756,
+collection emission in 772 and typed collection updates in 72. Wide decimal ARRAY_AGG/64 has
+13,059 samples: grouped processing has 528, collection emission 480 and typed updates seven;
+decimal conversion appears in 1,729. `DecimalAccessor.fromInternalValue` has 1,677 inclusive
+samples, `DecimalData.fromBigDecimal` 1,681 and `DecimalData.copy` 518 self samples. BigInteger
+construction/precision checks and Arrow-array reconstruction are material Java boundary costs.
+Counts overlap, include all threads and include untimed cluster setup between jobs; they are
+CPU diagnosis, not isolated operation timings or allocation/copy-byte counts. No third capture
+or per-type tuning pass follows. Native emission and Java decimal reconstruction/copying remain
+in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239). Slower profiles ship as
+correctness-verified groundwork under the accepted collection timebox, without an acceleration
+claim.
+
+Reproduce with the complete-job command above, `-Djvmagg.cases=collect_double,collect_decimal8,collect_decimal38,collect`,
+200,000 rows, 64/4096 keys and eight values; use the `array_agg*` names and 50,000 rows for
+arrays. `collect_float`/`array_agg_float` and the `decimal20` suffix additionally support route
+smokes and focused checks. Previous runs set `-Djvmagg.expectNative=false` and
+`-Djvmagg.expectedNativeCases=collect` (or `array_agg`) to require fallback for new types while
+retaining native control evidence. Flink 1.18 adds its Maven profile and runs COLLECT only.
