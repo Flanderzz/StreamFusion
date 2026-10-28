@@ -21,6 +21,7 @@ pub(crate) mod decimal_round_text;
 pub(crate) mod decode;
 pub(crate) mod encode;
 pub(crate) mod from_unixtime;
+mod integral_round;
 pub(crate) mod json_quote;
 pub(crate) mod json_unquote;
 pub(crate) mod left;
@@ -289,6 +290,7 @@ pub(crate) fn function(op: i64, arity: usize) -> Option<ScalarUDF> {
         227 => collection_string::map_input(),
         228 => collection_string::extremum(true),
         229 => collection_string::extremum(false),
+        230 => integral_round::function(),
         232 => from_base64::function(),
         _ => return None,
     })
