@@ -736,10 +736,32 @@ signum, so integer return types and signed minima follow released Flink's Intege
 rather than a floating coercion. Existing FLOAT/DOUBLE signed-zero and NaN handling is retained.
 Direct narrow-integer SIGN keeps Flink's compilation failure. Unverified producers keep their
 generated SIGN program instead of exposing different arithmetic/overflow behavior by moving
-just the outer call into Rust. DECIMAL SIGN remains generated.
+just the outer call into Rust. DECIMAL SIGN has the separate verified replacement below.
 
 Release stock/previous/native controls, allocation diagnostics and complete-job limits are
 reported in [Integral SIGN](../benchmarks/scalar-functions.md#integral-sign).
+
+## Verified DECIMAL SIGN replacement
+
+DECIMAL SIGN operates directly on unscaled Arrow Decimal128 values. Ordinary `p > s`
+arrays use one typed unary pass, multiply the sign by `10^s` and share input validity;
+scalar arguments avoid materializing arrays. Noncompact `DECIMAL(p,p)` needs an additional
+validity rule: Flink's `fromBigDecimal` rejects nonzero +/-1 at the declared precision,
+so the kernel emits NULL for those inputs and retains scaled zero. Both paths preserve
+precision and scale, including sliced, empty and all-NULL arrays.
+
+Comet's typed unary signum supplies the array/scalar structure, but its floating Spark
+semantics do not define Flink decimal behavior. Arroyo uses DataFusion's default functions.
+The decimal value and metadata rules instead follow the released Flink `DecimalDataUtils.sign`
+implementation, verified independently on both supported lines. No JNI ownership change is
+needed. Admission is limited to direct/literal inputs, same-scale lossless widening and
+nested verified SIGN calls. Compact `DECIMAL(p,p)` remains generated because Flink can retain
+an out-of-precision value there; changing its intermediate boundary would break consumers.
+Arithmetic, rescaling and narrowing remain generated with their enclosing function.
+
+The [DECIMAL SIGN measurements](../benchmarks/scalar-functions.md#decimal-sign) compare stock,
+the actual preceding scalar callback and the typed kernel, and retain both transposes for
+the separate complete-job diagnostic.
 
 ## Integer FLOOR and CEIL without rounding kernels
 

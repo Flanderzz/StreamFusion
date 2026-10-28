@@ -1891,8 +1891,9 @@ final class RexExpression {
       if (!validateDecimalRoundingBoundary(call)) return false;
       return emitHostExpression(call, true);
     }
-    if (call.getKind() == SqlKind.CAST
-        && SqlTypeFamily.CHARACTER.contains(call.getType())
+    if ((call.getKind() == SqlKind.CAST && SqlTypeFamily.CHARACTER.contains(call.getType())
+            || call.getType().getSqlTypeName() == SqlTypeName.DECIMAL
+                && (call.getKind() == SqlKind.CASE || call.getOperator().getName().equals("IF")))
         && call.getOperands().stream().anyMatch(RexExpression::containsCompactDecimalSign)) {
       return emitHostExpression(call, true);
     }
@@ -2797,7 +2798,7 @@ final class RexExpression {
       return emitFloatUnary(call, 64);
     }
     if ("SIGN".equals(functionName)) {
-      if (nativeIntegralSign(call)) return emitBuiltinCall(call, 65);
+      if (nativeIntegralSign(call) || nativeDecimalSign(call)) return emitBuiltinCall(call, 65);
       return emitFloatUnary(call, 65);
     }
     if ("REPEAT".equals(functionName)) {
@@ -4319,7 +4320,7 @@ final class RexExpression {
       case "ABS":
         return exact && !nativeIntegralAbs(call) && !nativeDecimalAbs(call);
       case "SIGN":
-        return exact && !nativeIntegralSign(call);
+        return exact && !nativeIntegralSign(call) && !nativeDecimalSign(call);
       case "FLOOR":
       case "CEIL":
       case "CEILING":
@@ -4437,6 +4438,33 @@ final class RexExpression {
                 call.getType().getSqlTypeName())
             >= 0
         && nativeIntegralRoundingOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeDecimalSign(RexCall call) {
+    var type = call.getType();
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.SIGN
+        && call.getOperands().size() == 1
+        && type.getSqlTypeName() == SqlTypeName.DECIMAL
+        && (type.getPrecision() > type.getScale() || type.getPrecision() > 18)
+        && org.apache.calcite.sql.type.SqlTypeUtil.equalSansNullability(
+            type, call.getOperands().get(0).getType())
+        && nativeDecimalSignOperand(call.getOperands().get(0));
+  }
+
+  private static boolean nativeDecimalSignOperand(RexNode node) {
+    if (node instanceof RexInputRef || node instanceof RexLiteral) return true;
+    if (!(node instanceof RexCall)) return false;
+    RexCall call = (RexCall) node;
+    if (nativeDecimalSign(call)) return true;
+    if (call.getKind() != SqlKind.CAST || call.getOperands().size() != 1) return false;
+    var source = call.getOperands().get(0).getType();
+    var target = call.getType();
+    return source.getSqlTypeName() == SqlTypeName.DECIMAL
+        && target.getSqlTypeName() == SqlTypeName.DECIMAL
+        && source.getScale() == target.getScale()
+        && source.getPrecision() <= target.getPrecision()
+        && nativeDecimalSignOperand(call.getOperands().get(0));
   }
 
   private static boolean nativeIntegralSign(RexCall call) {

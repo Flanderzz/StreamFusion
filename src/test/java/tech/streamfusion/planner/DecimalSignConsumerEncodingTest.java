@@ -34,15 +34,29 @@ class DecimalSignConsumerEncodingTest {
   }
 
   @Test
-  void noncompactAndOrdinaryDecimalCastsRetainTheirExistingRoutes() throws Exception {
+  void compactSignSelectionsKeepReleasedBranchPrecisionValidation() throws Exception {
+    var decimal = types.createSqlType(SqlTypeName.DECIMAL, 1, 1);
+    var input = rex.makeInputRef(decimal, 0);
+    var condition = rex.makeInputRef(types.createSqlType(SqlTypeName.BOOLEAN), 1);
+    var sign = rex.makeCall(decimal, FlinkSqlOperatorTable.SIGN, List.of(input));
+    var selection = rex.makeCall(decimal, FlinkSqlOperatorTable.CASE,
+        List.of(condition, sign, input));
+    var encoded = encode(selection);
+    assertEquals(17, encoded.kinds()[0]);
+    assertTrue(encoded.jvmFunctionCalls().contains("SIGN"));
+    assertTrue(java.util.Arrays.stream(encoded.kinds()).skip(1).allMatch(kind -> kind == 0));
+  }
+
+  @Test
+  void verifiedDecimalSignsRunNativelyBeforeTheGeneratedCast() throws Exception {
     for (int[] pair : new int[][] {{18, 3}, {19, 19}, {38, 38}}) {
       var decimal = types.createSqlType(SqlTypeName.DECIMAL, pair[0], pair[1]);
       var sign = rex.makeCall(decimal, FlinkSqlOperatorTable.SIGN,
           List.of(rex.makeInputRef(decimal, 0)));
       var cast = rex.makeCall(types.createSqlType(SqlTypeName.VARCHAR, Integer.MAX_VALUE),
           FlinkSqlOperatorTable.CAST, List.of(sign));
-      assertArrayEquals(new int[] {17, 17, 0}, encode(cast).kinds());
-      assertArrayEquals(new int[] {17, 0}, encode(sign).kinds());
+      assertArrayEquals(new int[] {17, 6, 0}, encode(cast).kinds());
+      assertArrayEquals(new int[] {6, 0}, encode(sign).kinds());
     }
   }
 
