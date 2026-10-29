@@ -45,6 +45,14 @@ canceled, skipped or neutral workflows cannot satisfy the gates; missing or disa
 report action required. Existing GitHub rulesets stay in place. The reporter checks out only
 trusted default-branch code and never executes PR code with its write-capable token.
 
+Reporter-created checks carry a `streamfusion:fork-ci:v1:` external ID scoped to the PR,
+workflow and check name. The reporter searches every check-run page for that marker and the
+GitHub Actions application before updating a check. Ordinary workflow jobs and older unmarked
+mirrors are never adopted, even when their names match; a new marked mirror is created instead.
+If one PR cannot be refreshed, the reporter continues visiting the others, then fails the workflow
+with the affected PRs and API endpoints in its job summary. This does not change the exact-head
+test requirements or turn missing, failed or unmigrated fork results into success.
+
 Existing PRs need the new workflow configuration on their feature branch. For a PR whose head is
 already in a personal fork, rebase on current upstream `main`, enable Actions and push again. For
 a PR whose head is a canonical-repository branch, push the rebased branch to your fork and open a
