@@ -86,6 +86,12 @@ When native support changes, update those expectations alongside the upstream co
 These checks establish correct results and the expected execution path; throughput claims
 still require explicit release-mode comparisons against stock Flink and previous behavior.
 
+The nested-scalar release comparison pins a historical runtime whose Calc metrics use
+`NativeCalcExecNode[...]`. Its Rust arithmetic control must show positive consumed
+rows under that historical name. Candidate checks retain the detailed `NativeCalc(...)`
+name, and fallback controls require zero native operators. This compatibility changes
+only metric-name recognition; workloads, timing and the pinned baseline stay unchanged.
+
 ## Shared debug native libraries
 
 Ordinary CI builds all workspace debug native libraries once in a dedicated Ubuntu 24.04
@@ -109,8 +115,9 @@ workflow run and commit; it is not a release payload or a cache of test outcomes
 the independent debug library builds with one without changing test selection or test concurrency.
 Actual elapsed-time savings must be measured in GitHub Actions after this change runs.
 
+Iceberg Rust 0.11 requires Rust 1.95, so the shared toolchain is 1.95.0.
 All Rust workflows, including the consolidated JVM aggregate and nested-scalar diagnostics,
-use the local `setup-rust` action to install Rust 1.94.0 and remove the
+use the local `setup-rust` action to install Rust 1.95.0 and remove the
 runner image's unused `stable` toolchain before restoring caches. The Rust cache action hashes
 every installed compiler, not just the selected compiler. Previous logs showed the unused
 hosted toolchain changing from 1.99.0 to 1.99.1 while the project stayed on 1.94.0, splitting
