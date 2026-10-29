@@ -357,7 +357,7 @@ final class NativeFailureParity {
   }
 
   /** Prefer the originating operator frame; the collect API also transports remote task failures. */
-  private static Phase failurePhase(Throwable error, Phase observed) {
+  static Phase failurePhase(Throwable error, Phase observed) {
     List<Throwable> causes = new ArrayList<>();
     for (Throwable cause = error; cause != null; cause = cause.getCause()) causes.add(cause);
     for (int i = causes.size() - 1; i >= 0; i--) {
@@ -368,7 +368,9 @@ final class NativeFailureParity {
             || method.equals("createStreamOperator")) return Phase.INITIALIZATION;
         if (method.equals("processElement") || method.equals("processElement1")
             || method.equals("processElement2") || method.equals("endInput")
-            || method.equals("finishBundle")
+            || method.equals("finishBundle") || method.equals("flushBundle")
+            || (frame.getClassName().equals("tech.streamfusion.operator.BatchCoalescer")
+                && method.equals("flush"))
             || method.equals("eval") || method.equals("accumulate")) return Phase.ROW_EVALUATION;
       }
     }

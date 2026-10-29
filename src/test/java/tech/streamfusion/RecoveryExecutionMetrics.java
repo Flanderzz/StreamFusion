@@ -139,7 +139,13 @@ final class RecoveryExecutionMetrics implements AutoCloseable {
             : planOperator.replace("Aggregate", "Agg") + "ExecNode";
     long consumed =
         observations.stream()
-            .filter(row -> row.get("operator").toString().startsWith(metricOperator))
+            .filter(
+                row -> {
+                  String operator = row.get("operator").toString();
+                  return operator.startsWith(metricOperator)
+                      || (planOperator.equals("NativeCalc")
+                          && operator.startsWith("NativeCalcExecNode["));
+                })
             .mapToLong(row -> ((Number) row.get("recordsIn")).longValue())
             .sum();
     org.junit.jupiter.api.Assertions.assertTrue(
