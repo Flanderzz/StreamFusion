@@ -432,12 +432,23 @@ final class CollectionValueIdentity {
   private static boolean acceptsGeneratedCollections(RelNode node) {
     return node instanceof StreamPhysicalNativeJvmGroup
             && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
-        || node instanceof StreamPhysicalNativeColumnarGroupAggregate
-            && ((StreamPhysicalNativeColumnarGroupAggregate) node).requiresCollectionInputs()
-        || node instanceof StreamPhysicalNativeColumnarLocalGroupAggregate
-            && ((StreamPhysicalNativeColumnarLocalGroupAggregate) node).preservesCollections()
         || node instanceof ColumnarInput
             && ((ColumnarInput) node).acceptsCollectionRepresentation();
+  }
+
+  static boolean scalarAggregateInputs(
+      RelNode input,
+      int[] keys,
+      int[] values,
+      int[] kinds,
+      java.util.function.IntPredicate nullOnly) {
+    for (int key : keys)
+      if (sensitive(input.getRowType().getFieldList().get(key).getType())) return false;
+    for (int i = 0; i < values.length; i++)
+      if (values[i] >= 0
+          && sensitive(input.getRowType().getFieldList().get(values[i]).getType())
+          && !nullOnly.test(kinds[i])) return false;
+    return true;
   }
 
   static boolean crossesBoundary(RelNode root, boolean finalOutput) {

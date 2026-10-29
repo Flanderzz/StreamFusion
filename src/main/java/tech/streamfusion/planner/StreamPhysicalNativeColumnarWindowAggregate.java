@@ -105,6 +105,12 @@ public class StreamPhysicalNativeColumnarWindowAggregate extends StreamPhysicalN
   }
 
   @Override
+  public boolean acceptsCollectionRepresentation() {
+    return CollectionValueIdentity.scalarAggregateInputs(
+        getInput(), keyColumns, valueColumns, aggregateKinds, WindowAggregateMatcher::nullOnlyInput);
+  }
+
+  @Override
   public boolean requireWatermark() {
     return !proctime; // proctime windows fire on a processing-time timer, not a watermark
   }

@@ -3004,3 +3004,13 @@ results, so scalar-result aggregates do not accidentally reject their represente
 Representation classification uses each aggregate's base kind independently of its
 DISTINCT retention/append flags. Retained DISTINCT-array inputs and DISTINCT COLLECT
 outputs keep the same verified layout contracts as their unflagged forms.
+
+A scalar-only group may ignore unused represented collection columns. The boundary
+check inspects the group's actual key and value references, so COUNT(*) can consume
+a nested table-function stream without retaining or interpreting its complex values.
+This does not admit an aggregate that reads an unverified complex argument.
+
+The columnar input capability also covers aggregates that inspect only a represented
+argument's parent NULL bit, such as COUNT(v). The shared check uses actual group/value
+references and aggregate kinds; aggregates that interpret complex values still require
+their existing verified representation contract.

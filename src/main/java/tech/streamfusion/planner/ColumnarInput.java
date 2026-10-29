@@ -8,7 +8,7 @@ package tech.streamfusion.planner;
  * consumer expects.
  */
 public interface ColumnarInput {
-  /** Whether this sink canonicalizes the core's represented collection values for its wire format. */
+  /** Whether this consumer accepts represented collection layouts on its verified inputs. */
   default boolean acceptsCollectionRepresentation() {
     return false;
   }

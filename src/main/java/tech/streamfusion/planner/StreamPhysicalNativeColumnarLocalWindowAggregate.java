@@ -60,6 +60,12 @@ public class StreamPhysicalNativeColumnarLocalWindowAggregate extends StreamPhys
   }
 
   @Override
+  public boolean acceptsCollectionRepresentation() {
+    return CollectionValueIdentity.scalarAggregateInputs(
+        getInput(), keyColumns, valueColumns, aggregateKinds, WindowAggregateMatcher::nullOnlyInput);
+  }
+
+  @Override
   public boolean requireWatermark() {
     return true;
   }

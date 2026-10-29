@@ -979,3 +979,8 @@ slices, ownership and an ordinary ROW control. The unchanged released COLLECT
 fixtures pass 7/6 cases and UNNEST passes four cases per line with positive
 native consumption contracts. Repeated heap/RocksDB checkpoint recovery remains
 part of the 2.2 string suite. SPLIT and ARRAY_AGG are explicitly N/A on 1.18.
+
+The nested table-function harness also verifies generated UNNEST, CARDINALITY and
+COUNT consumers over ARRAY/ROW and MAP/ARRAY results. The preserving transpose layout
+keeps these existing scalar consumers native with consumed table-function work and
+matching declared types; unverified retained complex-state consumers remain guarded.

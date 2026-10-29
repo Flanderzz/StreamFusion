@@ -1750,3 +1750,12 @@ checkpoint I/O, periodic-watermark processing and full-job boundaries are not ti
 
 The matching high-cardinality Flink 1.18 HOP cohort measures 30.91 ms Rust versus 152.73 ms
 stock, with complete output/RowKind parity. Every warmup and stock cohort is retained in the artifact.
+
+The generated-collection boundary uses the shared columnar input capability for window
+aggregates. COUNT(v) reads only the parent validity bit, so represented ARRAY/ROW/MAP
+inputs keep their existing COUNT contract through window exchanges and local folds.
+Other aggregate arguments and grouping keys retain their verified type requirements.
+
+The capability check uses the window runtime's own COUNT kinds, including signed
+retract-count and live-count state. Those codes differ from ordinary group aggregate
+kinds; their validity-only input contract is shared without conflating the two encodings.
