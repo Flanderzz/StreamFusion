@@ -44,6 +44,34 @@ class NativeFailureParityTest {
   }
 
   @Test
+  void coalescedInputEvaluationIsNotACollectorOrCheckpointStorageError() {
+    var evaluation = new IllegalStateException("invalid aggregate input");
+    evaluation.setStackTrace(
+        new StackTraceElement[] {
+          new StackTraceElement(
+              "tech.streamfusion.Native", "updateGroupAggregator", "Native.java", -2),
+          new StackTraceElement(
+              "tech.streamfusion.operator.BatchCoalescer", "flush", "BatchCoalescer.java", 118)
+        });
+    assertEquals(
+        NativeFailureParity.Phase.ROW_EVALUATION,
+        NativeFailureParity.failurePhase(
+            new IOException("could not perform checkpoint", evaluation),
+            NativeFailureParity.Phase.COLLECTION));
+
+    for (String owner : List.of("ResultCollector", "CheckpointStorage")) {
+      var io = new IOException("flush failed");
+      io.setStackTrace(
+          new StackTraceElement[] {
+            new StackTraceElement(owner, "flush", owner + ".java", 1)
+          });
+      assertEquals(
+          NativeFailureParity.Phase.COLLECTION,
+          NativeFailureParity.failurePhase(io, NativeFailureParity.Phase.COLLECTION));
+    }
+  }
+
+  @Test
   void bundleClassificationDoesNotHideInitializationOrLocalCollectionFailures() {
     var initialization = new IllegalStateException("initialization failed");
     initialization.setStackTrace(

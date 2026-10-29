@@ -350,6 +350,11 @@ remains the observed phase only when an originating operator frame cannot establ
 Native bundle flushes triggered by watermarks, pre-barrier checkpoints, and operator finish
 retain that evaluation phase; initialization failures keep their distinct classification.
 Repeated-recovery SINGLE_VALUE checks retain the exact released message and native routing.
+Input coalescing can also evaluate buffered aggregate rows from `BatchCoalescer.flush`
+before a checkpoint, watermark, or finish, or from its latency timer. That exact class/method
+pair identifies row evaluation; arbitrary collector and checkpoint-storage `flush` methods
+do not. A held-input SINGLE_VALUE recovery fixture requires this coalescer frame and the
+released cardinality error after two restores on both memory and native RocksDB backends.
 
 The grouped-value and floating aggregate regression suites pass 170 checks on Flink 2.2;
 Flink 1.18 passes 134 with 36 declared host-capability skips. Redundant fallback assertions

@@ -369,6 +369,8 @@ final class NativeFailureParity {
         if (method.equals("processElement") || method.equals("processElement1")
             || method.equals("processElement2") || method.equals("endInput")
             || method.equals("finishBundle") || method.equals("flushBundle")
+            || (frame.getClassName().equals("tech.streamfusion.operator.BatchCoalescer")
+                && method.equals("flush"))
             || method.equals("eval") || method.equals("accumulate")) return Phase.ROW_EVALUATION;
       }
     }
