@@ -55,9 +55,25 @@ final class GroupAggregateMatcher {
       if (collectionKind(call) >= 0) {
         if (!rustCollectionsEnabled()
             || !JvmGroupAggregateMatcher.enabledAggregate(agg)
-            || !JvmGroupAggregateMatcher.matches(agg)
+            || !JvmGroupAggregateMatcher.matchesContext(agg)
+            || !inputType.getFieldList().stream()
+                .allMatch(
+                    field ->
+                        JvmFunctionTypes.scalar(field.getType())
+                            || collectionArrayInput(field.getType()))
             || !JvmGroupAggregateMatcher.verifiedCollectionAggregate(agg, call))
           return "GROUP BY: unverified native collection signature or context";
+        var collectionElement =
+            inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName();
+        if (RexExpression.collectionAggregateElement(
+                inputType.getFieldList().get(call.getArgList().get(0)).getType()))
+          return "GROUP BY: nested collections retain the released JVM value contract";
+        if (collectionElement == SqlTypeName.BINARY || collectionElement == SqlTypeName.VARBINARY)
+          return "GROUP BY: binary collections retain the JVM object-identity contract";
+        if (collectionKind(call) <= 49
+            && isStringType(
+                inputType.getFieldList().get(call.getArgList().get(0)).getType().getSqlTypeName()))
+          return "GROUP BY: character COLLECT retains the JVM map-identity contract";
         continue;
       }
       if (call.isApproximate()) {
@@ -180,6 +196,18 @@ final class GroupAggregateMatcher {
       }
     }
     return null;
+  }
+
+  private static boolean collectionArrayInput(RelDataType type) {
+    if (type.getSqlTypeName() != SqlTypeName.ARRAY || !type.getComponentType().isNullable())
+      return false;
+    RelDataType element = type.getComponentType();
+    return collectionArrayInput(element)
+        || isRunningType(element.getSqlTypeName())
+        || element.getSqlTypeName() == SqlTypeName.DECIMAL
+        || element.getSqlTypeName() == SqlTypeName.BOOLEAN
+        || element.getSqlTypeName() == SqlTypeName.DATE
+        || element.getSqlTypeName() == SqlTypeName.TIME;
   }
 
   static boolean orderedValueType(SqlTypeName type) {

@@ -39,26 +39,37 @@ class JvmAggregateBenchmark {
     for (String shape : System.getProperty("jvmagg.cases", "udaf,builtin").split(",")) {
       boolean expectedUdf = expectedAllNative || expectedNativeCases.contains(shape);
       boolean legacy = shape.startsWith("legacy_");
-      boolean expanded = shape.startsWith("expanded_");
+      boolean nullableExpanded = shape.startsWith("nullable_expanded_");
+      boolean expanded = nullableExpanded || shape.startsWith("expanded_");
       String collectionShape = collectionShape(shape);
+      boolean stringElement =
+          collectionShape.endsWith("_string") || collectionShape.endsWith("_char");
+      boolean binaryElement = collectionShape.endsWith("_binary");
+      boolean nestedElement = collectionShape.contains("_nested_");
       org.apache.flink.api.common.typeinfo.TypeInformation<?> inputValueType =
-          collectionShape.contains("_timestamp")
-              ? Types.LOCAL_DATE_TIME
-              : collectionShape.contains("_ltz")
-                  ? Types.INSTANT
-                  : collectionShape.endsWith("_interval_month")
-                      ? Types.INT
-                      : collectionShape.endsWith("_date")
-                          ? Types.LOCAL_DATE
-                          : collectionShape.endsWith("_time")
-                              ? Types.LOCAL_TIME
-                              : collectionShape.endsWith("_float")
-                                  ? Types.FLOAT
-                                  : collectionShape.endsWith("_double")
-                                      ? Types.DOUBLE
-                                      : collectionShape.contains("_decimal")
-                                          ? Types.BIG_DEC
-                                          : Types.LONG;
+          collectionShape.endsWith("_nested_multiset")
+              ? org.apache.flink.table.runtime.typeutils.ExternalTypeInfo.of(
+                  org.apache.flink.table.api.DataTypes.MULTISET(org.apache.flink.table.api.DataTypes.STRING()))
+              : collectionShape.endsWith("_nested_map") ? Types.MAP(Types.STRING, Types.LONG)
+              : binaryElement ? Types.PRIMITIVE_ARRAY(Types.BYTE) : stringElement
+              ? Types.STRING
+              : collectionShape.contains("_timestamp")
+                  ? Types.LOCAL_DATE_TIME
+                  : collectionShape.contains("_ltz")
+                      ? Types.INSTANT
+                      : collectionShape.endsWith("_interval_month")
+                          ? Types.INT
+                          : collectionShape.endsWith("_date")
+                              ? Types.LOCAL_DATE
+                              : collectionShape.endsWith("_time")
+                                  ? Types.LOCAL_TIME
+                                  : collectionShape.endsWith("_float")
+                                      ? Types.FLOAT
+                                      : collectionShape.endsWith("_double")
+                                          ? Types.DOUBLE
+                                          : collectionShape.contains("_decimal")
+                                              ? Types.BIG_DEC
+                                              : Types.LONG;
       boolean udf = shape.equals("udaf");
       boolean minTimestamp = shape.equals("min_timestamp3");
       boolean collect = collectCase(shape);
@@ -66,24 +77,30 @@ class JvmAggregateBenchmark {
       boolean jvm = udf || collect || arrayAgg;
       String groupOperator =
           (collect || arrayAgg)
+                  && !binaryElement
+                  && !nestedElement
+                  && !(collect && stringElement)
                   && Boolean.parseBoolean(
                       System.getProperty(
                           "streamfusion.experimental.rustCollectionAggregates", "true"))
               ? "NativeColumnarGroupAggregate"
               : jvm ? "NativeJvmGroup" : "NativeColumnarGroupAggregate";
       String argument =
-          collectionShape.equals("array_agg_not_null")
-              ? "COALESCE(v,CAST(0 AS BIGINT))"
-              : collectionShape.endsWith("_boolean")
-                  ? "(v>3)"
-                  : collectionShape.endsWith("_tinyint")
-                      ? "CAST(v AS TINYINT)"
-                      : collectionShape.endsWith("_smallint")
-                          ? "CAST(v AS SMALLINT)"
-                          : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
+          collectionShape.endsWith("_fixed_binary") ? "CAST(v AS BINARY(8))" : collectionShape.endsWith("_char")
+              ? "CAST(v AS CHAR(8))"
+              : collectionShape.equals("array_agg_not_null")
+                  ? "COALESCE(v,CAST(0 AS BIGINT))"
+                  : collectionShape.endsWith("_boolean")
+                      ? "(v>3)"
+                      : collectionShape.endsWith("_tinyint")
+                          ? "CAST(v AS TINYINT)"
+                          : collectionShape.endsWith("_smallint")
+                              ? "CAST(v AS SMALLINT)"
+                              : collectionShape.equals("array_agg_int") ? "CAST(v AS INT)" : "v";
       if (expanded) {
         assertTrue(arrayAgg, "Expansion requires an ARRAY_AGG case");
-        argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
+        if (!nullableExpanded)
+          argument = "COALESCE(" + argument + "," + collectionZero(collectionShape) + ")";
       }
       if (legacy && !collect && !arrayAgg)
         throw new IllegalArgumentException("Legacy collection case required: " + shape);
@@ -91,14 +108,13 @@ class JvmAggregateBenchmark {
           "SELECT k, "
               + (udf
                   ? "test_aggregate"
-                  : collect
-                      ? "COLLECT"
-                      : arrayAgg ? "ARRAY_AGG" : minTimestamp ? "MIN" : "SUM")
+                  : collect ? "COLLECT" : arrayAgg ? "ARRAY_AGG" : minTimestamp ? "MIN" : "SUM")
               + "("
               + argument
               + ")"
               + (expanded ? " AS a" : "")
               + (minTimestamp ? ",COUNT(*)" : "")
+              + (binaryElement || nestedElement ? ",(SUM(k)+1) AS score" : "")
               + " FROM src GROUP BY k";
       if (expanded) sql = "SELECT k,x FROM (" + sql + ") s CROSS JOIN UNNEST(a) AS u(x)";
       double[][] elapsed = new double[2][runs];
@@ -117,6 +133,20 @@ class JvmAggregateBenchmark {
             var sequence = env.fromSequence(0, Math.max(0, rows - 1)).filter(i -> i < rows);
             org.apache.flink.streaming.api.datastream.DataStream<Row> source;
             switch (keyType) {
+              case "array_double":
+                source =
+                    sequence
+                        .map(
+                            i ->
+                                Row.of(
+                                    new Double[] {(double) (i % keys), null},
+                                    inputValue(i, keys, values, collectionShape)))
+                        .returns(
+                            Types.ROW_NAMED(
+                                new String[] {"k", "v"},
+                                Types.OBJECT_ARRAY(Types.DOUBLE),
+                                inputValueType));
+                break;
               case "string":
                 source =
                     sequence
@@ -248,9 +278,12 @@ class JvmAggregateBenchmark {
                   "fallback control executed native operators");
             if (engine == 1 && (!jvm || expectedUdf)) {
               RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), groupOperator);
+              if (binaryElement || nestedElement)
+                RecoveryExecutionMetrics.assertConsumed(metrics.nativeOperators(), "NativeCalc");
               if (expanded)
                 RecoveryExecutionMetrics.assertConsumed(
-                    metrics.nativeOperators(), "NativeGeneratedUnnest");
+                    metrics.nativeOperators(),
+                    nullableExpanded ? "NativeUnnest" : "NativeGeneratedUnnest");
               for (var observation : metrics.nativeOperators())
                 System.out.printf(
                     Locale.ROOT,
@@ -311,6 +344,26 @@ class JvmAggregateBenchmark {
   private static Object inputValue(long row, int keys, int values, String shape) {
     Long value = value(row, keys, values);
     if (value == null) return null;
+    if (shape.endsWith("_nested_multiset")) {
+      var map = new java.util.LinkedHashMap<String, Integer>();
+      map.put("v" + value, value.intValue());
+      map.put(null, 3);
+      return map;
+    }
+    if (shape.endsWith("_nested_map")) {
+      var map = new java.util.LinkedHashMap<String, Long>();
+      map.put("v" + value, value);
+      map.put(null, null);
+      return map;
+    }
+    if (shape.endsWith("_binary")) {
+      byte[] bytes = new byte[40];
+      java.util.Arrays.fill(bytes, (byte) 0x78);
+      bytes[0] = value.byteValue(); bytes[1] = (byte) 0xff; bytes[2] = 0;
+      return bytes;
+    }
+    if (shape.endsWith("_string") || shape.endsWith("_char"))
+      return "v" + value + ":é🙂" + "x".repeat(32);
     if (shape.endsWith("_float") || shape.endsWith("_double")) {
       double number = value == 0 ? -0.0 : value == 1 ? 0.0 : value - 1.5;
       return shape.endsWith("_float")
@@ -380,6 +433,12 @@ class JvmAggregateBenchmark {
   private static boolean collectCase(String shape) {
     return java.util.Set.of(
             "collect",
+            "collect_nested_multiset",
+            "collect_nested_map",
+            "collect_binary",
+            "collect_fixed_binary",
+            "collect_string",
+            "collect_char",
             "collect_tinyint",
             "collect_smallint",
             "collect_boolean",
@@ -404,6 +463,12 @@ class JvmAggregateBenchmark {
   private static boolean arrayAggCase(String shape) {
     return java.util.Set.of(
             "array_agg",
+            "array_agg_nested_multiset",
+            "array_agg_nested_map",
+            "array_agg_binary",
+            "array_agg_fixed_binary",
+            "array_agg_string",
+            "array_agg_char",
             "array_agg_int",
             "array_agg_tinyint",
             "array_agg_smallint",
@@ -428,6 +493,8 @@ class JvmAggregateBenchmark {
   }
 
   private static String collectionZero(String shape) {
+    if (shape.endsWith("_string")) return "''";
+    if (shape.endsWith("_char")) return "CAST('' AS CHAR(8))";
     if (shape.contains("_timestamp") || shape.contains("_ltz"))
       return "CAST(TIMESTAMP '1970-01-01 00:00:00' AS "
           + declaredCollectionType(shape).getLogicalType().asSerializableString()
@@ -457,6 +524,8 @@ class JvmAggregateBenchmark {
   }
 
   private static String collectionShape(String shape) {
+    if (shape.startsWith("nullable_expanded_"))
+      return shape.substring("nullable_expanded_".length());
     return shape.startsWith("legacy_")
         ? shape.substring("legacy_".length())
         : shape.startsWith("expanded_") ? shape.substring("expanded_".length()) : shape;

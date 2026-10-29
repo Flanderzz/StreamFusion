@@ -1185,7 +1185,9 @@ query back via the [all-or-nothing island](index.md#the-all-or-nothing-island) r
   (`COUNT(DISTINCT x)` keeps a per-key
   value set; `SUM(DISTINCT x)` adds a running sum folded as values enter/leave it; `MIN`/`MAX
   (DISTINCT)` run as their plain, multiplicity-blind forms.)
-- COLLECT/ARRAY_AGG with unverified element types, non-scalar inputs or character aggregate results; ARRAY_AGG on Flink 1.18.
+- COLLECT/ARRAY_AGG with unverified element types or input schemas outside the scalar and
+  [verified array-input](#collection-aggregate-array-inputs) boundary, or unverified character scalar coresults;
+  ARRAY_AGG on Flink 1.18.
 - An approximate aggregate.
 - FIRST_VALUE/LAST_VALUE/SINGLE_VALUE over a value type outside the single-phase list above,
   or with more than one argument.
@@ -2505,8 +2507,9 @@ properties to `false` and `true` respectively.
 
 COLLECT over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN uses the columnar Rust group aggregate.
 A counted multiset preserves Flink's signed 32-bit counts and Java map iteration behavior,
-including the fresh result-map materialization used by the released MapView. Input fields remain scalar, and aggregate result fields cannot
-contain character values. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
+including the fresh result-map materialization used by the released MapView. Input fields may be scalar or use the verified
+[numeric/temporal array input boundary](#collection-aggregate-array-inputs), and character collection results use the [verified string boundary](#string-collection-elements).
+Character scalar coresults retain their existing guards. STRING/VARCHAR and CHAR grouping keys use the verified serialized-key
 boundary [described below](#character-grouping-keys). DATE and TIME use the
 [verified temporal extension](#date-and-time-collection-elements). FLOAT, DOUBLE and DECIMAL
 use the [same typed native state](#shared-native-collection-elements). Other COLLECT value types
@@ -2529,9 +2532,11 @@ formats; automatic migration is not supported. Groups containing functions outsi
 aggregate matcher retain their verified JVM route. These switches do not broaden admission. Mini-batching, async state, approximate/ordered calls and unverified function
 specialization retain fallback. A COLLECT result may reach a final row sink or a verified
 collection-preserving Calc. Unverified state, ordering, exchange and native-writer boundaries
-retain the existing collection guards. Direct COLLECT with SUM/MIN/MAX/COUNT or AVG is native;
-when the host shares SUM/AVG/COUNT through an outer arithmetic projection that cannot preserve
-the MULTISET representation, the existing whole-plan fallback remains on both state routes.
+retain the existing collection guards. Direct COLLECT with SUM/MIN/MAX/COUNT or AVG is native.
+A shared AVG arithmetic projection also preserves the numeric COLLECT result on both the
+managed JVM and Rust collection routes: the transition pass upgrades any transpose already
+inserted by pruning to the consumer's preserving layout. The original COLLECT harness checks
+resolved types, per-key ordered changelogs and consumed group/projection work for this case.
 Updating retained MAP/MULTISET payloads remain deferred
 in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
@@ -2543,8 +2548,10 @@ The optimization investigation is limited to two profiling/optimization passes p
 
 On released Flink 2.2.1, ARRAY_AGG over TINYINT/SMALLINT/INT/BIGINT and BOOLEAN uses the same
 single-phase Rust group aggregate with sequence state. Only the exact builtin operator is recognized; user-defined functions with that name
-retain their existing signature gates. Scalar inputs and non-character aggregate result fields
-are required. Character grouping keys use the verified serialized-key boundary below. Other
+retain their existing signature gates. Inputs follow the scalar or native
+[array-input boundary](#collection-aggregate-array-inputs); character collection outputs use the
+[verified string boundary](#string-collection-elements), while character scalar coresults remain guarded.
+Character grouping keys use the verified serialized-key boundary below. Other
 element types outside the [DATE/TIME](#date-and-time-collection-elements) and
 [floating/decimal](#shared-native-collection-elements) families, and nested collection results
 retain fallback. ARRAY_AGG is
@@ -2575,7 +2582,8 @@ stops after two profiling/optimization passes; slower results use the accepted c
 
 Verified COLLECT and, on Flink 2.2, ARRAY_AGG admit STRING/VARCHAR and CHAR grouping keys.
 The character-field check applies to aggregate results rather than serialized grouping fields;
-character aggregate values/co-results and richer nested results retain fallback. Existing
+character collection values use the [verified extension](#string-collection-elements);
+character scalar coresults and richer nested results retain fallback. Existing
 synchronous/single-phase and representation-consumer guards still apply.
 
 Grouping retains the released BinaryRow key encoding with native keyed state. Key serialization fixes
@@ -2597,7 +2605,7 @@ in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) stays d
 TINYINT and SMALLINT join INT/BIGINT in the verified COLLECT and Flink 2.2 ARRAY_AGG
 boundary. Rust collection state retains typed byte/short values and existing Arrow batch
 input/output. The key codec and Arrow ownership boundary are shared with the other native aggregates. All
-scalar-input, non-character aggregate-result and representation-consumer gates above remain.
+input, verified collection result, scalar coresult and representation-consumer gates above remain.
 ARRAY_AGG stays explicitly N/A on released Flink 1.18.1.
 
 Direct typed runtime sources verify both signed limits, duplicates, NULL/all-NULL groups,
@@ -2616,7 +2624,7 @@ passes; slower results use the accepted collection tradeoff without an accelerat
 Verified integer/BOOLEAN COLLECT and Flink 2.2 ARRAY_AGG results can leave a direct single-phase
 group through a legacy row sink, including the Java `toRetractStream` API. The 2.2 adapter
 qualifies only direct groups accepted by the existing scalar-input, verified-element and
-non-character aggregate-result gates. A final Calc, unverified represented consumer or
+verified collection result and scalar coresult gates. A final Calc, unverified represented consumer or
 unsupported aggregate shape keeps its existing fallback. Flink 1.18 retains its prepared
 legacy sink path; ARRAY_AGG remains N/A there.
 
@@ -2642,7 +2650,8 @@ external row conversion/collection, state and both transposes, with at most two 
 
 BOOLEAN joins the verified integer elements for COLLECT on both supported releases and
 ARRAY_AGG on Flink 2.2. Rust collection state retains true/false values, NULLs,
-multiplicities and array arrival order through the existing JNI/Arrow boundary. Scalar inputs, non-character aggregate results and the existing represented
+multiplicities and array arrival order through the existing JNI/Arrow boundary. Verified scalar/array inputs,
+verified collection outputs, non-character scalar coresults and the existing represented
 consumer gates still apply. ARRAY_AGG remains N/A on Flink 1.18.
 
 Direct BOOLEAN sources exercise duplicates, all-NULL groups, DISTINCT/FILTER, NOT NULL
@@ -2711,8 +2720,8 @@ and generated JVM argument batches. Mixed primitive arrays, aliases, repeated co
 formatting, reverse/distinct/slice, CASE and retained/shared Java callbacks are verified.
 The explicit legacy JVM aggregate handler uses the same represented array boundary. Verified
 scalar arrays feed the released generated UNNEST boundary as described below. Unverified
-stateful/order and native-writer consumers still retain planning-time fallback. Existing scalar-input, non-character aggregate-output, synchronous
-single-phase, representation-consumer and native-writer gates remain. This does not extend
+stateful/order and native-writer consumers still retain planning-time fallback. Existing input/result admission, synchronous single-phase, representation-consumer and
+native-writer gates remain. This does not extend
 updating retained
 MAP/MULTISET payloads deferred in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437).
 
@@ -2751,7 +2760,7 @@ Direct input hints, nullable-input COALESCE and key-only identity filters retain
 routes. Stateful/order consumers of nullable primitive arrays retain their existing boundary;
 NOT NULL-element scalar arrays use the verified generated UNNEST boundary below; unverified
 stateful/order and native-writer consumers, and other sensitive results, retain their guards.
-Character aggregate-result fields, non-scalar input schemas, asynchronous/mini-batch or multi-phase
+Character aggregate-result fields, input schemas outside the verified scalar/array boundary, asynchronous/mini-batch or multi-phase
 collection aggregation, unverified element families and nested collection results remain fallback.
 The updating MAP/MULTISET extension in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
 remains deferred.
@@ -2770,8 +2779,9 @@ profiles remain documented groundwork, not a universal acceleration claim.
 On Flink 2.2, NOT NULL-element ARRAY_AGG results over every verified scalar element family
 can feed the existing Arrow-input/Arrow-output generated UNNEST operator. The same structural
 producer check covers native collection state and the explicit legacy JVM aggregate handler:
-all input fields must be ordinary nonsensitive scalars or arrays whose element representation
-is nonsensitive. It adds no per-type list and retains the aggregate's generic array-copy
+all input fields must be verified scalars or scalar arrays without ROW/MAP/MULTISET payloads.
+Character fields use the preserved boundary linked below. It adds no per-type list and retains
+the aggregate's generic array-copy
 metadata through the existing generated argument frame. Nullable arrays retain ordinary Arrow
 UNNEST; mixed nullable/NOT NULL scalar arrays use the preserving consumer when necessary.
 
@@ -2785,9 +2795,10 @@ nonempty prefixes and require consumed group and generated-expansion work.
 
 This reuses the released Java correlate generator inside the columnar operator. Collection
 state remains native; expansion is JVM work and is not described as a Rust UNNEST kernel.
-ARRAY_AGG is N/A on 1.18. Character grouping keys, sensitive character/nested arrays,
-MAP/MULTISET-bearing input rows and unverified stateful/order and writer consumers retain
-fallback. This does not extend #437.
+ARRAY_AGG is N/A on 1.18. Character keys and scalar string arrays now use the
+[preserved expansion boundary](unnest-correlate.md#preserved-scalar-array-expansion).
+Nested character arrays, MAP/MULTISET-bearing input rows and unverified stateful/order and
+writer consumers retain fallback. This does not extend #437.
 
 
 The focused consolidated set passes 180 checks on Flink 2.2.1. Flink 1.18.1 passes 174 with
@@ -2841,3 +2852,171 @@ native/fallback contracts. [Release comparisons and the closed timebox](../bench
 retain all 1,080 jobs and 420 native grouped witnesses. Timestamp COLLECT remains slower than
 stock; measured 64-key timestamp/interval arrays improve paired stock medians. Historical
 compact payload/checkpoint upgrade limits are [specified at the exchange boundary](../optimizations/native-columnar-exchange.md#compact-timestamp-payload-copy-semantics).
+
+## Collection aggregate array inputs
+
+Native collection groups also admit input ARRAY fields whose nullable elements are BOOLEAN,
+TINYINT/SMALLINT/INT/BIGINT, FLOAT/DOUBLE, DECIMAL, DATE or TIME. These arrays may be nested,
+with nullable elements at each level. They can be grouping keys or feed COUNT/COUNT DISTINCT
+beside a verified scalar COLLECT/ARRAY_AGG. This does not admit arrays as collection aggregate
+elements or nested collection aggregate results.
+
+The planner shares aggregate-form and execution checks between native collection state and
+the legacy JVM handler, while validating each runtime's input representation separately. The
+native route uses the existing recursive binary key encoding, columnar exchange and keyed
+aggregate state. Floating array keys canonicalize NaN payloads and distinguish signed zero as
+Flink's binary arrays do. No new operator, JNI boundary or checkpoint format is introduced.
+Setting `streamfusion.experimental.rustCollectionAggregates=false` retains the JVM handler's
+scalar-input restriction, so array-input collection queries fall back to Flink.
+
+Character-bearing arrays, arrays with NOT NULL elements, timestamp/interval/binary arrays and
+ROW/MAP/MULTISET input fields remain outside this extension. Existing collection result/scalar coresult, execution, input-hint materialization and
+consumer/writer gates still apply. Deferred
+updating MAP/MULTISET payloads in [#437](https://github.com/datafusion-contrib/StreamFusion/issues/437)
+remain guarded. A planner may simplify a constructed ROW grouping expression into admitted
+array keys; the restriction concerns the actual input schema of the physical aggregate.
+
+Runtime-source checks compare resolved types and per-key ordered RowKinds, including nullable,
+empty and wide keys in small batches, duplicates, DISTINCT/FILTER, retractions and reinsertion.
+Heap and native RocksDB recover across two nonempty prefixes for floating and nested keys.
+The existing character-key collection suite and a released JVM UDAF lifecycle regression also
+retain their routes on both supported Flink lines.
+The array-input suite passes 46 checks on 2.2 and 22 with 24 capability skips on 1.18. Four
+2.2 checks additionally retain nested array keys through ordinary nullable-array UNNEST and
+the preserving NOT NULL-element consumer, with ordinality at parallelism one/three and consumed
+group/expansion work. The 12 character-key and one JVM lifecycle checks pass on 2.2; 1.18 passes
+six/one with six ARRAY_AGG skips. [Complete-job measurements](../benchmarks/collection-aggregates.md#collection-aggregate-array-inputs)
+retain both stock and actual previous fallback controls, including slower COLLECT results.
+
+
+## String collection elements
+
+STRING/VARCHAR and CHAR elements use the same single-phase collection admission and result
+preservation as numeric collections. On Flink 2.2, ARRAY_AGG stores owned UTF-8 values in the
+shared Rust collection state. Its arrival order, first-equal retraction, unmatched retractions,
+DISTINCT membership, FILTER, NULL policies and declared ARRAY element type follow the released
+handler. Flink 1.18 has no builtin ARRAY_AGG.
+
+Character COLLECT uses the existing generated JVM aggregate inside the columnar group on both
+supported lines. BinaryStringData is not a self-comparable HashMap key, so collision-tree order
+can depend on JVM object identities. A Rust lexical comparator would not reproduce that contract.
+This route retains Flink's signed counts, MapViews and fresh result copies; it is not Rust COLLECT.
+Mixed groups containing character COLLECT use this verified JVM route. Inputs may also include
+the verified nested collection elements described below.
+Character scalar coresults, aggregate elements outside the documented gates, unverified state/order/native-writer
+consumers and updating retained MULTISET payloads remain guarded. Character arrays can feed the
+[preserved UNNEST boundary](unnest-correlate.md#preserved-scalar-array-expansion).
+
+Native ARRAY_AGG snapshots include the owned string payload and typed versioned envelope in the
+existing heap/RocksDB state store. Already emitted arrays own their buffers. Set
+`streamfusion.experimental.rustCollectionAggregates=false` to select the verified managed JVM
+ARRAY_AGG state when restoring a JVM savepoint; automatic state migration is not provided.
+Output preservation does not force an extended string representation on scalar aggregate inputs:
+the transition pass distinguishes input requirements from collection output requirements. Thus
+nullable-source COALESCE remains a plain scalar expression before accumulation. Materializing
+an inconsistent source NOT NULL hint retains the existing whole-plan host boundary.
+
+The original COLLECT and ARRAY_AGG SQL harnesses also require native execution for
+character elements. They compare resolved types and per-key changelogs and require
+consumed work in the JVM COLLECT or Rust ARRAY_AGG handler, while retaining explicit
+fallback checks for unsupported coresults and disabled group execution.
+
+`FlinkStringCollectionSqlHarnessTest` compares values, resolved types and per-key ordered
+changelogs, and requires consumed work in the intended group operator. It covers STRING/CHAR,
+NULL/empty/wide/UTF-8 and malformed Java surrogate inputs, all RowKinds, DISTINCT/FILTER,
+global and empty inputs, parallelism 1/3, formatting, explicit JVM state, inconsistent NOT NULL
+hints and two nonempty checkpoint recoveries with heap and native RocksDB state. Empty aggregate
+inputs require a native plan and matching results without claiming consumed aggregate work.
+Release measurements and the bounded profiling record are retained in
+[collection benchmarks](../benchmarks/collection-aggregates.md#owned-string-collections).
+
+## Binary collection elements
+
+BINARY and VARBINARY elements use the released generated collection handler inside
+an Arrow-input/Arrow-output JVM group. This covers COLLECT on both supported Flink
+lines and ARRAY_AGG on 2.2. It does not route binary collections through the Rust
+value-equality codec: byte arrays use Java reference equality, and managed map state
+can distinguish equal payloads according to its backend. Duplicate byte-array keys,
+signed counts, NULL policies, retractions and state restore retain that handler.
+Fixed BINARY padding/truncation remains part of the resolved input type.
+
+The verified boundary includes scalar grouping keys (including binary keys), scalar
+numeric coresults, global/keyed groups, empty inputs, FILTER, parallelism one/three,
+object reuse, literal/reused byte arrays and repeated heap/native RocksDB recovery.
+Direct multiset comparisons retain every duplicate byte-array entry rather than
+collapsing keys by their normalized contents. ARRAY_AGG formatting and cardinality
+use the verified scalar consumer boundary. ARRAY_AGG is absent from Flink 1.18.
+Released binary DISTINCT aggregates and binary MIN/MAX keep their planning errors;
+CARDINALITY(MULTISET) retains the released generator error.
+
+COLLECT-to-character formatting, including nested binary multiset formatting, stays
+with the whole stock plan: byte-array identity affects HashMap iteration order, so
+an Arrow round trip cannot promise its character ordering. Inconsistent NOT NULL
+source materialization keeps the existing host boundary. Unverified retained state,
+ordering and writer consumers remain guarded; this does not extend #437.
+
+A pure native Calc can pass verified collection columns through by reference beside
+unrelated numeric expressions. It retains direct-column metadata and owned Arrow
+buffers, with no condition and no JVM calls; it does not construct or inspect the
+collection. This shared structural contract also applies to primitive and character
+collection results. Value-observing and generated consumers retain their existing
+representation requirements.
+
+`FlinkBinaryCollectionSqlHarnessTest` and the shared character projection regression
+require both released-result parity and consumed work in the intended operators.
+Release comparisons and the closed profiling timebox are recorded with the
+[collection aggregate measurements](../benchmarks/collection-aggregates.md#binary-collection-elements).
+
+
+## Nested collection elements
+
+COLLECT over MAP and MULTISET elements uses the released Flink generated handler
+inside the existing Arrow-input/Arrow-output JVM group on both supported lines.
+ARRAY_AGG admits the same elements on Flink 2.2; it is absent from 1.18. This reuses
+the recursive generated-container bridge and released serializers, rather than
+introducing separate native accumulators per container. Child types keep the existing
+generated-container gates, including version-specific fixed BINARY exclusions.
+
+The input transpose and exchange retain the preserving schema, including transposes
+created before the group consumer was selected; collection outputs
+use the same representation on exit. Verified contexts include NULL parents,
+NULL map keys/values, multiset counts, malformed strings, direct generic/binary maps,
+object reuse, three-row batches, FILTER, scalar numeric coresults, global/keyed and
+empty groups, parallelism one/three and two nonempty checkpoint recoveries with
+managed heap/native RocksDB state. Grouping keys and user aggregate arguments retain
+the previous JVM handler's scalar gate. Existing Rust array grouping keys are unchanged.
+
+ARRAY, ROW and STRUCTURED aggregate elements remain stock. The prototype lost the
+binary/generic distinction for primitive arrays across recovery; its per-element
+carrier cannot record an empty array's copy class. External STRUCTURED COLLECT also
+differed after heap recovery on 1.18, including against a recovered stock control.
+Computed ROW COLLECT on 1.18 exposes a released planner type-inference assertion.
+These experiments do not establish a general row/array aggregate state contract.
+A shared container representation is required before those gates broaden.
+COLLECT-to-character formatting over nested elements stays with the whole stock
+plan because Java key order is observable. Retained Top-N/LIMIT, join and writer
+boundaries remain guarded; this does not extend deferred #437.
+
+`FlinkNestedCollectionSqlHarnessTest` requires released values, resolved types,
+per-key ordered changes and consumed JVM group work. Its recovery cases inject two
+failures after nonempty checkpoint prefixes. Release comparisons and the profiling
+timebox are recorded in [nested collection measurements](../benchmarks/collection-aggregates.md#nested-collection-elements).
+
+The generated-collection boundary check retains the existing verified Rust
+COUNT(DISTINCT ARRAY) input contract, including local/global groups and their verified
+UNION, minibatch, exchange and changelog/watermark carriers. Input representation requirements are checked separately from collection
+results, so scalar-result aggregates do not accidentally reject their represented inputs.
+
+Representation classification uses each aggregate's base kind independently of its
+DISTINCT retention/append flags. Retained DISTINCT-array inputs and DISTINCT COLLECT
+outputs keep the same verified layout contracts as their unflagged forms.
+
+A scalar-only group may ignore unused represented collection columns. The boundary
+check inspects the group's actual key and value references, so COUNT(*) can consume
+a nested table-function stream without retaining or interpreting its complex values.
+This does not admit an aggregate that reads an unverified complex argument.
+
+The columnar input capability also covers aggregates that inspect only a represented
+argument's parent NULL bit, such as COUNT(v). The shared check uses actual group/value
+references and aggregate kinds; aggregates that interpret complex values still require
+their existing verified representation contract.

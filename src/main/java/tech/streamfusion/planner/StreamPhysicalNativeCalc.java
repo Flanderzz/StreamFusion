@@ -134,7 +134,9 @@ public class StreamPhysicalNativeCalc extends StreamPhysicalNativeSingleRel
   }
 
   boolean preservesCollections() {
-    return preserveCollections;
+    return preserveCollections
+        || (udfBinding == null || udfBinding.isEmpty())
+            && CollectionValueIdentity.passesCollectionReferences(getInput(), sourceProgram);
   }
 
   boolean usesJavaJsonInput() {

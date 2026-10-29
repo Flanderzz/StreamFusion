@@ -101,6 +101,10 @@ public class StreamPhysicalNativeFilter extends StreamPhysicalNativeSingleRel
     this.udfBinding = udfBinding;
   }
 
+  boolean preservesCollections() {
+    return CollectionValueIdentity.scalarArrayProducer(getInput());
+  }
+
   @Override
   public boolean requireWatermark() {
     return false;

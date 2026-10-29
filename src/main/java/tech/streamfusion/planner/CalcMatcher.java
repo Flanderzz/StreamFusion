@@ -34,11 +34,16 @@ final class CalcMatcher {
         && FilterCalcMatcher.matches(calc)) {
       return false;
     }
-    if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {
+    if (!FilterCalcMatcher.convertibleRow(
+        calc.getInput().getRowType(),
+        RexExpression.containsGeneratedCollectionFunction(calc.getProgram()))) {
       return false;
     }
     RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
-    return encoded != null && outputTypeMismatch(calc, encoded) == null;
+    return encoded != null
+        && FilterCalcMatcher.convertibleRow(
+            calc.getInput().getRowType(), encoded.supportsStructuredInput())
+        && outputTypeMismatch(calc, encoded) == null;
   }
 
   private static String outputTypeMismatch(Calc calc, RexExpression encoded) {
@@ -100,6 +105,19 @@ final class CalcMatcher {
     }
     RexExpression encoded = RexExpression.encodeCalc(calc, javaJsonInput);
     ctx.functionExecution("NativeCalc", encoded);
+    if (input instanceof StreamPhysicalNativeUnnest) {
+      var used = CalcProjectionPruner.wholeFields(calc, encoded);
+      if (used != null) {
+        int[] kept =
+            java.util.stream.IntStream.range(0, used.remap.length)
+                .filter(index -> used.remap[index] >= 0)
+                .toArray();
+        var projected =
+            ((StreamPhysicalNativeUnnest) input)
+                .withProjection(input.getTraitSet(), used.inputType, kept);
+        return new StreamPhysicalNativeCalc(calc, projected, encoded.remapInputs(used.remap));
+      }
+    }
     // Nested projection pushdown: when the input is rowwise (about to be transposed) and the calc
     // reads only some of its columns / struct sub-fields, prune the entry transpose to just those
     // and remap the calc's top-level column references to the compacted positions. The transpose
@@ -201,10 +219,16 @@ final class CalcMatcher {
   private static String reason(Calc calc) {
     if (CollectionValueIdentity.unverifiedInput(calc))
       return "collection input representation is unverified for this columnar producer";
-    if (!FilterCalcMatcher.convertibleRow(calc.getInput().getRowType())) {
+    if (!FilterCalcMatcher.convertibleRow(
+        calc.getInput().getRowType(),
+        RexExpression.containsGeneratedCollectionFunction(calc.getProgram()))) {
       return "unsupported input column type";
     }
     RexExpression encoded = RexExpression.encodeCalc(calc);
+    if (encoded != null
+        && !FilterCalcMatcher.convertibleRow(
+            calc.getInput().getRowType(), encoded.supportsStructuredInput()))
+      return "unsupported input column type outside a preserving collection program";
     return encoded == null ? RexExpression.reasonForCalc(calc) : outputTypeMismatch(calc, encoded);
   }
 }

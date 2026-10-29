@@ -208,6 +208,10 @@ final class RexExpression {
     return preserveCollections;
   }
 
+  boolean supportsStructuredInput() {
+    return preserveCollections || skipMapKeyCaches;
+  }
+
   Set<Integer> referencedInputs() {
     Set<Integer> inputs = new LinkedHashSet<>();
     for (int i = 0; i < kinds.size(); i++) {
@@ -470,6 +474,10 @@ final class RexExpression {
               : "ROW metadata requires Flink's whole-Calc evaluation";
       return new CalcEncoding(encoder, encoder.emitRowCalc(calc));
     }
+    if (CollectionValueIdentity.requiresStringCarrierEvaluation(calc)) {
+      encoder.jvmExecutionReason = "owned string carriers require generated scalar evaluation";
+      return new CalcEncoding(encoder, encoder.emitRowCalc(calc));
+    }
     boolean supported = encoder.emitCalc(calc);
     boolean metadataTypeMismatch = false;
     boolean representation = CollectionValueIdentity.requiresGeneratedEvaluation(calc.getProgram());
@@ -654,7 +662,7 @@ final class RexExpression {
     projectionRoot = null;
     if (program.getCondition() != null) {
       RexNode condition =
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(),
               null,
               program.expandLocalRef(program.getCondition()));
@@ -668,7 +676,7 @@ final class RexExpression {
       // Expand a Sarg/SEARCH the same as in the condition — a `FILTER (WHERE x >= a AND x < b)`
       // lowers its range into a SEARCH inside a projected expression, not just the condition.
       RexNode projection =
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
       projectionRoot = projection;
       if (!emit(projection)) {
@@ -811,6 +819,12 @@ final class RexExpression {
     }
   }
 
+  static boolean collectionAggregateElement(RelDataType type) {
+    return tech.streamfusion.arrow.ArrowConversion.nestedScalarUdfsEnabled()
+        && java.util.Set.of(SqlTypeName.MAP, SqlTypeName.MULTISET).contains(type.getSqlTypeName())
+        && rowCalcTypeCode(type, true) >= 0;
+  }
+
   private static int rowCalcTypeCode(RelDataType type) {
     return rowCalcTypeCode(type, false);
   }
@@ -856,7 +870,6 @@ final class RexExpression {
         break;
       case STRUCTURED:
         if (!preserveCollections) return -1;
-      // Only computed structured results are admitted; the input converter keeps its type gate.
       case ROW:
         nested =
             type.getFieldList().stream()
@@ -1087,9 +1100,18 @@ final class RexExpression {
                 == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRY_CAST)
         && call.getOperands().size() == 1) {
       var source = call.getOperands().get(0).getType().getSqlTypeName();
-      return Set.of(SqlTypeName.ARRAY, SqlTypeName.MAP, SqlTypeName.MULTISET, SqlTypeName.ROW)
+      return Set.of(
+                  SqlTypeName.ARRAY,
+                  SqlTypeName.MAP,
+                  SqlTypeName.MULTISET,
+                  SqlTypeName.ROW,
+                  SqlTypeName.STRUCTURED)
               .contains(source)
-          && (source == call.getType().getSqlTypeName() || isCharacter(call));
+          && (source == call.getType().getSqlTypeName()
+              || isCharacter(call)
+              || (source == SqlTypeName.ROW || source == SqlTypeName.STRUCTURED)
+                  && (call.getType().getSqlTypeName() == SqlTypeName.ROW
+                      || call.getType().getSqlTypeName() == SqlTypeName.STRUCTURED));
     }
     if (!"SPLIT".equals(call.getOperator().getName())
         || call.getOperands().size() != 2
@@ -1120,7 +1142,8 @@ final class RexExpression {
     rowFusion = true;
     RexProgram program = calc.getProgram();
     preserveCollections =
-        (usesCollectionFunctions(program) || usesCollectionScalarUdf(program))
+        CollectionValueIdentity.requiresStringCarrierEvaluation(calc)
+            || (usesCollectionFunctions(program) || usesCollectionScalarUdf(program))
             && program.getExprList().stream()
                 .anyMatch(expression -> CollectionValueIdentity.sensitive(expression.getType()));
     List<RexNode> arguments = new ArrayList<>();
@@ -1152,7 +1175,7 @@ final class RexExpression {
       RexNode condition =
           program.getCondition() == null
               ? null
-              : RexUtil.expandSearch(
+              : SearchArguments.expandSearch(
                   calc.getCluster().getRexBuilder(),
                   null,
                   program.expandLocalRef(program.getCondition()));
@@ -1163,7 +1186,7 @@ final class RexExpression {
       List<RexNode> projections = new ArrayList<>();
       for (RexLocalRef ref : program.getProjectList()) {
         RexNode projection =
-            RexUtil.expandSearch(
+            SearchArguments.expandSearch(
                 calc.getCluster().getRexBuilder(), null, program.expandLocalRef(ref));
         if (!validateDecimalRoundingBoundary(projection)) return false;
         if (!validateGeneratedExpression(projection)) return false;
@@ -1264,7 +1287,7 @@ final class RexExpression {
     RexProgram program = calc.getProgram();
     if (program.getCondition() != null) {
       captureFunctions(
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(),
               null,
               program.expandLocalRef(program.getCondition())),
@@ -1272,7 +1295,7 @@ final class RexExpression {
     }
     for (RexLocalRef projection : program.getProjectList()) {
       captureFunctions(
-          RexUtil.expandSearch(
+          SearchArguments.expandSearch(
               calc.getCluster().getRexBuilder(), null, program.expandLocalRef(projection)),
           calls);
     }
@@ -3804,7 +3827,14 @@ final class RexExpression {
         return emitHostExpression(call, true);
       }
       int length = legacyCastBehaviour ? 0 : resultType.getPrecision();
-      add(KIND_BINARY_CAST, targetType == SqlTypeName.BINARY ? -length : length, 1);
+      boolean padVariable =
+          !legacyCastBehaviour
+              && targetType == SqlTypeName.VARBINARY
+              && SqlTypeFamily.BINARY.contains(sourceType)
+              && tech.streamfusion.compat.FlinkCompat.binaryCastPadsVariable(
+                  sourceType.getPrecision(), length);
+      if (padVariable) add(KIND_BINARY_CAST, 0, 1);
+      add(KIND_BINARY_CAST, targetType == SqlTypeName.BINARY || padVariable ? -length : length, 1);
       return emit(call.getOperands().get(0));
     }
     int sourceInteger = numericRank(source);

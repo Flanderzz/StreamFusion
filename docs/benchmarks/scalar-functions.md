@@ -3281,6 +3281,76 @@ JDK 11/17. Rust/encoding tests cover every legal decimal precision/scale pair. U
 released `ScalarOperatorsTest.testUnaryPlusMinus` and `DecimalTypeTest.testUnaryPlusMinus`
 fixtures pass on both lines.
 
+
+## External STRUCTURED collection inputs
+
+Source STRUCTURED values now reuse the existing generated collection evaluator and represented
+ROW boundary, including nested array/map/multiset containers and ROW/STRUCTURED casts. NativeCalc
+consumption establishes this route; these Java casts are not described as Rust kernels.
+[Coverage](../operators/calc-filter.md#external-structured-collection-inputs) gives the exact
+built-in-program, callback, state/order and writer limits.
+
+The 2026-10-28 release/mimalloc comparison uses Flink 2.2.1/1.18.1, OpenJDK 17.0.20.1, Linux
+x86-64/WSL2, parallelism one and an 8 GiB heap. Every job has 50,000 rowwise source records and a
+rowwise blackhole sink, with two warmups and three alternating trials per engine. The source
+array elements remain declared STRUCTURED with nullable INT/string fields. Widths are 3/16,
+parent NULLs occur every eighth row, element NULLs every seventh position, and INT/string field
+NULLs every eleventh/thirteenth row. Strings use 16 seeds plus a 32-character suffix. The single
+projection constructs a ROW containing both an ARRAY<ROW<a BIGINT,b STRING>> cast and character
+formatting of the original array; it measures their combined production boundary.
+
+Candidate and actual previous `86c9d244` use identical fixture sources and the **same frozen native
+release library**. The previous planner must fall back without NativeCalc. Each candidate native
+job requires 50,000 consumed NativeCalc inputs and `jvm=[ROW, CAST]` descriptors. Both perimeter
+transposes, JNI, generated evaluation and planning/submission remain timed; environment setup
+and the initial explain probe remain outside timing. Local exchange caching stays disabled.
+No competing Java/native build, test or benchmark process was observed by the process monitor.
+
+[All 80 jobs, 20 native Calc witnesses and paired controls](results/structured-collection-inputs-2026-10-28.json)
+retain source/library hashes, raw trials, commands and ranges. Median seconds (min–max):
+
+| Flink | Array width | Previous paired stock | Previous fallback | Candidate paired stock | NativeCalc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2 | 3 | 0.194330 (0.170898–0.262270) | 0.191025 (0.175968–0.222784) | 0.177382 (0.175108–0.182358) | 0.384402 (0.365160–0.412428) |
+| 2.2 | 16 | 0.370867 (0.356476–0.390086) | 0.372421 (0.365365–0.372573) | 0.383198 (0.380443–0.386313) | 0.735325 (0.727280–0.855846) |
+| 1.18 | 3 | 0.178257 (0.174778–0.197603) | 0.183170 (0.182411–0.217055) | 0.184813 (0.178814–0.220786) | 0.382043 (0.360289–0.391352) |
+| 1.18 | 16 | 0.375509 (0.362542–0.478923) | 0.378216 (0.367642–0.418500) | 0.383667 (0.374440–0.396060) | 0.779504 (0.709350–0.798988) |
+
+Every native median loses to both stock and the preceding fallback. The new route is roughly
+twice paired stock on these workloads. This ships as correctness-verified collection coverage
+under the existing accepted collection-extension tradeoff, without an acceleration claim or
+an additional performance-only switch. Standalone optimization remains in
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392).
+
+Exactly two eight-second CPU captures on Flink 2.2, one at each width, close the bounded
+investigation. Each has one unprofiled native warmup followed by native-only complete jobs;
+profiled timings are excluded from the table. Width 3/16 captures have 20,683/15,380 execution
+samples. Row serialization appears in 349/800 samples, Arrow field writing in 476/789,
+generated evaluation in 385/513 and the existing JVM batch callback in 309/374. Categories
+are inclusive and overlap. They include JIT, job setup and all process threads, and do not
+measure allocations, copied bytes or isolated kernel costs. No small safe change to this
+existing serialization/representation boundary was selected. The report retains capture
+hashes, scope and the remaining conversion/serialization costs; no third tuning pass follows.
+
+Reproduce the complete-job comparison after building the release library:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=DynamicCollectionBenchmark#compareExpressions' \
+  '-Dcollection.expression=ROW(CAST(arr AS ARRAY<ROW<a BIGINT,b STRING>>),CAST(arr AS STRING))' \
+  -Dcollection.map=false -Dcollection.type=STRUCTURED -Dcollection.width=3 \
+  -Dcollection.rows=50000 -Dcollection.bytes=32 -Dcollection.domain=16 \
+  -Dcollection.warmup=2 -Dcollection.runs=3 -Dcollection.native=true -Dsf.testForks=1
+```
+
+Repeat at width 16 and add `flink-1.18` to the profile list for the second released line. The
+previous checkout copies the identical benchmark fixture, sets `collection.native=false` and
+loads the same release library. For the CPU diagnostic, additionally set
+`SF_PROFILE_COLLECTION=true`, select `DynamicCollectionBenchmark#profileNativeExpressions`
+and set `collection.profileSeconds=12`. After its `collection-profile-ready` message, attach
+`asprof -d 8 -e cpu -i 1ms -f structured-width3.jfr PID`; repeat once at width 16. The diagnostic
+requires positive native work in every job and does not supply timing results for comparison.
+
 ## DECIMAL SIGN
 
 The typed Decimal128 kernel replaces the scalar generated callback for verified direct/literal,

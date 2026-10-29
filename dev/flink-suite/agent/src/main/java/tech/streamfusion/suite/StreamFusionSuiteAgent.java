@@ -174,6 +174,7 @@ public final class StreamFusionSuiteAgent {
                 "tech.streamfusion.operator.NativeLookupJoinOperator",
                 "tech.streamfusion.operator.NativeAsyncLookupJoinOperator",
                 "tech.streamfusion.operator.NativeFilterOperator",
+                "tech.streamfusion.operator.NativeColumnarUnnestOperator",
                 "tech.streamfusion.operator.NativeColumnarJvmGroupOperator",
                 "tech.streamfusion.operator.NativeColumnarTableFunctionOperator",
                 "tech.streamfusion.operator.NativeColumnarGroupAggregateOperator",

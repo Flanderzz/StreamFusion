@@ -81,6 +81,17 @@ public class StreamPhysicalNativeColumnarLocalGroupAggregate extends StreamPhysi
   }
 
   @Override
+  public boolean acceptsCollectionRepresentation() {
+    return preservesCollections()
+        || CollectionValueIdentity.scalarAggregateInputs(
+            getInput(),
+            keyColumns,
+            valueColumns,
+            aggregateKinds,
+            kind -> kind == WindowAggregateMatcher.KIND_COUNT);
+  }
+
+  @Override
   public boolean requireWatermark() {
     return false;
   }

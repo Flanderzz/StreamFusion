@@ -4,7 +4,6 @@ import java.util.Optional;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
-import org.apache.calcite.rex.RexUtil;
 import org.apache.flink.table.planner.plan.logical.WindowAttachedWindowingStrategy;
 import org.apache.flink.table.planner.plan.logical.WindowingStrategy;
 import org.apache.flink.table.planner.plan.nodes.exec.spec.JoinSpec;
@@ -101,7 +100,7 @@ final class WindowJoinMatcher {
       return null;
     }
     RexNode expanded =
-        RexUtil.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
+        SearchArguments.expandSearch(join.getCluster().getRexBuilder(), null, condition.get());
     return RexExpression.encode(expanded, join);
   }
 

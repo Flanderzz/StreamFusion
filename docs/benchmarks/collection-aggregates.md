@@ -830,3 +830,329 @@ Reproduce using the complete-job command above with
 smokes. Prior new-type runs set `-Djvmagg.expectNative=false` and
 `-Djvmagg.expectedNativeCases=collect,min_timestamp3` (or `array_agg,min_timestamp3`) to retain
 native control assertions. Add the Flink 1.18 Maven profile for its COLLECT-only comparison.
+
+
+## Collection aggregate array inputs
+
+Native collection admission shares execution/aggregate-form checks with the JVM handler without
+inheriting its scalar-input limit. Verified nullable-element numeric/BOOLEAN/DATE/TIME arrays,
+including nested arrays, reuse the existing key encoding, columnar exchange, collection state
+and snapshots. This is a planner change; the benchmark uses the **same frozen release/mimalloc
+library** for candidate and actual previous code `a7a05128`. The previous planner must fall back
+with no native work. [Coverage](../operators/group-by.md#collection-aggregate-array-inputs)
+describes the exact input and consumer limits.
+
+The 2026-10-28 comparison uses Flink 2.2.1/1.18.1, OpenJDK 17.0.20.1, parallelism one, 8 GiB heap,
+64/4096 groups and identical source/blackhole resources. Keys are ARRAY<DOUBLE> containing
+`[double(row % keys), NULL]`. BIGINT values use eight seeds per key and a NULL every eighth row.
+COLLECT has 200,000 rows; ARRAY_AGG has 50,000. Each engine has two warmups and three alternating
+trials. Complete-job timing retains planning/submission, state, JNI and both row/Arrow transposes;
+cluster setup and initial explain remain outside timing. Local IPC caching stays disabled and
+accumulator caching is zero. No competing Java/native build, test or benchmark process was
+observed by the process monitor.
+
+[All 120 jobs, 30 consumed native group witnesses and paired controls](results/collection-array-inputs-2026-10-28.json)
+retain the exact benchmark source/library hashes, commands, trial arrays and ranges. Candidate
+native group witnesses account for every configured source record. Medians in seconds (min–max):
+
+| Flink / aggregate | Keys | Previous paired stock | Previous fallback | Candidate paired stock | Native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2 COLLECT | 64 | 0.346071 (0.339055–0.429422) | 0.410590 (0.399666–0.436610) | 0.424615 (0.423587–0.433719) | 0.439998 (0.434324–0.459862) |
+| 2.2 COLLECT | 4096 | 0.468079 (0.455963–0.524854) | 0.461275 (0.406322–0.499007) | 0.463717 (0.411232–0.493607) | 0.454986 (0.438612–0.465492) |
+| 2.2 ARRAY_AGG | 64 | 0.569019 (0.565962–0.652175) | 0.625992 (0.605744–0.682339) | 0.671464 (0.556638–0.674724) | 0.265601 (0.261984–0.277028) |
+| 2.2 ARRAY_AGG | 4096 | 0.190511 (0.104385–0.199529) | 0.167184 (0.102442–0.173684) | 0.192713 (0.183719–0.205197) | 0.124536 (0.107006–0.222133) |
+| 1.18 COLLECT | 64 | 0.401249 (0.400550–0.440985) | 0.371207 (0.332759–0.387747) | 0.426346 (0.329719–0.522692) | 0.441383 (0.412582–0.475752) |
+| 1.18 COLLECT | 4096 | 0.395199 (0.366182–0.517281) | 0.425412 (0.363912–0.437631) | 0.440229 (0.414496–0.443789) | 0.439441 (0.422337–0.469866) |
+
+At 64 keys, native ARRAY_AGG takes 0.265601 s versus paired stock's 0.671464 s (2.53×) and previous
+fallback's 0.625992 s. At 4096 keys the native/stock medians are 0.124536/0.192713 s (1.55×), but
+ranges overlap and the slowest native trial loses to stock; this is not sustained-throughput
+proof. COLLECT stays close to paired stock while the 64-key native medians lose to previous
+fallback on both lines. Those losses remain enabled under the accepted collection-coverage
+tradeoff. No new kernel optimization is claimed or attempted: the shared collection engine's
+existing two-capture investigations remain closed, with emission/state/perimeter costs tracked
+in [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+Reproduce after building the release library:
+
+```sh
+SF_BENCHMARK=true mvn -pl streamfusion-runtime test -Pbench \
+  '-Dtest=JvmAggregateBenchmark#completeJobsRetainKeyedStateAndBothTransposes' \
+  -Dsf.testForks=1 -Djvmagg.keyType=array_double -Djvmagg.cases=collect \
+  -Djvmagg.rows=200000 -Djvmagg.keys=64 -Djvmagg.values=8 \
+  -Djvmagg.warmup=2 -Djvmagg.runs=3 -Djvmagg.expectNative=true \
+  -Djvmagg.expectCache=false
+```
+
+Repeat with 4096 keys and with `array_agg`/50,000 rows on Flink 2.2. Add `flink-1.18` to the
+profile list for the 1.18 COLLECT comparison. Copy the identical benchmark source into the
+previous checkout, set `jvmagg.expectNative=false` and load the same release library. ARRAY_AGG
+is N/A on 1.18. Correctness/restore verification is separate from these timed jobs.
+
+## Owned string collections
+
+STRING/VARCHAR and CHAR collection elements extend the shared collection boundary. ARRAY_AGG
+on Flink 2.2 accumulates owned UTF-8 values in Rust; character COLLECT on both lines uses the
+existing generated JVM handler inside the columnar group. JVM object-identity collision ties
+prevent claiming that character COLLECT is Rust accumulation. This is coverage groundwork,
+subject to the accepted two-pass optimization timebox, rather than a universal acceleration claim.
+
+The release comparison uses the identical `JvmAggregateBenchmark` fixture at the previous
+commit `872687f35725869fce11c0a0af72103908701216` and the candidate. Both use optimized native
+builds with mimalloc and RocksDB support. STRING values are `v<value>:é🙂` followed by 32 ASCII
+`x` characters; CHAR(8) uses a SQL cast of the same source. Each complete job has 50,000 rows,
+64 or 4,096 INT keys, an eight-value per-key domain and NULL every eighth row. Each engine has
+two warmups and three alternating timed trials. The fixture retains planning/submission,
+rowwise source and blackhole sink, keyed state, JNI and both perimeter transposes, excluding
+cluster setup and the initial explain. Previous string cases remain whole-plan Flink fallback;
+previous native BIGINT ARRAY_AGG/COLLECT controls verify the shared backend independently.
+
+Correctness requires 38 passing checks on Flink 2.2 and 16 passing/22 unavailable-function
+skips on Flink 1.18. Existing primitive, character-key and array-input regressions pass 656
+checks on 2.2 and 247 with 409 capability skips on 1.18. Unchanged released COLLECT tests pass
+seven/six invocations with exact native/fallback contracts; only the fallback diagnostic text
+changes in the manifests. These upstream integer tests are regression evidence; the new string
+suite positively verifies Rust ARRAY_AGG and the JVM COLLECT route separately, including two
+nonempty heap/RocksDB recoveries.
+
+The comparison retains **320 complete jobs and 100 positive group witnesses**, with no
+competing Java/native compilation detected in its cohorts. Seconds are medians (min–max).
+Previous stock and previous StreamFusion controls are retained independently; apparent
+improvements between short jobs with overlapping ranges are not sustained-throughput claims.
+
+| Flink / shape | Keys | Previous stock | Previous StreamFusion | Current stock | Current StreamFusion |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.2 / collect_string | 64 | 0.255555 (0.183160–0.267526) | 0.255062 (0.215379–0.265643) | 0.256177 (0.227903–0.294199) | 0.286318 (0.214592–0.288351) |
+| 2.2 / collect_char | 64 | 0.227915 (0.158396–0.230799) | 0.230908 (0.222120–0.239790) | 0.225828 (0.161506–0.266311) | 0.261873 (0.189744–0.264317) |
+| 2.2 / array_agg_string | 64 | 1.036930 (0.980573–1.075990) | 1.043200 (0.980509–1.060535) | 1.154967 (1.056040–1.165088) | 1.403289 (1.340063–1.439068) |
+| 2.2 / array_agg_char | 64 | 0.966864 (0.932827–1.035282) | 0.925242 (0.840796–0.977501) | 0.977956 (0.938954–0.999409) | 1.086809 (1.046757–1.107717) |
+| 2.2 / array_agg | 64 | 0.863246 (0.823310–0.873698) | 0.288823 (0.285065–0.292343) | 0.839750 (0.807894–0.840052) | 0.329603 (0.315933–0.331331) |
+| 2.2 / collect_string | 4096 | 0.292148 (0.291102–0.292640) | 0.247239 (0.193127–0.261667) | 0.296945 (0.276053–0.310246) | 0.301686 (0.292887–0.307357) |
+| 2.2 / collect_char | 4096 | 0.248638 (0.180463–0.253721) | 0.239114 (0.228935–0.255344) | 0.174250 (0.164161–0.244092) | 0.262833 (0.184091–0.274300) |
+| 2.2 / array_agg_string | 4096 | 0.140592 (0.137364–0.150310) | 0.129057 (0.123342–0.131810) | 0.154541 (0.133802–0.155131) | 0.140018 (0.128899–0.141874) |
+| 2.2 / array_agg_char | 4096 | 0.143365 (0.129758–0.164276) | 0.128420 (0.121408–0.131651) | 0.122926 (0.121658–0.124124) | 0.132284 (0.126754–0.146799) |
+| 2.2 / array_agg | 4096 | 0.099647 (0.095412–0.100666) | 0.110310 (0.107413–0.122472) | 0.100979 (0.095464–0.105412) | 0.110004 (0.101032–0.111236) |
+| 1.18 / collect_string | 64 | 0.214007 (0.186996–0.263845) | 0.275204 (0.185680–0.278105) | 0.294065 (0.255530–0.305684) | 0.213706 (0.213684–0.307122) |
+| 1.18 / collect_char | 64 | 0.152819 (0.145687–0.161516) | 0.197792 (0.170522–0.272955) | 0.174236 (0.160488–0.231148) | 0.211587 (0.175240–0.253124) |
+| 1.18 / collect | 64 | 0.133454 (0.132751–0.143245) | 0.157805 (0.148502–0.162804) | 0.144275 (0.139469–0.150246) | 0.147464 (0.147113–0.155306) |
+| 1.18 / collect_string | 4096 | 0.214821 (0.174703–0.281765) | 0.285327 (0.189554–0.313804) | 0.204875 (0.187483–0.279155) | 0.283906 (0.212533–0.324204) |
+| 1.18 / collect_char | 4096 | 0.176106 (0.153228–0.280113) | 0.179172 (0.171862–0.241693) | 0.187259 (0.176012–0.208528) | 0.189979 (0.189364–0.191800) |
+| 1.18 / collect | 4096 | 0.165758 (0.152124–0.166639) | 0.159594 (0.150405–0.171786) | 0.148774 (0.139262–0.155378) | 0.149585 (0.142427–0.153750) |
+
+At 64 keys on Flink 2.2, owned STRING ARRAY_AGG takes 1.403289 s versus paired stock's
+1.154967 s and previous StreamFusion's 1.043200 s. CHAR ARRAY_AGG also loses to stock.
+The BIGINT ARRAY_AGG control takes 0.329603 s versus paired stock's 0.839750 s, but loses
+to its previous native median of 0.288823 s. High-cardinality ranges and character COLLECT
+results vary; neither the native route nor the codec abstraction establishes a universal win.
+The accepted collection-groundwork tradeoff applies; remaining aggregate emission/state costs
+follow [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239).
+
+[Raw trials, source/library hashes, portable commands and execution counters](results/owned-string-collections-2026-10-28.json)
+retain the complete comparison. Reproduce with `JvmAggregateBenchmark`, `jvmagg.cases` set to
+`collect_string,collect_char,array_agg_string,array_agg_char,array_agg` on Flink 2.2 or
+`collect_string,collect_char,collect` on Flink 1.18, `jvmagg.rows=50000`, `jvmagg.values=8`,
+`jvmagg.keys=64` or `4096`, `jvmagg.warmup=2`, `jvmagg.runs=3`, `jvmagg.expectCache=false`
+and `jvmagg.expectNative=true`, using the `bench` profile and a frozen release/mimalloc library.
+For previous checkouts use `jvmagg.expectNative=false` and `jvmagg.expectedNativeCases=array_agg`
+(2.2) or `collect` (1.18), keeping the new string cases as explicit fallback controls.
+
+Two native-only CPU captures close this increment's investigation. Each follows one unprofiled
+complete job and uses an eight-second target loop, stopping after the current job; both JFR
+summaries report eight seconds. STRING ARRAY_AGG has 11,005 samples, including 6,500 unique
+inclusive native-group samples, 3,914 row/Arrow and 3,012 JIT samples. Notable leaf counts are
+Arrow `VarCharVector.get` (1,173), Flink generic-array copying (759), native UTF-8 builder
+appends (708) and collection result emission (458). Character COLLECT has 24,156 samples:
+3,665 unique inclusive JVM-handler, 1,387 row/Arrow and 16,546 JIT. Categories overlap and
+include chained callers; these are not isolated-kernel timings or allocation/copy byte counts.
+They identify remaining result copying/materialization and generated-handler work without
+justifying further tuning in this bounded item. The optimization timebox is closed.
+
+The raw artifact retains category patterns, leaf counts and recording hashes. Reproduce with
+`SF_BENCHMARK=true SF_PROFILE_JVM_AGG=true`, the same release/profile/settings above,
+`JvmAggregateBenchmark#profileArrayAgg` / `jvmagg.cases=array_agg_string` and
+`JvmAggregateBenchmark#profileCollect` / `jvmagg.cases=collect_string`, `jvmagg.seconds=8`,
+`profile.asprof=<async-profiler executable>` and `profile.outputDir=<recording directory>`.
+The two captures include all JVM/native threads, JIT and repeated complete-job setup. No
+stock jobs run in the profiled process, and no further optimization passes are claimed.
+
+## Binary collection elements
+
+Binary collections retain the released JVM handler inside the columnar island;
+these are not Rust value-equality accumulators. The shared native projection
+contract also passes collections through by reference beside unrelated numeric
+expressions. [Coverage and identity gates](../operators/group-by.md#binary-collection-elements)
+include the whole-stock boundary for COLLECT-to-character formatting and the
+unchanged retained-MULTISET restriction.
+
+The frozen previous revision is `ce38857f`. Both revisions use the same frozen
+release/mimalloc native library; the code change is Java planning/handler admission.
+Flink 1.18 padding composes existing native kernels, without a new JNI protocol.
+JDK 17.0.20.1, parallelism one, 8 GiB heap, Intel i7-12650H and Linux x86-64 are
+shared. Each engine/revision has two warmups and three alternating measured trials.
+Timers retain execution-time planning/submission, keyed managed state, row sources,
+row blackhole sinks, production JNI and both transposes on native paths. Previous
+queries use their actual whole-plan fallback. Cluster setup and the initial explain
+are outside timing. No competing Java/Rust process was observed in retained cohorts.
+
+Both initial bare-result and final projection matrices contain 240 complete jobs:
+480 total, with 192 warmups and 288 measured jobs. Initial queries emit the key and
+collection; final queries additionally emit `SUM(k)+1`, requiring the shared pure
+native projection. All admitted runs require consumed JVM group records; final
+runs also require consumed NativeCalc work. There are 5,000 rows/64 keys and
+50,000 rows/4,096 keys. Inputs contain eight byte payloads with NULL every eighth
+input; non-NULL arrays contain a value byte, ff/00 and 37 x bytes. Fixed BINARY(8)
+uses a cast of those same 40 bytes. Source rows create fresh byte arrays even when
+the payload contents match. ARRAY_AGG is explicitly N/A on 1.18.
+
+The table shows final-query median seconds and [minimum–maximum]. Every initial
+and final trial, previous paired stock control, sanitized Maven arguments, native
+witness, binary/source hash and exact initial-harness reconstruction is retained
+in the [raw report](results/binary-collection-elements-2026-10-28.json).
+
+| Flink / aggregate / type | Rows / keys | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- | --- |
+| 2.2 / COLLECT / VARBINARY | 5,000 / 64 | 0.196 [0.189–0.246] | 0.205 [0.193–0.213] | 0.214 [0.194–0.221] |
+| 2.2 / COLLECT / BINARY(8) | 5,000 / 64 | 0.158 [0.154–0.174] | 0.171 [0.159–0.180] | 0.172 [0.093–0.215] |
+| 2.2 / ARRAY_AGG / VARBINARY | 5,000 / 64 | 0.081 [0.077–0.180] | 0.076 [0.072–0.135] | 0.082 [0.077–0.157] |
+| 2.2 / ARRAY_AGG / BINARY(8) | 5,000 / 64 | 0.075 [0.075–0.084] | 0.074 [0.074–0.145] | 0.074 [0.068–0.079] |
+| 2.2 / COLLECT / VARBINARY | 50,000 / 4,096 | 0.288 [0.259–0.315] | 0.254 [0.249–0.295] | 0.286 [0.250–0.299] |
+| 2.2 / COLLECT / BINARY(8) | 50,000 / 4,096 | 0.260 [0.230–0.261] | 0.242 [0.230–0.283] | 0.239 [0.167–0.247] |
+| 2.2 / ARRAY_AGG / VARBINARY | 50,000 / 4,096 | 0.141 [0.129–0.192] | 0.124 [0.121–0.196] | 0.111 [0.105–0.126] |
+| 2.2 / ARRAY_AGG / BINARY(8) | 50,000 / 4,096 | 0.127 [0.115–0.129] | 0.127 [0.124–0.134] | 0.109 [0.105–0.113] |
+| 1.18 / COLLECT / VARBINARY | 5,000 / 64 | 0.191 [0.175–0.200] | 0.193 [0.191–0.231] | 0.217 [0.187–0.217] |
+| 1.18 / COLLECT / BINARY(8) | 5,000 / 64 | 0.159 [0.091–0.165] | 0.162 [0.147–0.174] | 0.096 [0.091–0.181] |
+| 1.18 / COLLECT / VARBINARY | 50,000 / 4,096 | 0.268 [0.247–0.320] | 0.278 [0.265–0.286] | 0.296 [0.259–0.305] |
+| 1.18 / COLLECT / BINARY(8) | 50,000 / 4,096 | 0.243 [0.241–0.258] | 0.154 [0.154–0.254] | 0.166 [0.161–0.274] |
+
+Results are mixed. At 50,000 rows the 2.2 ARRAY_AGG medians are 0.111/0.109 s
+versus 0.141/0.127 s stock for variable/fixed bytes. Small COLLECT jobs remain
+slower on 2.2, and variable-byte COLLECT remains slower on 1.18 at both sizes.
+Fixed-byte COLLECT improves the 1.18 paired medians. The ranges and previous stock
+controls expose startup/JIT drift; these short jobs do not establish sustained
+throughput or a blanket binary acceleration claim.
+
+The initial bare-result matrix is retained separately, not pooled with the final
+query. Most of its native medians lose to stock, including 2.2 fixed-byte COLLECT
+at 64 keys (0.170 s native / 0.094 s stock) and 1.18 variable-byte COLLECT at
+4,096 keys (0.251 / 0.158 s). No unfavorable initial cohort is discarded.
+
+The timebox closes after exactly two CPU captures, one per variable-byte aggregate
+on the initial bare-result query, following an unprofiled native warmup. Each has
+an eight-second target loop and finishes its current job. COLLECT has 24,295
+samples: 1,923 in JVM handler scopes, 967 in row/Arrow conversion, 698 in
+serialization and 17,536 in JIT. ARRAY_AGG has 23,178 samples, with
+1,297 / 718 / 639 / 16,768 in those respective scopes. Inclusive counts overlap;
+they do not measure copied bytes or isolated operator costs. Both include all
+threads, JIT and repeated job setup, and are excluded from elapsed-time tables.
+They do not isolate the final numeric projection. No extra captures or tuning
+passes follow. Remaining handler/state-emission and expression costs stay with
+[#239](https://github.com/datafusion-contrib/StreamFusion/issues/239),
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392) and
+[#505](https://github.com/datafusion-contrib/StreamFusion/issues/505), under the
+accepted collection-groundwork tradeoff.
+
+The consolidated 2.2 suite passes 227 checks. On 1.18, 28 pass with 30 explicit
+capability skips. Cases include per-key ordered changes, duplicate byte-array keys,
+NULL/empty/wide bytes, fixed padding, FILTER, global/keyed and empty groups,
+binary grouping keys, numeric coresults, literal/shared byte-array inputs and
+heap/native RocksDB recovery across two nonempty prefixes. Source fixtures enable
+object reuse and use three-row batches. Negative checks retain binary DISTINCT
+and MIN/MAX planning errors, the MULTISET cardinality generator error and the
+formatting/retained-state boundaries. The unchanged released COLLECT variants pass
+7/6 cases with their native/fallback contracts; their existing scalar element types
+complement the binary-specific runtime-source evidence. Nineteen agent checks pass.
+
+Flink 1.18's padding makes the wide global result exceed the default 2 MiB result
+collector, so correctness fixtures give both engines a 16 MiB collector. Benchmark
+sinks remain blackholes. Initial failed assertions exhausted the reporter while
+printing the full wide changelog; final binary checks compare every ordered row
+and report the first difference compactly. Those failed runs are not timing data.
+
+## Nested collection elements
+
+MAP and MULTISET elements share the existing recursive preserving Arrow bridge and
+released JVM aggregate handler. These are functionality-enabling JVM-state paths,
+not new Rust collection accumulators. [Coverage and state gates](../operators/group-by.md#nested-collection-elements)
+retain whole-stock fallback for ARRAY/ROW/STRUCTURED aggregate elements, nested
+COLLECT formatting and unverified retained consumers.
+
+The actual previous revision is `5b454fe4`; its queries use whole-plan stock fallback.
+Both revisions use the same frozen release/mimalloc library, released Flink artifacts,
+identical benchmark source and JDK 17.0.20.1. Each engine/revision receives two warmups
+and three alternating measured trials, parallelism one and an 8 GiB heap, on an Intel
+i7-12650H / Linux x86-64 host. The matrix contains 240 complete jobs: 96 warmups and
+144 measured jobs. No competing Java/Rust process was observed in retained cohorts.
+
+Queries return the key, collection and `SUM(k)+1`. Native trials require consumed work
+in the JVM group and the shared pure native projection. Timers retain execution-time
+planning/submission, managed keyed state, production JNI, row sources, blackhole row
+sinks and both perimeter transposes. Cluster setup and initial explain are outside
+timing. There are 5,000 rows/64 keys and 50,000 rows/4,096 keys, with eight values and
+a NULL container every eighth input. MAP values contain `v{value}` mapped to the BIGINT
+value plus a NULL key/value; STRING MULTISET values contain that key with the integer
+value as count and a NULL key with count three. ARRAY_AGG is N/A on Flink 1.18.
+
+Median seconds [minimum–maximum] follow. The [raw report](results/nested-collection-elements-2026-10-28.json)
+retains all trials, both revisions' stock controls, sanitized commands, native witnesses,
+source/library hashes, correctness results and the closed profiles.
+
+| Flink / aggregate / element | Rows / keys | Current stock, s | Previous SF, s | Current SF, s |
+| --- | --- | --- | --- | --- |
+| 2.2 / COLLECT / MULTISET | 5,000 / 64 | 0.184 [0.173–0.205] | 0.192 [0.154–0.198] | 0.215 [0.190–0.225] |
+| 2.2 / COLLECT / MAP | 5,000 / 64 | 0.149 [0.074–0.157] | 0.145 [0.077–0.166] | 0.100 [0.095–0.178] |
+| 2.2 / ARRAY_AGG / MULTISET | 5,000 / 64 | 0.095 [0.090–0.187] | 0.098 [0.088–0.162] | 0.197 [0.121–0.234] |
+| 2.2 / ARRAY_AGG / MAP | 5,000 / 64 | 0.094 [0.093–0.106] | 0.094 [0.088–0.121] | 0.126 [0.126–0.193] |
+| 2.2 / COLLECT / MULTISET | 50,000 / 4,096 | 0.295 [0.291–0.369] | 0.326 [0.308–0.335] | 0.424 [0.414–0.434] |
+| 2.2 / COLLECT / MAP | 50,000 / 4,096 | 0.285 [0.211–0.355] | 0.270 [0.217–0.306] | 0.276 [0.272–0.368] |
+| 2.2 / ARRAY_AGG / MULTISET | 50,000 / 4,096 | 0.162 [0.152–0.168] | 0.173 [0.168–0.233] | 0.297 [0.219–0.343] |
+| 2.2 / ARRAY_AGG / MAP | 50,000 / 4,096 | 0.169 [0.156–0.171] | 0.171 [0.164–0.171] | 0.232 [0.228–0.234] |
+| 1.18 / COLLECT / MULTISET | 5,000 / 64 | 0.172 [0.167–0.180] | 0.173 [0.156–0.192] | 0.204 [0.199–0.264] |
+| 1.18 / COLLECT / MAP | 5,000 / 64 | 0.147 [0.078–0.155] | 0.151 [0.078–0.157] | 0.174 [0.095–0.181] |
+| 1.18 / COLLECT / MULTISET | 50,000 / 4,096 | 0.310 [0.305–0.312] | 0.294 [0.290–0.326] | 0.391 [0.370–0.448] |
+| 1.18 / COLLECT / MAP | 50,000 / 4,096 | 0.220 [0.214–0.354] | 0.205 [0.201–0.216] | 0.295 [0.278–0.366] |
+
+Results are mixed. At 5,000 rows, MAP COLLECT on 2.2 measures 0.100 s versus
+0.149 s stock and 0.145 s previous SF. At 50,000 rows it measures 0.276 s versus
+0.285 s stock but 0.270 s previous SF. The larger ARRAY_AGG cases lose: MULTISET
+measures 0.297 s versus 0.162 s stock / 0.173 s previous, and MAP measures 0.232 s
+versus 0.169 / 0.171 s. Both 1.18 element families remain slower than their stock
+and previous controls at the larger size. The full ranges above show the limits
+of comparing these short jobs.
+
+These short jobs remain startup-sensitive. Slower cases ship under the accepted
+collection-groundwork tradeoff; the ranges and separate previous stock controls are
+retained rather than pooled. These measurements do not establish sustained throughput.
+
+Exactly two CPU captures close the profiling timebox: MAP COLLECT and MULTISET
+ARRAY_AGG on Flink 2.2, each with an eight-second target loop following one unprofiled
+native warmup job. Each capture finishes its current complete job. Inclusive sample
+counts overlap and include JIT, setup and production callbacks/conversions; they are
+not isolated operator timings or allocation-byte measurements.
+
+`collect_nested_map` contains 25,629 samples. Inclusive categories: native_group 0, jvm_handler 1,652, row_arrow 915, owned_string 0, allocation 221, serialization 748, jit 19,123.
+
+`array_agg_nested_multiset` contains 22,968 samples. Inclusive categories: native_group 0, jvm_handler 2,199, row_arrow 1,722, owned_string 0, allocation 216, serialization 1,173, jit 16,313.
+
+JIT dominates both all-thread captures (19,123 and 16,313 samples). Application
+scopes still contain the released handler, row/Arrow conversions and serializers;
+these captures do not isolate a sustained operator bottleneck or copied bytes.
+Replacing that state/emission boundary is separate work, not a per-type tuning fix.
+
+No extra captures or tuning passes follow. Remaining state/emission and expression
+costs stay with [#239](https://github.com/datafusion-contrib/StreamFusion/issues/239),
+[#392](https://github.com/datafusion-contrib/StreamFusion/issues/392) and native
+replacements in [#505](https://github.com/datafusion-contrib/StreamFusion/issues/505).
+
+The final consolidated suites pass 293 checks on 2.2 and 181 on 1.18 with 112
+explicit capability skips. The current 2.2 nested fixture passes 34 checks, and the
+suite-agent package passes 56 checks with one skip. Documentation builds successfully.
+
+The consolidated suites verify the new gates beside existing binary, structured,
+array-key, legacy-consumer and planner contracts. The new MAP/MULTISET fixture
+requires values, resolved types, per-key ordered changes and actual JVM group
+consumption, including two nonempty checkpoint recoveries on heap/native RocksDB.
+Final ARRAY/ROW/STRUCTURED negative cases keep stock execution. The raw report
+records rejected row/array prototypes and excludes their failed or contaminated
+runs from successful evidence. The unchanged released COLLECT variants pass seven
+cases on 2.2 and six on 1.18 with exact native/fallback contracts; those scalar-input
+fixtures complement the new nested-element runtime sources.

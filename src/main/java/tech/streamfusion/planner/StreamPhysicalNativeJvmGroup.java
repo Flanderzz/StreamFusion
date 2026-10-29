@@ -47,6 +47,10 @@ public final class StreamPhysicalNativeJvmGroup extends StreamPhysicalNativeSing
     return super.explainTerms(writer).item("grouping", Arrays.toString(grouping));
   }
 
+  boolean requiresCollectionInputs() {
+    return JvmGroupAggregateMatcher.requiresCollectionInputs(getInput().getRowType());
+  }
+
   public boolean hasCollectionResults() {
     return getRowType().getFieldList().stream()
         .anyMatch(

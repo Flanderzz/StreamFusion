@@ -2,7 +2,7 @@ use super::java_map_order::JavaMapOrder;
 use crate::*;
 use serde::{Deserialize, Serialize};
 mod elements;
-use elements::{DecimalElement, FloatElement, TimestampElement};
+use elements::{DecimalElement, FloatElement, StringElement, TimestampElement};
 
 pub(super) fn is_collection(kind: i64) -> bool {
     (48..=53).contains(&kind)
@@ -120,6 +120,7 @@ enum CollectionStorage {
     Float(TypedCollectionState<FloatElement>),
     Decimal(TypedCollectionState<DecimalElement>),
     Timestamp(TypedCollectionState<TimestampElement>),
+    String(TypedCollectionState<StringElement>),
 }
 
 pub(crate) struct CollectionState {
@@ -133,6 +134,7 @@ macro_rules! with_storage {
             CollectionStorage::Float($state) => $body,
             CollectionStorage::Decimal($state) => $body,
             CollectionStorage::Timestamp($state) => $body,
+            CollectionStorage::String($state) => $body,
         }
     };
 }
@@ -140,6 +142,10 @@ macro_rules! with_storage {
 impl CollectionState {
     pub(super) fn new(kind: i64, ty: &DataType) -> Self {
         let storage = match ty {
+            DataType::Utf8 => {
+                assert!(kind > 49, "character COLLECT retains the JVM handler");
+                CollectionStorage::String(TypedCollectionState::new(kind, ty))
+            }
             ty if streamfusion_bridge::timestamp::is_component_timestamp(ty) => {
                 CollectionStorage::Timestamp(TypedCollectionState::new(kind, ty))
             }
@@ -164,6 +170,12 @@ impl CollectionState {
     ) -> bool {
         use super::numeric_map_order::FloatingKey;
         match (&mut self.storage, column) {
+            (CollectionStorage::String(state), CollectionColumn::String(column)) => state.update(
+                (!column.is_null(row)).then(|| Arc::<str>::from(column.value(row))),
+                retract,
+                ttl,
+                append_distinct,
+            ),
             (CollectionStorage::Primitive(state), column) => {
                 state.update(column.at(row), retract, ttl, append_distinct)
             }
@@ -235,11 +247,15 @@ impl CollectionState {
 }
 
 trait CollectionElement: Clone + PartialEq {
-    type Value: Copy + Ord;
+    type Value: Clone + Ord;
+    const VARIABLE_SIZE: bool = false;
+    fn payload_bytes(_: &Self::Value) -> usize {
+        0
+    }
     fn from_type(ty: &DataType) -> Self;
     fn scalar(&self, value: Option<Self::Value>) -> ScalarValue;
     fn value(&self, value: &ScalarValue) -> Option<Self::Value>;
-    fn hash(&self, value: Self::Value) -> i32;
+    fn hash(&self, value: &Self::Value) -> i32;
     fn array(
         &self,
         values: impl IntoIterator<Item = Option<Self::Value>>,
@@ -258,8 +274,8 @@ impl CollectionElement for PrimitiveType {
     fn value(&self, value: &ScalarValue) -> Option<i64> {
         primitive(value)
     }
-    fn hash(&self, value: i64) -> i32 {
-        hash(value, &self.data_type())
+    fn hash(&self, value: &i64) -> i32 {
+        hash(*value, &self.data_type())
     }
     fn array(&self, values: impl IntoIterator<Item = Option<i64>>, _: &DataType) -> ArrayRef {
         let ty = &self.data_type();
@@ -352,12 +368,12 @@ where
             .times
             .iter()
             .filter(|(_, time)| ttl.expired(**time))
-            .map(|(v, _)| *v)
+            .map(|(v, _)| v.clone())
             .collect();
         for key in &expired {
             self.times.remove(key);
             self.counts.remove(key);
-            self.order.remove(*key, self.element.hash(*key));
+            self.order.remove(key.clone(), self.element.hash(key));
         }
         self.order.compact();
         !expired.is_empty()
@@ -379,7 +395,7 @@ where
     pub(super) fn distinct_entries(&self) -> Vec<(ScalarValue, i64)> {
         self.distinct
             .iter()
-            .map(|(value, count)| (self.element.scalar(*value), *count))
+            .map(|(value, count)| (self.element.scalar(value.clone()), *count))
             .collect()
     }
 
@@ -407,7 +423,7 @@ where
             if next == 0 {
                 self.distinct.remove(&value);
             } else {
-                self.distinct.insert(value, next);
+                self.distinct.insert(value.clone(), next);
             }
             if (retract && next != 0) || (!retract && next != 1) {
                 return false;
@@ -420,15 +436,15 @@ where
             if retract && old == Some(1) {
                 self.counts.remove(&value);
                 self.times.remove(&value);
-                self.order.remove(value, self.element.hash(value));
+                self.order.remove(value.clone(), self.element.hash(&value));
             } else {
                 let next = old.unwrap_or(0).wrapping_add(if retract { -1 } else { 1 });
-                self.counts.insert(value, next);
+                self.counts.insert(value.clone(), next);
                 if ttl.enabled() {
-                    self.times.insert(value, ttl.now());
+                    self.times.insert(value.clone(), ttl.now());
                 }
                 if old.is_none() {
-                    self.order.insert(value, self.element.hash(value));
+                    self.order.insert(value.clone(), self.element.hash(&value));
                 }
             }
         } else if retract {
@@ -456,7 +472,7 @@ where
             } else {
                 copy = JavaMapOrder::with_capacity(16);
                 for key in self.order.iter() {
-                    copy.insert(key, self.element.hash(key));
+                    copy.insert(key.clone(), self.element.hash(&key));
                 }
                 &copy
             };
@@ -495,7 +511,7 @@ where
                 field.clone(),
                 arrow::buffer::OffsetBuffer::from_lengths([self.values.len()]),
                 self.element
-                    .array(self.values.iter().copied(), field.data_type()),
+                    .array(self.values.iter().cloned(), field.data_type()),
                 None,
             )))
         }
@@ -523,7 +539,22 @@ where
         Ok(())
     }
     pub(super) fn bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        let payload = if C::VARIABLE_SIZE {
+            self.values
+                .iter()
+                .chain(&self.pending)
+                .flatten()
+                .chain(self.counts.keys())
+                .chain(self.distinct.keys().flatten())
+                .chain(self.times.keys())
+                .chain(self.order.retained_keys())
+                .map(C::payload_bytes)
+                .sum()
+        } else {
+            0
+        };
+        payload
+            + std::mem::size_of::<Self>()
             + (self.values.capacity() + self.pending.capacity())
                 * std::mem::size_of::<Option<C::Value>>()
             + (self.counts.len() + self.distinct.len() + self.times.len())
@@ -533,6 +564,7 @@ where
 }
 
 pub(super) enum CollectionColumn<'a> {
+    String(&'a StringArray),
     Timestamp(streamfusion_bridge::timestamp::TimestampColumn<'a>),
     F32(&'a arrow::array::Float32Array),
     F64(&'a arrow::array::Float64Array),
@@ -548,6 +580,7 @@ pub(super) enum CollectionColumn<'a> {
 impl<'a> CollectionColumn<'a> {
     pub(super) fn new(array: &'a ArrayRef) -> Self {
         match array.data_type() {
+            DataType::Utf8 => Self::String(array.as_any().downcast_ref().unwrap()),
             ty if streamfusion_bridge::timestamp::is_component_timestamp(ty) => Self::Timestamp(
                 streamfusion_bridge::timestamp::TimestampColumn::try_new(array.as_ref())
                     .expect("timestamp collection column"),
@@ -608,6 +641,96 @@ mod entries {
 mod tests {
     use super::*;
     type CollectionState = TypedCollectionState<PrimitiveType>;
+    #[test]
+    fn owned_string_arrays_keep_slices_outputs_and_versioned_state() {
+        let wide = "é🙂\0".repeat(1024);
+        for kind in 50..=53 {
+            let input: ArrayRef = Arc::new(StringArray::from(vec![
+                Some("unread"),
+                Some(wide.as_str()),
+                None,
+                Some(""),
+                Some(wide.as_str()),
+                Some("tail"),
+                Some("unread"),
+            ]));
+            let slice = input.slice(1, 5);
+            let column = CollectionColumn::new(&slice);
+            let mut state = super::CollectionState::new(kind, &DataType::Utf8);
+            let empty_bytes = state.bytes();
+            for row in 0..5 {
+                state.update(&column, row, false, StateTtl::new(0, 0), false);
+            }
+            assert!(state.bytes() >= empty_bytes + wide.len());
+            let result = result_type(kind, &DataType::Utf8);
+            let old = state.emit(&result);
+            let snapshot = state.snapshot();
+            let mut restored = super::CollectionState::new(kind, &DataType::Utf8);
+            restored.restore(snapshot.clone()).unwrap();
+            assert_eq!(old, restored.emit(&result));
+            let mut wrong = super::CollectionState::new(kind, &DataType::Int64);
+            assert!(wrong.restore(snapshot).is_err());
+            state.update(&column, 0, true, StateTtl::new(0, 0), false);
+            restored.update(&column, 0, true, StateTtl::new(0, 0), false);
+            assert_eq!(state.emit(&result), restored.emit(&result));
+            drop(column);
+            drop(slice);
+            drop(input);
+            let ScalarValue::List(old_array) = old else {
+                unreachable!()
+            };
+            let old_values = old_array
+                .values()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(old_values.value(0), wide);
+            assert_eq!(state.emit(&result), restored.emit(&result));
+            let missing: ArrayRef = Arc::new(StringArray::from(vec!["missing"]));
+            state.update(
+                &CollectionColumn::new(&missing),
+                0,
+                true,
+                StateTtl::new(0, 0),
+                false,
+            );
+            restored.restore(state.snapshot()).unwrap();
+            assert_eq!(state.emit(&result), restored.emit(&result));
+        }
+    }
+
+    #[test]
+    fn owned_string_retractions_remove_the_first_equal_value() {
+        let input: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("a"),
+            None,
+            Some("b"),
+            Some("a"),
+        ]));
+        let column = CollectionColumn::new(&input);
+        let mut state = super::CollectionState::new(50, &DataType::Utf8);
+        for row in 0..4 {
+            state.update(&column, row, false, StateTtl::new(0, 0), false);
+        }
+        let independent: ArrayRef = Arc::new(StringArray::from(vec!["a"]));
+        state.update(
+            &CollectionColumn::new(&independent),
+            0,
+            true,
+            StateTtl::new(0, 0),
+            false,
+        );
+        let ScalarValue::List(result) = state.emit(&result_type(50, &DataType::Utf8)) else {
+            unreachable!()
+        };
+        let actual = result
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(actual, &StringArray::from(vec![None, Some("b"), Some("a")]));
+    }
+
     #[test]
     fn collection_retractions_nulls_and_versioned_restore() {
         for ty in [

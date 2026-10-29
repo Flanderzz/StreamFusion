@@ -459,6 +459,41 @@ pub(crate) fn payload_converter(schema: &SchemaRef) -> RowConverter {
     .expect("payload converter")
 }
 
+/// Materialize the declared join-state columns, matching Flink's serialized row boundary.
+pub(crate) fn payload_columns(batch: &RecordBatch, schema: &SchemaRef) -> Vec<ArrayRef> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let input = batch.column(index);
+            let value = if field.data_type() == &DataType::Utf8
+                && crate::flink_key::represented_string(input.data_type())
+            {
+                let represented = input
+                    .as_any()
+                    .downcast_ref::<arrow::array::StructArray>()
+                    .unwrap();
+                let utf8 = represented.column(0);
+                arrow::array::make_array(
+                    utf8.to_data()
+                        .into_builder()
+                        .nulls(arrow::buffer::NullBuffer::union(
+                            utf8.nulls(),
+                            represented.nulls(),
+                        ))
+                        .build()
+                        .expect("materialize join string"),
+                )
+            } else {
+                input.clone()
+            };
+            streamfusion_bridge::timestamp::cast_array(&value, field.data_type())
+                .expect("align join payload fields")
+        })
+        .collect()
+}
+
 /// Value-encodes a single all-null row for `schema` (the outer-join null pad), as arrow-row bytes.
 pub(crate) fn encode_null_row(conv: &RowConverter, schema: &SchemaRef) -> OwnedRow {
     let columns: Vec<ArrayRef> = schema
@@ -496,4 +531,89 @@ pub(crate) fn read_join_predicate(
         strings: read_strings(env, strings),
         compiled: None,
     })
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+    use arrow::array::{ListArray, StringArray, StructArray, UInt16Array};
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+
+    #[test]
+    fn updating_join_materializes_string_caches_before_state_and_restore() {
+        let fields = vec![
+            Field::new("utf8", DataType::Utf8, true)
+                .with_metadata([("streamfusion.nested-string".into(), "1".into())].into()),
+            Field::new(
+                "java",
+                DataType::List(Arc::new(Field::new("$data$", DataType::UInt16, false))),
+                true,
+            ),
+            Field::new("array_copy_class", DataType::Int8, true),
+        ];
+        let payload: ArrayRef = Arc::new(StructArray::new(
+            fields.clone().into(),
+            vec![
+                Arc::new(StringArray::from(vec!["?", "must be NULL"])),
+                Arc::new(ListArray::new(
+                    Arc::new(Field::new("$data$", DataType::UInt16, false)),
+                    OffsetBuffer::new(vec![0, 1, 1].into()),
+                    Arc::new(UInt16Array::from(vec![0xd800])),
+                    None,
+                )),
+                Arc::new(Int8Array::from(vec![None, None])),
+            ],
+            Some(NullBuffer::from(vec![true, false])),
+        ));
+        let input = RecordBatch::try_from_iter(vec![
+            ("k", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef),
+            ("v", payload),
+        ])
+        .unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, false),
+            Field::new("v", DataType::Utf8, true),
+        ]));
+        let mut original = UpdatingJoiner::new(
+            vec![0],
+            vec![0],
+            JoinKind::Inner,
+            schema.clone(),
+            schema.clone(),
+            None,
+        );
+        original.push(&input, true, 0).unwrap();
+        let snapshot = original.snapshot();
+        let mut restored = UpdatingJoiner::restore(
+            vec![0],
+            vec![0],
+            vec![-1],
+            JoinKind::Inner,
+            schema.clone(),
+            schema.clone(),
+            None,
+            &snapshot,
+            0,
+        );
+        let right = RecordBatch::try_from_iter(vec![
+            ("k", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef),
+            (
+                "v",
+                Arc::new(StringArray::from(vec!["right", "right"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        for state in [&mut original, &mut restored] {
+            let result = state.push(&right, false, 1).unwrap();
+            assert_eq!(result.num_rows(), 2);
+            assert_eq!(result.column(1).data_type(), &DataType::Utf8);
+            let strings = result
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(strings.value(0), "?");
+            assert!(strings.is_null(1));
+        }
+    }
 }

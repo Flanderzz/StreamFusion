@@ -67,7 +67,9 @@ parallelism and Flink's primary-key shuffle policy are preserved. Top-level NOT 
 materialization. The general policies reuse Flink's released constraint executor over Arrow-backed
 row views; unchanged columns retain their buffers. Generated arrays, maps and rows can also reach
 the Arrow writer: its declared collection capability canonicalizes the core's representation
-metadata for Doris, including when an upsert materializer precedes the writer.
+metadata for Doris, including when an upsert materializer precedes the writer. The planner
+uses this same declared capability when checking generated collection boundaries, so
+constructed ARRAY/ROW/MAP values retain the verified Arrow writer route.
 
 Sinks requiring upsert materialization use the shared
 [native sink materializer](../operators/sink-upsert-materialize.md). Candidate rows remain ordered

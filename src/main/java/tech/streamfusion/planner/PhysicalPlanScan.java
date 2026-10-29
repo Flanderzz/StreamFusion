@@ -178,6 +178,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
   }
 
   private RelNode substitute(RelNode root, Set<String> repeatedSources, boolean finalOutput) {
+    if (CollectionValueIdentity.observesCollectionKeyOrder(root)) {
+      recordFallback("COLLECT formatting over binary or nested elements requires Flink's JVM key order");
+      return root;
+    }
     if (JvmGroupAggregateMatcher.unverifiedCollectionInputMaterialization(root)) {
       recordFallback(
           "collection input materialization of NOT NULL hints requires Flink physical getters");
@@ -879,8 +883,10 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
         node instanceof StreamPhysicalNativeGeneratedUnnest
             || node instanceof StreamPhysicalNativeTableFunction
                 && ((StreamPhysicalNativeTableFunction) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeJvmGroup
+                && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
             || node instanceof StreamPhysicalNativeColumnarGroupAggregate
-                && ((StreamPhysicalNativeColumnarGroupAggregate) node).preservesCollections()
+                && ((StreamPhysicalNativeColumnarGroupAggregate) node).requiresCollectionInputs()
             || node instanceof StreamPhysicalNativeColumnarLocalGroupAggregate
                 && ((StreamPhysicalNativeColumnarLocalGroupAggregate) node).preservesCollections()
             || node instanceof StreamPhysicalNativeCalc
@@ -911,6 +917,8 @@ public final class PhysicalPlanScan implements FlinkOptimizeProgram<StreamOptimi
     RelNode result = changed ? node.copy(node.getTraitSet(), inputs) : node;
     if (result instanceof StreamPhysicalRowDataToArrow) {
       result = ((StreamPhysicalRowDataToArrow) result).withPreferredBatchRows(inheritedBatchRows);
+      if (preserveCollections)
+        result = ((StreamPhysicalRowDataToArrow) result).withCollectionRepresentation();
       if (inheritedStringCaches) result = ((StreamPhysicalRowDataToArrow) result).withStringCaches();
     }
     return result;

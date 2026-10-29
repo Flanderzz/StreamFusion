@@ -61,23 +61,48 @@ public class StreamPhysicalNativeColumnarGroupAggregate extends StreamPhysicalNa
   }
 
   boolean hasCollectionResults() {
-    for (int kind : aggregateKinds) if (kind >= 48 && kind <= 53) return true;
+    for (int encoded : aggregateKinds) {
+      int kind = baseKind(encoded);
+      if (kind >= 48 && kind <= 53) return true;
+    }
     return false;
   }
 
   boolean preservesCollections() {
-    if (hasCollectionResults()) return true;
+    return hasCollectionResults() || requiresCollectionInputs();
+  }
+
+  boolean requiresCollectionInputs() {
+    if (hasCollectionResults()) return false;
     for (int i = 0; i < aggregateKinds.length; i++) {
+      int kind = baseKind(aggregateKinds[i]);
       if (valueTypes[i] == 100
-          && (aggregateKinds[i] == 7
-              || aggregateKinds[i] == 12
-              || aggregateKinds[i] == 13
-              || aggregateKinds[i] == 15
-              || aggregateKinds[i] == 16
-              || aggregateKinds[i] == 19
-              || aggregateKinds[i] == 20)) return true;
+          && (kind == 7
+              || kind == 12
+              || kind == 13
+              || kind == 15
+              || kind == 16
+              || kind == 19
+              || kind == 20)) return true;
     }
     return false;
+  }
+
+  private static int baseKind(int encoded) {
+    return encoded
+        & ~(tech.streamfusion.Native.AGGREGATE_DISTINCT_TTL
+            | tech.streamfusion.Native.AGGREGATE_DISTINCT_APPEND);
+  }
+
+  @Override
+  public boolean acceptsCollectionRepresentation() {
+    return requiresCollectionInputs()
+        || CollectionValueIdentity.scalarAggregateInputs(
+            getInput(),
+            keyColumns,
+            valueColumns,
+            aggregateKinds,
+            kind -> baseKind(kind) == WindowAggregateMatcher.KIND_COUNT);
   }
 
   @Override

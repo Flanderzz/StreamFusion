@@ -80,3 +80,8 @@ The measured 16,384-key delayed-watermark workload improved 22.33–321.75× in 
 and 1.82× in complete native SQL jobs; the candidate's same-run stock comparison was 1.63×.
 These are bounded workload measurements with startup and both transposes retained in the SQL
 comparison, not a promise for small state, checkpoints, or the RocksDB path.
+
+Keep-last row-state decoding restores the exact nested Arrow field names and metadata
+before emitting a batch, using the same schema alignment as Top-N. This includes cached
+UTF-16 string representations and retained values after checkpoint restoration; changing a
+list child name during Arrow row decoding must not invalidate the output schema.

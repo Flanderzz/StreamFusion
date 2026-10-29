@@ -8,7 +8,6 @@ import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
-import org.apache.calcite.rex.RexUtil;
 
 /**
  * Recognizes a filter the native operator can run: a {@link Calc} with an input-ref projection (a
@@ -23,7 +22,8 @@ final class FilterCalcMatcher {
   private FilterCalcMatcher() {}
 
   static boolean matches(Calc calc) {
-    if (CollectionValueIdentity.unverifiedInput(calc)) return false;
+    if (CollectionValueIdentity.unverifiedInput(calc)
+        || CollectionValueIdentity.requiresStringCarrierEvaluation(calc)) return false;
     if (!hasFilterShape(calc)) {
       return false;
     }
@@ -47,7 +47,7 @@ final class FilterCalcMatcher {
     // Calcite folds `col = literal`, IN, and ranges into a SEARCH/Sarg; expand it back into the
     // comparisons the native engine evaluates. The native side handles arbitrary AND/OR/NOT trees,
     // so no disjunctive-normal-form rewrite is needed.
-    RexNode expanded = RexUtil.expandSearch(calc.getCluster().getRexBuilder(), null, condition);
+    RexNode expanded = SearchArguments.expandSearch(calc.getCluster().getRexBuilder(), null, condition);
     return RexExpression.encode(expanded, calc);
   }
 
@@ -74,10 +74,15 @@ final class FilterCalcMatcher {
    * are admitted recursively because the boundary preserves their complete binary representation.
    */
   static boolean convertibleRow(RelDataType inputType) {
-    return inputType.getFieldList().stream().allMatch(f -> isConvertibleType(f.getType()));
+    return convertibleRow(inputType, false);
   }
 
-  private static boolean isConvertibleType(RelDataType type) {
+  static boolean convertibleRow(RelDataType inputType, boolean allowStructured) {
+    return inputType.getFieldList().stream()
+        .allMatch(f -> isConvertibleType(f.getType(), allowStructured));
+  }
+
+  private static boolean isConvertibleType(RelDataType type, boolean allowStructured) {
     switch (type.getSqlTypeName()) {
       case TINYINT:
       case SMALLINT:
@@ -111,11 +116,14 @@ final class FilterCalcMatcher {
         return true;
       case ARRAY:
       case MULTISET:
-        return isConvertibleType(type.getComponentType());
+        return isConvertibleType(type.getComponentType(), allowStructured);
       case MAP:
-        return isConvertibleType(type.getKeyType()) && isConvertibleType(type.getValueType());
+        return isConvertibleType(type.getKeyType(), allowStructured)
+            && isConvertibleType(type.getValueType(), allowStructured);
+      case STRUCTURED:
+        if (!allowStructured) return false;
       case ROW:
-        return convertibleRow(type);
+        return convertibleRow(type, allowStructured);
       default:
         return false;
     }

@@ -230,3 +230,9 @@ compare final multiplicities.
 Map-list output reaching unverified native Arrow sinks uses the existing row-sink route.
 [Shared evidence](../../benchmarks/results/retained-map-payloads-2026-10-20.json) includes the
 production Top-N small-function gate, which makes no join-throughput claim.
+
+Regular join state materializes represented scalar strings to the declared UTF-8 payload,
+matching Flink's binary-row serialization boundary. UTF-16 caches remain outside persisted
+join payloads, and parent NULLs remain NULL. Immediate, minibatch and legacy decoded-restore
+paths use the same conversion before row encoding; the declared output schema and outer-join
+NULL padding remain unchanged.

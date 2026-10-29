@@ -36,6 +36,67 @@ final class CollectionValueIdentity {
         || type.getValueType() != null && requiresCopySemantics(type.getValueType());
   }
 
+  static boolean passesCollectionReferences(RelNode input, RexProgram program) {
+    if (!(input instanceof ColumnarOutput)
+        || program == null
+        || program.getCondition() != null
+        || unverifiedColumnarProducer(input)) return false;
+    return program.getProjectList().stream()
+        .map(program::expandLocalRef)
+        .allMatch(
+            value ->
+                value instanceof RexInputRef
+                    || !sensitive(value.getType()) && !readsSensitiveInput(value));
+  }
+
+  static boolean observesCollectionKeyOrder(RelNode node) {
+    if (node instanceof Calc && containsIdentityCollect(node.getInput(0))) {
+      var program = ((Calc) node).getProgram();
+      if (program.getProjectList().stream()
+              .map(program::expandLocalRef)
+              .anyMatch(CollectionValueIdentity::formatsIdentityMultiset)
+          || program.getCondition() != null
+              && formatsIdentityMultiset(program.expandLocalRef(program.getCondition())))
+        return true;
+    }
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::observesCollectionKeyOrder);
+  }
+
+  private static boolean containsIdentityCollect(RelNode node) {
+    if (node instanceof StreamPhysicalGroupAggregate) {
+      var aggregate = (StreamPhysicalGroupAggregate) node;
+      for (int i = 0; i < aggregate.aggCalls().size(); i++) {
+        var call = aggregate.aggCalls().apply(i);
+        if (call.getAggregation()
+                == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.COLLECT
+            && identityMultiset(call.getType())) return true;
+      }
+    }
+    return node.getInputs().stream().anyMatch(CollectionValueIdentity::containsIdentityCollect);
+  }
+
+  private static boolean identityMultiset(RelDataType type) {
+    if (type.getSqlTypeName() == SqlTypeName.MULTISET) {
+      var element = type.getComponentType().getSqlTypeName();
+      if (element == SqlTypeName.BINARY
+          || element == SqlTypeName.VARBINARY
+          || RexExpression.collectionAggregateElement(type.getComponentType())) return true;
+    }
+    return type.getComponentType() != null && identityMultiset(type.getComponentType())
+        || type.getKeyType() != null && identityMultiset(type.getKeyType())
+        || type.getValueType() != null && identityMultiset(type.getValueType())
+        || type.isStruct()
+            && type.getFieldList().stream().anyMatch(field -> identityMultiset(field.getType()));
+  }
+
+  private static boolean formatsIdentityMultiset(RexNode expression) {
+    if (!(expression instanceof RexCall)) return false;
+    var call = (RexCall) expression;
+    return org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(call.getType())
+            && call.getOperands().stream().anyMatch(value -> identityMultiset(value.getType()))
+        || call.getOperands().stream().anyMatch(CollectionValueIdentity::formatsIdentityMultiset);
+  }
+
   static boolean fixedBinary(RelDataType type) {
     return type.getSqlTypeName() == SqlTypeName.BINARY
         || type.getComponentType() != null && fixedBinary(type.getComponentType())
@@ -192,8 +253,41 @@ final class CollectionValueIdentity {
         && call.getOperands().stream().anyMatch(CollectionValueIdentity::readsSensitiveInput);
   }
 
+  static boolean stringCarrierProducer(RelNode node) {
+    if (node instanceof StreamPhysicalNativeUnnest || node instanceof StreamPhysicalNativeFilter)
+      return stringCarrierProducer(node.getInput(0));
+    return node instanceof StreamPhysicalNativeCalc
+            && ((StreamPhysicalNativeCalc) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeJvmGroup
+            && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeGeneratedUnnest;
+  }
+
+  static boolean readsStringValue(RexNode expression) {
+    if (expression instanceof RexInputRef || expression instanceof RexFieldAccess)
+      return org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(expression.getType());
+    if (!(expression instanceof RexCall)) return false;
+    var call = (RexCall) expression;
+    if ((call.getKind() == SqlKind.IS_NULL || call.getKind() == SqlKind.IS_NOT_NULL)
+        && call.getOperands().size() == 1
+        && (call.getOperands().get(0) instanceof RexInputRef
+            || call.getOperands().get(0) instanceof RexFieldAccess)) return false;
+    return call.getOperands().stream().anyMatch(CollectionValueIdentity::readsStringValue);
+  }
+
+  static boolean requiresStringCarrierEvaluation(Calc calc) {
+    if (!stringCarrierProducer(calc.getInput())) return false;
+    var program = calc.getProgram();
+    return program.getProjectList().stream()
+            .map(program::expandLocalRef)
+            .anyMatch(value -> !(value instanceof RexInputRef) && readsStringValue(value))
+        || program.getCondition() != null
+            && readsStringValue(program.expandLocalRef(program.getCondition()));
+  }
+
   private static boolean unverifiedColumnarProducer(RelNode node) {
     if (!(node instanceof ColumnarOutput)) return false;
+    if (scalarArrayProducer(node)) return false;
     if (node instanceof StreamPhysicalRowDataToArrow)
       return !((StreamPhysicalRowDataToArrow) node).preservesCollections();
     if (node instanceof StreamPhysicalNativeGeneratedUnnest) return false;
@@ -257,8 +351,14 @@ final class CollectionValueIdentity {
   }
 
   private static boolean preservingCollectionProducer(RelNode node) {
-    return node instanceof StreamPhysicalNativeColumnarGroupAggregate
+    return node instanceof StreamPhysicalNativeCalc
+            && ((StreamPhysicalNativeCalc) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeColumnarGroupAggregate
             && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
+        || node instanceof StreamPhysicalNativeUnnest
+            && ((StreamPhysicalNativeUnnest) node).preservesCollections()
+        || node instanceof StreamPhysicalNativeFilter
+            && ((StreamPhysicalNativeFilter) node).preservesCollections()
         || node instanceof StreamPhysicalNativeGeneratedUnnest
         || node instanceof StreamPhysicalNativeJvmGroup
             && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults()
@@ -267,7 +367,13 @@ final class CollectionValueIdentity {
   }
 
   static boolean scalarArrayProducer(RelNode node) {
-    return (node instanceof StreamPhysicalNativeColumnarGroupAggregate
+    return (node instanceof StreamPhysicalNativeUnnest
+                && ((StreamPhysicalNativeUnnest) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeFilter
+                && ((StreamPhysicalNativeFilter) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeCalc
+                && ((StreamPhysicalNativeCalc) node).preservesCollections()
+            || node instanceof StreamPhysicalNativeColumnarGroupAggregate
                 && ((StreamPhysicalNativeColumnarGroupAggregate) node).hasCollectionResults()
             || node instanceof StreamPhysicalNativeJvmGroup
                 && ((StreamPhysicalNativeJvmGroup) node).hasCollectionResults())
@@ -276,8 +382,11 @@ final class CollectionValueIdentity {
             .allMatch(
                 field ->
                     !sensitive(field.getType())
+                        || org.apache.calcite.sql.type.SqlTypeFamily.CHARACTER.contains(
+                            field.getType())
                         || field.getType().getSqlTypeName() == SqlTypeName.ARRAY
-                            && !sensitive(field.getType().getComponentType()));
+                            && field.getType().getComponentType().getComponentType() == null
+                            && !requiresCopySemantics(field.getType().getComponentType()));
   }
 
   private static boolean verifiedCorrelate(
@@ -287,11 +396,11 @@ final class CollectionValueIdentity {
   }
 
   static boolean generatedCollectionCrossesBoundary(RelNode root, boolean finalOutput) {
-    return generatedCollectionCrossesBoundary(root, null, finalOutput);
+    return generatedCollectionCrossesBoundary(root, null, finalOutput, false);
   }
 
   private static boolean generatedCollectionCrossesBoundary(
-      RelNode node, RelNode parent, boolean finalOutput) {
+      RelNode node, RelNode parent, boolean finalOutput, boolean verifiedConsumer) {
     if (preservingCollectionProducer(node)
         && node.getRowType().getFieldList().stream()
             .anyMatch(
@@ -302,10 +411,44 @@ final class CollectionValueIdentity {
         && !(parent instanceof StreamPhysicalSink)
         && !FlinkPlannerCompat.isLegacyRowSink(parent)
         && !preservingCollectionProducer(parent)
+        && !acceptsGeneratedCollections(parent)
+        && !(passesGeneratedCollections(parent) && verifiedConsumer)
         && !(parent instanceof StreamPhysicalNativeCalc
             && ((StreamPhysicalNativeCalc) parent).preservesCollections())) return true;
+    boolean next =
+        acceptsGeneratedCollections(node) || passesGeneratedCollections(node) && verifiedConsumer;
     return node.getInputs().stream()
-        .anyMatch(input -> generatedCollectionCrossesBoundary(input, node, false));
+        .anyMatch(input -> generatedCollectionCrossesBoundary(input, node, false, next));
+  }
+
+  private static boolean passesGeneratedCollections(RelNode node) {
+    return node instanceof StreamPhysicalNativeUnion
+        || node instanceof StreamPhysicalNativeColumnarExchange
+        || node instanceof StreamPhysicalNativeMiniBatchAssigner
+        || node instanceof StreamPhysicalNativeDropUpdateBefore
+        || node instanceof StreamPhysicalNativeWatermarkAssigner;
+  }
+
+  private static boolean acceptsGeneratedCollections(RelNode node) {
+    return node instanceof StreamPhysicalNativeJvmGroup
+            && ((StreamPhysicalNativeJvmGroup) node).requiresCollectionInputs()
+        || node instanceof ColumnarInput
+            && ((ColumnarInput) node).acceptsCollectionRepresentation();
+  }
+
+  static boolean scalarAggregateInputs(
+      RelNode input,
+      int[] keys,
+      int[] values,
+      int[] kinds,
+      java.util.function.IntPredicate nullOnly) {
+    for (int key : keys)
+      if (sensitive(input.getRowType().getFieldList().get(key).getType())) return false;
+    for (int i = 0; i < values.length; i++)
+      if (values[i] >= 0
+          && sensitive(input.getRowType().getFieldList().get(values[i]).getType())
+          && !nullOnly.test(kinds[i])) return false;
+    return true;
   }
 
   static boolean crossesBoundary(RelNode root, boolean finalOutput) {
@@ -332,7 +475,11 @@ final class CollectionValueIdentity {
     }
     boolean next =
         node instanceof StreamPhysicalGroupAggregate
-                && GroupAggregateMatcher.preservesComplexValues((StreamPhysicalGroupAggregate) node)
+                && (GroupAggregateMatcher.preservesComplexValues(
+                        (StreamPhysicalGroupAggregate) node)
+                    || JvmGroupAggregateMatcher.hasNestedCollectionElements(
+                            (StreamPhysicalGroupAggregate) node)
+                        && JvmGroupAggregateMatcher.matches((StreamPhysicalGroupAggregate) node))
             || node instanceof StreamPhysicalLocalGroupAggregate
                 && LocalGroupAggregateMatcher.preservesComplexValues(
                     (StreamPhysicalLocalGroupAggregate) node)

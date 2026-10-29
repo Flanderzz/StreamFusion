@@ -1222,8 +1222,13 @@ The parser fast path does not establish a speedup for noncanonical formats or co
 CAST and TRY_CAST from STRING/VARCHAR/CHAR or BINARY/VARBINARY to BINARY/VARBINARY
 use a native byte-copy kernel when their operands do not require Flink's rowwise error handling.
 Default-mode BINARY(n) zero-pads or truncates
-raw bytes to exactly n bytes; VARBINARY(n) only truncates. Character inputs use their
-UTF-8 bytes, including embedded zeros and multibyte sequences cut at a byte boundary.
+raw bytes to exactly n bytes. VARBINARY(n) only truncates on Flink 2.2. Flink 1.18's
+binary-to-binary rule also pads a variable target when the declared input width is
+larger than that target. Native planning composes the existing padding kernel with
+its variable-binary output conversion to preserve that released behavior and the
+resolved VARBINARY type. Character-to-VARBINARY casts keep their truncation rule.
+Character inputs use their UTF-8 bytes, including embedded zeros and multibyte
+sequences cut at a byte boundary.
 NULLs and declared result types are preserved. Failures in the operand expression still
 propagate; CASE and filters suppress unselected failing expressions.
 
@@ -2444,7 +2449,7 @@ nullable typed map keys, decimal and timestamp values. Generated ARRAY/ROW conta
 values support fixed BINARY leaves through the length-delimited transport described above;
 NOT NULL fixed BINARY MAP keys/values are verified on Flink 2.2 and remain excluded on 1.18;
 unpaired UTF-16 field names remain excluded. STRUCTURED results from inline OBJECT_OF/OBJECT_UPDATE are supported;
-external STRUCTURED inputs retain fallback. Unsupported host signatures or generated programs
+external STRUCTURED inputs use the [verified built-in collection boundary](#external-structured-collection-inputs). Unsupported host signatures or generated programs
 fall back during planning.
 
 Generated collection evaluation admits nullable MAP values declared BINARY(n) while retaining their actual
@@ -2477,7 +2482,7 @@ logical entries even when a narrowing cast produces equal key bytes. Flink's gen
 use Java HashMap, so binary-key cast iteration can depend on object identity; it is not an ordered-map
 contract. Direct input-map formatting is compared in its original entry order. NOT NULL binary keys
 and values use the verified generated route on Flink 2.2, described below; on 1.18 they retain
-fallback. External STRUCTURED inputs and unverified representation boundaries retain fallback.
+fallback. External STRUCTURED inputs follow the separate built-in collection boundary below; unverified representation boundaries retain fallback.
 On released 1.18, CASE returning a binary array can fail in Flink's own compiler; the explicit
 failure/fallback contract remains. No absent catalog function is introduced on either line.
 A direct final MAP_KEYS projection of an input-reference map with nullable BINARY keys and nullable
@@ -2551,8 +2556,7 @@ the existing default-enabled collection option; no additional switch is required
 standalone ARRAY-to-ARRAY, MAP-to-MAP, MULTISET-to-MULTISET and ROW-to-ROW casts now enter the same generated Flink
 program used when a collection constructor or function is present. STRING, floating, temporal
 and NOT NULL-element conversions keep Flink's conversion rules and resolved types. The bridge's
-type gates and the representation-boundary restrictions above still apply; this does not admit
-external STRUCTURED inputs or Flink 1.18 NOT NULL fixed BINARY MAP keys/values. Direct BINARY MULTISET
+type gates and the representation-boundary restrictions above still apply; external STRUCTURED inputs use the verified built-in collection boundary below. Flink 1.18 NOT NULL fixed BINARY MAP keys/values remain excluded. Direct BINARY MULTISET
 elements use the verified boundary below; NOT NULL elements remain guarded on Flink 1.18.
 The existing DECIMAL-to-FLOAT/DOUBLE ARRAY CAST also retains its Rust path.
 
@@ -2616,7 +2620,7 @@ halves; the represented string result preserves those Java units. CAST and TRY_C
 containers, filtered/CASE short-circuiting and errors from evaluating their input. Runtime tests
 require consumed NativeCalc input on both supported releases, including all four outer changelog
 kinds and generic/binary collection representations. Unverified state, exchange and native-writer
-boundaries, Flink 1.18 NOT NULL fixed BINARY MAP keys/values and external STRUCTURED inputs still fall back.
+boundaries and Flink 1.18 NOT NULL fixed BINARY MAP keys/values still fall back. External STRUCTURED inputs follow the separate verified boundary below.
 These casts share the accepted collection-extension performance tradeoff; see the
 [conversion-inclusive character-cast measurements](../benchmarks/scalar-functions.md#collection-character-casts).
 
@@ -3456,3 +3460,103 @@ nullable inputs and explicitly matching timestamp comparison kinds retain their 
 The [timestamp/interval aggregate contract](group-by.md#timestamp-and-interval-collection-elements)
 also documents the released four-digit DAY precision planning error and native exchange copy
 semantics. The existing 1.18 mixed timestamp comparison normalization remains unchanged.
+
+
+### External STRUCTURED collection inputs
+
+Built-in collection programs admit source fields declared STRUCTURED, recursively inside
+ARRAY, ROW, MAP keys/values and MULTISET elements, through the existing represented-ROW
+converter. Resolved implementation classes, attributes and nullability stay in Flink's logical
+types. The existing Arrow struct fields and kind/string/array metadata carry their internal
+RowData values; no new operator, native kernel, JNI ownership handoff or state format is added.
+The planner validates this input context separately from the default converter admission used
+by other operators.
+
+CAST/TRY_CAST between ROW and STRUCTURED, matching structured/collection containers and character
+targets use the existing generated evaluator inside NativeCalc when they require Flink's
+representation. Runtime ROW-to-STRUCTURED casts also work through the Table API on both released
+lines. Constructors and composed built-in collection functions use the same boundary. On 2.2,
+source objects can feed OBJECT_OF/OBJECT_UPDATE; those functions remain absent on 1.18. This
+adds coverage without describing the Java evaluator as a Rust cast kernel. A final MAP_VALUES
+that reads primitive values without observing STRUCTURED keys can use the existing Rust child
+view and omit the unobserved key caches.
+
+This admission requires an enabled built-in collection program and a verified encoded input
+boundary. Plain structured projections/filters and programs containing user callbacks retain
+their previous fallback. Unverified leaves, fixed-BINARY/nullability release gates, metadata
+names, columnar producers, state/order/exchange consumers and native writers keep their existing
+restrictions. In particular, this does not admit structured grouping keys or retained structured
+payloads. Derived scalar results can feed native grouping and its shuffle, including repeated
+heap/native RocksDB restore. The updating MAP/MULTISET extension in
+[#437](https://github.com/datafusion-contrib/StreamFusion/issues/437) stays deferred.
+
+Runtime-source checks verify inherited Java fields, NULL/empty parents and children, repeated
+object references, nested objects and arrays, maps with structured keys/values, multiset counts,
+resolved types and ordered per-key RowKinds. Twelve profiles per line additionally retain
+released behavior for actual NULLs under NOT NULL hints on structured parents/fields, array
+elements, map keys/values and multiset elements. Strict casts retain conversion failures; TRY_CAST
+retains whole-result NULLs and errors evaluating its input. CASE/filter and empty-source checks
+retain evaluation boundaries. Flink 1.18 rejects a CASE branch containing `ROW(p,10/id)` during
+its own SQL validation; that original query retains an explicit host/native planning-failure
+assertion. A separate CASE inside the ROW argument verifies division short-circuiting on both
+lines. NativeCalc consumption is required for populated admitted queries; unverified callbacks,
+structured state and a disabled collection option require fallback.
+
+The structured suite passes 53 checks on 2.2 and 51 with two absent-function skips on 1.18.
+The existing six computed-object regressions pass on 2.2 and are catalog skips on 1.18. The
+unchanged released miscellaneous-cast suite additionally passes 58/41 result regressions;
+these are not counted as positive evidence for the new source boundary.
+
+[Release comparisons and the closed two-capture investigation](../benchmarks/scalar-functions.md#external-structured-collection-inputs)
+retain the slower stock/previous/native results and production conversion costs under the
+accepted collection-extension tradeoff. Further standalone performance work stays in #392.
+
+### Scalar arrays across native expansion
+
+Verified collection-preserving Calc outputs can feed the
+[preserved scalar-array UNNEST boundary](unnest-correlate.md#preserved-scalar-array-expansion).
+Nullable STRING/CHAR arrays retain their Arrow representation through Rust fan-out and native
+NULL filters. Cache-sensitive scalar consumers use the existing generated evaluator, preserving
+UTF-16 behavior rather than treating a string carrier as a logical ROW or discarding its cache.
+Native ARRAY construction matches BinaryArrayWriter by clearing string caches and retaining its
+binary-copy marker under NULL elements. Unverified nested/state/writer boundaries remain guarded.
+
+### Character search endpoints
+
+Native expansion of `IN` and `NOT IN` search predicates preserves the exact
+character endpoints stored by the released Flink planner, including the spaces
+in explicitly cast `CHAR` constants. This uses the same search normalization
+across filters, projections, UNNEST predicates and join conditions. It does not
+change string ordering admission or add unsupported comparison signatures.
+
+### Collection references beside native scalar expressions
+
+A pure native projection can pass a verified collection input column through beside
+unrelated scalar numeric expressions, retaining the input field metadata and Arrow
+buffers. The structural check requires a verified columnar producer, no condition,
+no JVM calls and direct references for sensitive fields. It does not widen generated
+collection evaluation or state/writer boundaries. COLLECT formatting over binary or
+nested elements
+retains the whole stock plan because Java key order is observable; see
+[binary](group-by.md#binary-collection-elements) and
+[nested collection elements](group-by.md#nested-collection-elements).
+
+The verified exchange into a JVM collection group preserves supported nested input
+representations. This shares the generated-container schema and released value
+serializers with expression evaluation. It admits the documented MAP and MULTISET
+aggregate elements without widening unrelated stateful consumers or user-function
+argument contracts. ARRAY, ROW and STRUCTURED aggregate elements remain unverified;
+array support requires a container copy-class representation that also covers empty
+arrays.
+
+A preserving consumer's layout requirement also upgrades an existing source transpose
+through a direct native projection and exchange. An earlier pruning pass may have
+created that transpose before the consumer was selected; the transition pass carries
+the inherited requirement into its final schema. Existing batch-size, source-pruning,
+JSON and scalar string-cache settings survive the upgrade. This fixes the requested
+representation boundary without changing collection element admission.
+
+Generated collection values may also enter a columnar sink that explicitly accepts and
+canonicalizes their representation for its wire format. This preserves the existing Doris
+Arrow writer and sink-materializer contract; ordinary native sinks retain their row-sink
+guard. Native DISTINCT-array groups retain their separately verified input contract.

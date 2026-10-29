@@ -57,6 +57,13 @@ final class WindowAggregateMatcher {
 
   private WindowAggregateMatcher() {}
 
+  static boolean nullOnlyInput(int kind) {
+    return kind == KIND_COUNT
+        || kind == KIND_RETRACT_COUNT
+        || kind == KIND_LIVE_COUNT
+        || kind == tech.streamfusion.operator.NativeWindowOperatorCore.KIND_HIDDEN_LIVE_COUNT;
+  }
+
   static boolean matches(
       RelNode node,
       WindowingStrategy windowing,
