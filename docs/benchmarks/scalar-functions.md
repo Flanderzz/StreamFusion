@@ -3655,3 +3655,123 @@ input, batch rows, loops, warmups and measured trials. The previous control sets
 `SF_FROM_BASE64_PREVIOUS=true` and loads the independently compiled preceding encoder first
 on the classpath. Complete jobs use `FromBase64PipelineBenchmark`, `SF_BENCHMARK=true` and
 `-Dfrom.base64.pipeline.engine=flink|previous|native`, with the same previous-classpath rule.
+
+## Runtime SQL TRIM
+
+The `sql_trim` release driver compares SQL `TRIM` in all three directions using identical
+nullable values on prebuilt Java RowData and Arrow batches. Stock Flink and the previous
+StreamFusion route are the same generated Flink operation: runtime SQL trim previously
+caused planner fallback. A third generated batch-callback measurement is diagnostic only;
+it is not labelled as the previous route. All three consume output byte lengths.
+
+The native timer runs inside Rust around production compiled Calc, including the ASCII/cache
+certificate, set membership, output allocation and consumption. Setup, initial JNI/Arrow
+import and final export are outside this prepared-function timer. Java times the released
+generated expression and equivalent consumption on its prepared rows. Both retain nullable
+strings and the original decoded Java caches. The native driver uses an invalid evaluator
+id for admitted ASCII controls, so an unexpected callback fails instead of silently being
+counted as native computation. Unicode controls retain the exact evaluator.
+
+Measurements on Apple M4 Pro/24 GiB, JDK 17.0.12 and Rust 1.95.0 use released Flink
+1.18.1/2.2.1, release Rust with mimalloc, Arrow 58.4.1 and DataFusion 54.0.0. Each
+profile runs eight warmups and nine measured trials of 128 batches, sequentially
+without concurrent tests or builds. Fresh JVMs use 256/512 MiB initial/maximum heaps.
+Four runtime trim sets (` ab`, `ab`, tab-plus-space and `[]+`) provide cardinality four.
+Source NULLs occur every seventh row, trim-set NULLs every eleventh row. Width is the
+middle payload in bytes; each source also contains the trim set on both ends.
+
+Median [minimum-maximum] ns/row:
+
+| Flink | Payload bytes / batch rows | Direction | Stock / previous fallback | Native | Stock/native |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1.18.1 | 8 / 16 | BOTH | 184.31 [162.33-334.27] | 56.97 [54.38-58.59] | 3.24x |
+| 1.18.1 | 8 / 16 | LEADING | 102.86 [96.42-157.27] | 56.82 [53.79-57.64] | 1.81x |
+| 1.18.1 | 8 / 16 | TRAILING | 112.35 [104.13-180.09] | 56.54 [50.05-59.65] | 1.99x |
+| 1.18.1 | 8 / 1024 | BOTH | 147.08 [143.19-152.81] | 20.96 [19.73-21.70] | 7.02x |
+| 1.18.1 | 8 / 1024 | LEADING | 84.72 [82.31-88.87] | 19.66 [18.52-20.77] | 4.31x |
+| 1.18.1 | 8 / 1024 | TRAILING | 103.82 [101.80-104.36] | 20.19 [19.19-20.80] | 5.14x |
+| 1.18.1 | 264 / 16 | BOTH | 301.21 [248.94-554.30] | 96.92 [89.56-100.54] | 3.11x |
+| 1.18.1 | 264 / 16 | LEADING | 159.28 [113.87-240.48] | 90.50 [85.53-95.24] | 1.76x |
+| 1.18.1 | 264 / 16 | TRAILING | 237.90 [196.82-1063.74] | 92.88 [86.26-96.46] | 2.56x |
+| 1.18.1 | 264 / 1024 | BOTH | 260.56 [252.13-263.20] | 58.98 [56.48-61.01] | 4.42x |
+| 1.18.1 | 264 / 1024 | LEADING | 109.44 [107.03-110.84] | 55.22 [53.59-59.03] | 1.98x |
+| 1.18.1 | 264 / 1024 | TRAILING | 209.08 [204.29-214.20] | 55.34 [54.65-57.76] | 3.78x |
+| 2.2.1 | 8 / 16 | BOTH | 163.17 [148.21-313.42] | 57.96 [52.06-67.89] | 2.82x |
+| 2.2.1 | 8 / 16 | LEADING | 174.99 [97.17-218.97] | 54.85 [49.82-59.86] | 3.19x |
+| 2.2.1 | 8 / 16 | TRAILING | 202.90 [110.41-1007.57] | 57.58 [56.80-58.92] | 3.52x |
+| 2.2.1 | 8 / 1024 | BOTH | 152.31 [150.98-156.82] | 21.17 [20.34-21.66] | 7.19x |
+| 2.2.1 | 8 / 1024 | LEADING | 86.67 [83.49-94.38] | 20.29 [19.06-20.98] | 4.27x |
+| 2.2.1 | 8 / 1024 | TRAILING | 119.16 [115.61-120.89] | 19.76 [18.67-20.59] | 6.03x |
+| 2.2.1 | 264 / 16 | BOTH | 321.49 [250.08-1077.96] | 92.20 [90.82-104.19] | 3.49x |
+| 2.2.1 | 264 / 16 | LEADING | 130.45 [110.03-1226.44] | 90.86 [87.22-92.90] | 1.44x |
+| 2.2.1 | 264 / 16 | TRAILING | 212.24 [201.80-260.23] | 90.17 [82.52-92.26] | 2.35x |
+| 2.2.1 | 264 / 1024 | BOTH | 269.05 [266.16-272.72] | 57.91 [57.15-60.14] | 4.65x |
+| 2.2.1 | 264 / 1024 | LEADING | 111.92 [108.80-113.16] | 56.65 [55.57-58.46] | 1.98x |
+| 2.2.1 | 264 / 1024 | TRAILING | 215.36 [212.93-218.58] | 55.40 [54.48-57.55] | 3.89x |
+
+The 24 measured medians improve 1.44-7.19x over stock, which is
+also the previous fallback route. This does not establish a win for every input,
+computed expression, Unicode evaluator batch or downstream pipeline. The
+[result record](results/runtime-sql-trim-2026-10-29.json) retains every warmup and
+measurement, checksums, ranges, callback diagnostics and initial implementation.
+The [raw CSV](results/runtime-sql-trim-2026-10-29.csv) contains all prepared trials.
+The callback is deliberately a separate diagnostic and cannot serve as the
+previous-production baseline.
+
+The initial cache comparison checked one UTF-16 unit at a time. On 264-byte,
+1,024-row LEADING profiles it lost to stock: 121.10 versus 106.99 ns/row on 1.18.1,
+and 123.13 versus 109.35 on 2.2.1. Profiling localized the expensive certificate
+frame. Comparing eight widened byte/unit lanes together preserves the complete
+check and removes that measured regression. Both the unfavorable initial samples
+and final ranges are retained; their source delta is the cache-comparison loop.
+
+A separate complete job uses one million nullable rows, 64-byte payloads, BOTH,
+parallelism one and a rowwise blackhole sink. It retains the row source, both
+perimeter transposes, native JNI and planning/submission through completion.
+Each Flink version runs two warmups and five measured trials per engine in one
+JVM, alternating engine order, with the same 1 GiB maximum heap. Native plans and
+positive consumed Calc work are required. Seconds are median [minimum-maximum]:
+
+| Flink | Stock / previous fallback | Native |
+| --- | ---: | ---: |
+| 1.18.1 | 0.427211 [0.423715-0.438213] | 0.325314 [0.318184-0.330477] |
+| 2.2.1 | 0.531298 [0.524301-0.537697] | 0.319176 [0.317447-0.327937] |
+
+These short jobs include startup and do not establish sustained connector
+throughput. Blackhole timing does not verify output values; separate SQL tests
+compare values, logical types, NULLs, lazy branches, empty filtered batches,
+Unicode and isolated surrogates. Validation passes 94 focused JVM tests with
+14 explicit version skips across both Flink lines and JDK 11/17, 857 release
+Rust core tests, and unchanged released `ScalarFunctionsTest.testTrim` on each
+Flink line. Rust tests use an invalid evaluator ID to prove each admitted trim
+direction can execute without a JVM callback.
+
+Reproduction after compiling runtime production/test classes and obtaining their test
+classpath:
+
+```sh
+cd native
+cargo build --locked --release -p streamfusion --no-default-features --features mimalloc --example sql_trim
+SF_NATIVE_BENCH_CLASSPATH="$TEST_CLASSPATH" SF_NATIVE_LIB_DIR="$NATIVE_LIB_DIR" \
+  target/release/examples/sql_trim ascii 264 true 1024 128 0 all 8 9
+```
+
+Arguments are corpus (`ascii` or `unicode`), payload bytes, decoded-cache presence,
+batch rows, repeated batches, direction (0 BOTH, 1 LEADING, 2 TRAILING), engine filter,
+warmup trials and measured trials. These prepared measurements do not establish complete-job
+throughput; a row-source/row-sink job retains both perimeter transposes.
+
+Run the separate bounded job from the repository root, with the release library
+directory in `NATIVE_LIB_DIR`:
+
+```sh
+SF_BENCHMARK=true mvn -B -ntp -pl streamfusion-runtime -am test -Pbench \
+  -Dnative.build.skip=true -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dsf.testForks=1 -Dtest=SqlTrimPipelineBenchmark \
+  "-Dsf.extraJvmArgs=-Xmx1g -Djava.library.path=$NATIVE_LIB_DIR" \
+  -Dtrim.pipeline.rows=1000000 -Dtrim.pipeline.width=64 \
+  -Dtrim.pipeline.direction=BOTH -Dtrim.pipeline.warmups=2 -Dtrim.pipeline.runs=5
+```
+
+Add `flink-1.18` to the Maven profiles for the other supported line. Complete-job
+trials and their engine order are retained in the JSON result record.

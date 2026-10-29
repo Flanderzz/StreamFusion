@@ -12,17 +12,19 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
-import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import tech.streamfusion.planner.NativePlanner;
 
+@TestInstance(TestInstance.Lifecycle.PER_METHOD)
 class FlinkBinaryCollectionSqlHarnessTest {
-  private static final RecoveryExecutionMetrics METRICS = new RecoveryExecutionMetrics();
+  private final RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics();
 
-  @AfterAll
-  static void closeCluster() {
-    METRICS.close();
+  @AfterEach
+  void closeCluster() {
+    metrics.close();
   }
 
   private static Schema schema() {
@@ -68,12 +70,12 @@ class FlinkBinaryCollectionSqlHarnessTest {
     return rows;
   }
 
-  private static TableEnvironment environment(String type, int parallelism) {
+  private TableEnvironment environment(String type, int parallelism) {
     return environment(type, parallelism, false);
   }
 
-  private static TableEnvironment environment(String type, int parallelism, boolean notNull) {
-    var env = METRICS.environment(new Configuration(), parallelism, 0);
+  private TableEnvironment environment(String type, int parallelism, boolean notNull) {
+    var env = metrics.environment(new Configuration(), parallelism, 0);
     env.getConfig().enableObjectReuse();
     var table = StreamTableEnvironment.create(env);
     table.getConfig().set("collect-sink.batch-size.max", "16 mb");
@@ -457,7 +459,7 @@ class FlinkBinaryCollectionSqlHarnessTest {
     return table;
   }
 
-  private static void check(
+  private void check(
       String function,
       java.util.function.Supplier<TableEnvironment> factory,
       String sql,
@@ -465,7 +467,7 @@ class FlinkBinaryCollectionSqlHarnessTest {
     check(function, factory, sql, keyed, operator(function));
   }
 
-  private static void check(
+  private void check(
       String function,
       java.util.function.Supplier<TableEnvironment> factory,
       String sql,
@@ -473,7 +475,7 @@ class FlinkBinaryCollectionSqlHarnessTest {
       String expectedOperator) {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction(function);
     var previous =
-        METRICS.nativeOperators().stream()
+        metrics.nativeOperators().stream()
             .map(row -> row.get("jobId"))
             .collect(java.util.stream.Collectors.toSet());
     var runs = NativeFailureParity.run(factory, sql);
@@ -482,7 +484,7 @@ class FlinkBinaryCollectionSqlHarnessTest {
     if (keyed) assertPerKey(runs.host().rows(), runs.nativeRun().rows());
     else assertRows(null, runs.host().rows(), runs.nativeRun().rows());
     RecoveryExecutionMetrics.assertConsumed(
-        METRICS.nativeOperators().stream()
+        metrics.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList()),
         expectedOperator);

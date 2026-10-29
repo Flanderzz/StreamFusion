@@ -2254,7 +2254,7 @@ impl datafusion::logical_expr::ScalarUDFImpl for JvmUdf {
         };
         let mut string_caches = Vec::new();
         if let Some((operation, count)) = self.certified_builtin {
-            if (1..=12).contains(&operation) {
+            if (1..=15).contains(&operation) {
                 if let Some(output) = crate::flink_functions::certified::evaluate(
                     operation,
                     &arrays[..count],
@@ -2831,6 +2831,52 @@ mod certified_builtin_tests {
                 result.column(0).as_ref(),
                 &StringArray::from(vec![Some(expected), None])
             );
+        }
+    }
+
+    #[test]
+    fn runtime_sql_trim_executes_each_direction_without_a_jvm() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("set", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, true),
+        ]));
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("unused"),
+                    Some("ab"),
+                    None,
+                    Some("ab"),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("unused"),
+                    Some("abXYZba"),
+                    Some("XYZ"),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap()
+        .slice(1, 3);
+        for (operation, expected) in [(13, "XYZ"), (14, "XYZba"), (15, "abXYZ")] {
+            let mut calc = CalcExpression {
+                kinds: vec![44, 0, 0],
+                payload: vec![0, 0, 1],
+                child_counts: vec![2, 0, 0],
+                longs: vec![999, 0, operation],
+                doubles: vec![],
+                strings: vec![],
+                projection_roots: vec![0],
+                condition_root: -1,
+                output_names: vec!["v".into()],
+                compiled: None,
+            };
+            assert_eq!(
+                calc.evaluate(input.clone()).column(0).as_ref(),
+                &StringArray::from(vec![Some(expected), None, None])
+            );
+            assert_eq!(calc.evaluate(input.slice(0, 0)).num_rows(), 0);
         }
     }
 

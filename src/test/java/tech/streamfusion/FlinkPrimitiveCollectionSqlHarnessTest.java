@@ -13,12 +13,14 @@ import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
-import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+@TestInstance(TestInstance.Lifecycle.PER_METHOD)
 class FlinkPrimitiveCollectionSqlHarnessTest {
-  private static final RecoveryExecutionMetrics METRICS = new RecoveryExecutionMetrics();
+  private final RecoveryExecutionMetrics metrics = new RecoveryExecutionMetrics();
   private static final List<String> ELEMENT_TYPES =
       List.of(
           "TINYINT",
@@ -86,9 +88,9 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     return ELEMENT_TYPES.stream();
   }
 
-  @AfterAll
-  static void closeCluster() {
-    METRICS.close();
+  @AfterEach
+  void closeCluster() {
+    metrics.close();
   }
 
   private static Schema schema(String type) {
@@ -268,36 +270,36 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     return result;
   }
 
-  private static TableEnvironment environment(String type) {
+  private TableEnvironment environment(String type) {
     return environment(type, 3);
   }
 
-  private static TableEnvironment environment(String type, int precision) {
+  private TableEnvironment environment(String type, int precision) {
     return environment(type, precision, false);
   }
 
-  private static TableEnvironment environment(String type, int precision, boolean notNull) {
+  private TableEnvironment environment(String type, int precision, boolean notNull) {
     return environment(type, precision, notNull, 1);
   }
 
-  private static TableEnvironment environment(
+  private TableEnvironment environment(
       String type, int precision, boolean notNull, int parallelism) {
     return environment(type, precision, notNull, parallelism, false);
   }
 
-  private static TableEnvironment environment(
+  private TableEnvironment environment(
       String type, int precision, boolean notNull, int parallelism, boolean notNullKey) {
     return environment(type, precision, notNull, parallelism, notNullKey, rows(type));
   }
 
-  private static TableEnvironment environment(
+  private TableEnvironment environment(
       String type,
       int precision,
       boolean notNull,
       int parallelism,
       boolean notNullKey,
       List<Row> inputRows) {
-    var env = METRICS.environment(new Configuration(), parallelism, 0);
+    var env = metrics.environment(new Configuration(), parallelism, 0);
     env.getConfig().enableObjectReuse();
     var table = onePhase(StreamTableEnvironment.create(env));
     if (type.startsWith("TIMESTAMP")) table.getConfig().setLocalTimeZone(java.time.ZoneOffset.UTC);
@@ -607,7 +609,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     tech.streamfusion.compat.FlinkTestCapabilities.requireSqlFunction("ARRAY_AGG");
     for (String nulls : List.of("", " IGNORE NULLS")) {
       var previous =
-          METRICS.nativeOperators().stream()
+          metrics.nativeOperators().stream()
               .map(row -> row.get("jobId"))
               .collect(java.util.stream.Collectors.toSet());
       var runs =
@@ -624,7 +626,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
             NativeFailureParity.Route.NATIVE);
       assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
       var work =
-          METRICS.nativeOperators().stream()
+          metrics.nativeOperators().stream()
               .filter(row -> !previous.contains(row.get("jobId")))
               .collect(java.util.stream.Collectors.toList());
       RecoveryExecutionMetrics.assertConsumed(work, "NativeColumnarGroupAggregate");
@@ -915,14 +917,14 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
         "NativeCalc");
   }
 
-  private static NativeFailureParity.Comparison check(String type, String sql, String... consumed) {
+  private NativeFailureParity.Comparison check(String type, String sql, String... consumed) {
     return check(() -> environment(type), sql, consumed);
   }
 
-  private static NativeFailureParity.Comparison check(
+  private NativeFailureParity.Comparison check(
       java.util.function.Supplier<TableEnvironment> environment, String sql, String... consumed) {
     var previous =
-        METRICS.nativeOperators().stream()
+        metrics.nativeOperators().stream()
             .map(row -> row.get("jobId"))
             .collect(java.util.stream.Collectors.toSet());
     var runs = NativeFailureParity.run(environment, sql);
@@ -930,7 +932,7 @@ class FlinkPrimitiveCollectionSqlHarnessTest {
     assertEquals(runs.host().resultTypes(), runs.nativeRun().resultTypes());
     assertEquals(perKey(runs.host().rows()), perKey(runs.nativeRun().rows()));
     var work =
-        METRICS.nativeOperators().stream()
+        metrics.nativeOperators().stream()
             .filter(row -> !previous.contains(row.get("jobId")))
             .collect(java.util.stream.Collectors.toList());
     for (String operator : consumed) RecoveryExecutionMetrics.assertConsumed(work, operator);

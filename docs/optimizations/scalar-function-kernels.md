@@ -51,6 +51,24 @@ retain Formatter. Its prepared BIGINT fixture is about 3.95x stock.
 See [configuration, all trials and remaining boundaries](../benchmarks/native-certified-scalars.md).
 These are bounded input measurements; they do not establish a gain for every native signature.
 
+### Runtime SQL TRIM and cache checks
+
+Direct SQL `TRIM` operands use a 128-bit ASCII character-set mask for BOTH, LEADING
+and TRAILING scans. A whole-batch certificate first checks ASCII bytes against any
+original Java UTF-16 cache. Empty sets and representation-sensitive inputs retain
+the generated Flink evaluator; the kernel never returns a partially certified
+batch. Multi-character sets starting with a space require the original decoded
+cache because Flink's binary-only helper treats that case differently.
+
+The shared ASCII cache check widens eight bytes into UTF-16 lanes per comparison,
+then checks the tail and length. This exposes independent comparisons to LLVM
+without skipping any character or allocating a decoded string. A CPU sample of
+the initial wide-text implementation attributed 2,403 of 2,751 native invocation
+samples to the certificate; these counts identify a bottleneck, not elapsed-time
+shares. Regression tests change every lane and tail position and check unequal
+lengths. The [SQL TRIM measurements](../benchmarks/scalar-functions.md#runtime-sql-trim)
+retain the initial slow LEADING control alongside the optimized results.
+
 ## FROM_UNIXTIME
 
 Literal numeric patterns in fixed-offset and finite-history regional zones compile to Rust
