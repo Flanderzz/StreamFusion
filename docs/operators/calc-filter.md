@@ -1786,7 +1786,19 @@ exchange when the first set character is a space.
 The SQL `TRIM([BOTH | LEADING | TRAILING] [characters] FROM s)` forms are native with
 a literal trim set, including Unicode, empty and NULL sets. The default set is the ASCII
 space, not all whitespace. These forms reuse BTRIM/LTRIM/RTRIM's character-set kernels.
-Column trim sets fall back for the same Flink representation-dependent behavior as BTRIM.
+Runtime trim sets are also admitted when the Calc reads a proven external Java-string
+conversion, with the same representation gate as BTRIM. Direct input/literal operands use
+a Rust batch kernel when every non-null string is ASCII, its original Java UTF-16 cache
+agrees with those bytes, and every evaluated trim set is nonempty. All three directions
+interpret the operand as a character set, not a regular expression. NULL propagates.
+
+Unicode, empty sets, computed operands and scalar consumers retain a fused generated Flink
+evaluator. In particular, an empty set's outcome can depend on its decoded-cache state;
+the Rust certificate declines the complete batch instead of normalizing that state.
+Filters and CASE suppress unselected failures, and all-filtered batches skip projections.
+Unknown or binary-backed source representations still fall back under
+[#508](https://github.com/datafusion-contrib/StreamFusion/issues/508).
+See the [SQL TRIM release measurements](../benchmarks/scalar-functions.md#runtime-sql-trim).
 
 ### ELT
 
@@ -2891,8 +2903,8 @@ A number of otherwise-admitted functions decline when called with an argument sh
 implementation can't handle, even though the function itself is supported:
 
 - An **unsupported literal type** anywhere in the expression.
-- **`TRIM`** — dynamic SQL trim sets; all directions with literal sets are native. Per-row
-  BTRIM/LTRIM/RTRIM sets use their documented external-Java-string admission.
+- **`TRIM`, `BTRIM`, `LTRIM`, `RTRIM`** — per-row sets require the documented
+  external-Java-string admission; unknown or binary-backed representations retain fallback.
 - **`POSITION`** — a `FROM` start offset.
 - **`CURRENT_WATERMARK`** — requires a Calc watermark context; unsupported in standalone join or UNNEST residuals.
 - **Collection subscripts:** non-INT ARRAY indexes and literal indexes below one; runtime MAP keys

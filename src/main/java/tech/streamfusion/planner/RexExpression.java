@@ -1929,7 +1929,7 @@ final class RexExpression {
             operand ->
                 containsDecimalUdf(operand)
                     || JsonStringIdentity.containsSensitiveString(operand)
-                    || containsExactStringCase(operand))) {
+                    || containsCacheSensitiveString(operand))) {
       return emitHostExpression(call, true);
     }
     if (tech.streamfusion.compat.FlinkCompat.scalarFunction(call.getOperator()) != null) {
@@ -4433,6 +4433,8 @@ final class RexExpression {
       case "LTRIM":
       case "RTRIM":
         return call.getOperands().size() == 2 && !(call.getOperands().get(1) instanceof RexLiteral);
+      case "TRIM":
+        return isRuntimeSqlTrim(call);
       case "GREATEST":
       case "LEAST":
         return SqlTypeFamily.CHARACTER.contains(call.getType())
@@ -4835,7 +4837,7 @@ final class RexExpression {
     }
     boolean originalStrings =
         fuseConsumers
-            && (containsExactStringCase(call) || JsonStringIdentity.containsSensitiveString(call))
+            && (containsCacheSensitiveString(call) || JsonStringIdentity.containsSensitiveString(call))
             && codes.contains(tech.streamfusion.operator.NativeUdf.TYPE_STRING);
     if (originalStrings) {
       codes.replaceAll(
@@ -4932,6 +4934,18 @@ final class RexExpression {
                         .getValueAs(String.class)
                         .chars()
                         .anyMatch(c -> c >= 0xd800 && c <= 0xdfff))) return 0;
+    if (isRuntimeSqlTrim(call)) {
+      switch (String.valueOf(((RexLiteral) call.getOperands().get(0)).getValue())) {
+        case "BOTH":
+          return 13;
+        case "LEADING":
+          return 14;
+        case "TRAILING":
+          return 15;
+        default:
+          return 0;
+      }
+    }
     if (call.getKind() == SqlKind.LIKE && call.getOperands().size() == 3) return 7;
     if (call.getKind() == SqlKind.SIMILAR) return 8;
     switch (call.getOperator().getName().toUpperCase(Locale.ROOT)) {
@@ -4974,7 +4988,11 @@ final class RexExpression {
   }
 
   private boolean emitCertifiedBuiltin(RexCall call, int operation, NativeStringFusion fusion) {
-    List<RexNode> operands = fusion == null ? call.getOperands() : fusion.operands;
+    if (!validateHostStringInputs(call)) return false;
+    boolean sqlTrim = operation >= 13 && operation <= 15;
+    List<RexNode> operands =
+        sqlTrim ? call.getOperands().subList(1, 3)
+            : fusion == null ? call.getOperands() : fusion.operands;
     List<RexNode> references = new ArrayList<>();
     List<org.apache.flink.table.types.logical.LogicalType> types = new ArrayList<>();
     int[] codes = new int[operands.size()];
@@ -4982,7 +5000,8 @@ final class RexExpression {
       RexNode operand = operands.get(i);
       codes[i] = hostCastTypeCode(operand.getType());
       if (codes[i] < 0) return emitHostExpression(call, fusion != null, false);
-      if (fusion != null && codes[i] == tech.streamfusion.operator.NativeUdf.TYPE_STRING) {
+      if ((fusion != null || sqlTrim)
+          && codes[i] == tech.streamfusion.operator.NativeUdf.TYPE_STRING) {
         codes[i] = tech.streamfusion.operator.NativeUdf.TYPE_INTERNAL;
       }
       references.add(
@@ -4994,6 +5013,7 @@ final class RexExpression {
     if (returnCode < 0) return emitHostExpression(call, fusion != null, false);
     int index;
     try {
+      if (sqlTrim) references.add(0, call.getOperands().get(0));
       var function =
           FlinkExpressionGenerator.generate(
               fusion == null ? call.clone(call.getType(), references) : fusion.expression(references),
@@ -5571,7 +5591,8 @@ final class RexExpression {
         break;
     }
     boolean dynamicTrim =
-        java.util.Set.of("BTRIM", "LTRIM", "RTRIM").contains(name)
+        isRuntimeSqlTrim(call)
+            || java.util.Set.of("BTRIM", "LTRIM", "RTRIM").contains(name)
             && call.getOperands().size() == 2
             && !(call.getOperands().get(1) instanceof RexLiteral);
     if ((dynamicTrim
@@ -5579,7 +5600,9 @@ final class RexExpression {
             || (name.equals("GREATEST") || name.equals("LEAST"))
                 && SqlTypeFamily.CHARACTER.contains(call.getType()))
         && !javaStringInputs
-        && call.getOperands().stream().anyMatch(operand -> !isAsciiLiteralResult(operand))) {
+        && call.getOperands().stream()
+            .filter(RexExpression::isCharacter)
+            .anyMatch(operand -> !isAsciiLiteralResult(operand))) {
       return reject("string representation before Arrow is not proven Java-backed");
     }
     return call.getOperands().stream().allMatch(this::validateHostStringInputs);
@@ -6098,13 +6121,14 @@ final class RexExpression {
     return emit(call.getOperands().get(0));
   }
 
-  private static boolean containsExactStringCase(RexNode node) {
+  private static boolean containsCacheSensitiveString(RexNode node) {
     if (!(node instanceof RexCall)) return false;
     RexCall call = (RexCall) node;
     String name = call.getOperator().getName();
     return ((name.equalsIgnoreCase("UPPER") || name.equalsIgnoreCase("LOWER"))
             && !NativeConfig.allowsIncompatible(name))
-        || call.getOperands().stream().anyMatch(RexExpression::containsExactStringCase);
+        || isRuntimeSqlTrim(call)
+        || call.getOperands().stream().anyMatch(RexExpression::containsCacheSensitiveString);
   }
 
   private static boolean needsExactPower(RexCall call) {
@@ -6297,6 +6321,16 @@ final class RexExpression {
     }
     Long value = ((RexLiteral) node).getValueAs(Long.class);
     return value != null && value >= min;
+  }
+
+  private static boolean isRuntimeSqlTrim(RexCall call) {
+    return call.getOperator()
+            == org.apache.flink.table.planner.functions.sql.FlinkSqlOperatorTable.TRIM
+        && call.getOperands().size() == 3
+        && call.getOperands().get(0) instanceof RexLiteral
+        && !(call.getOperands().get(1) instanceof RexLiteral)
+        && isCharacter(call.getOperands().get(1))
+        && isCharacter(call.getOperands().get(2));
   }
 
   /** Reuses the literal-set trim kernels for SQL's BOTH/LEADING/TRAILING syntax. */
