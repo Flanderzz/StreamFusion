@@ -1555,9 +1555,17 @@ impl<S: KeyedStateStore<DedupRow>> KeepLastDeduplicator<S> {
         let conv = self.payload_converter.as_ref().expect("converter set");
         // One vectorized row->columnar pass rebuilds every data column (cf. the per-cell scalar build).
         let parser = conv.parser();
-        let mut columns: Vec<ArrayRef> = conv
+        let decoded = conv
             .convert_rows(out_rows.iter().map(|r| parser.parse(r)))
             .expect("decode dedup payloads");
+        let mut columns: Vec<ArrayRef> = decoded
+            .iter()
+            .zip(schema.fields())
+            .map(|(column, field)| {
+                streamfusion_bridge::timestamp::cast_array(column, field.data_type())
+                    .expect("align dedup payload fields")
+            })
+            .collect();
         let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
         // Proctime keep-first is insert-only (every emitted row is a +I), so it carries no
         // $row_kind$ column; keep-last — and rowtime keep-first, its mini-batch retracting twin —

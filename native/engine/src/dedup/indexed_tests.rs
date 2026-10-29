@@ -318,3 +318,67 @@ fn crossing_the_small_state_threshold_promotes_before_the_next_arrival() {
     assert_eq!(values(&output, 0), expected);
     assert_eq!(values(&output, 2)[1023..], [5000, 5001]);
 }
+
+#[test]
+fn keep_last_preserves_nested_field_names_after_restore() {
+    use arrow::array::{ListArray, StringArray, StructArray, UInt16Array};
+    use arrow::buffer::OffsetBuffer;
+    let units = Arc::new(Field::new("$data$", DataType::UInt16, false));
+    let fields: arrow::datatypes::Fields = vec![
+        Field::new("utf8", DataType::Utf8, true)
+            .with_metadata([("streamfusion.nested-string".into(), "1".into())].into()),
+        Field::new("java", DataType::List(units.clone()), true),
+        Field::new("array_copy_class", DataType::Int8, true),
+    ]
+    .into();
+    let payload: ArrayRef = Arc::new(StructArray::new(
+        fields,
+        vec![
+            Arc::new(StringArray::from(vec![Some("?"), None, Some("next")])),
+            Arc::new(ListArray::new(
+                units,
+                OffsetBuffer::new(vec![0, 1, 1, 1].into()),
+                Arc::new(UInt16Array::from(vec![0xd800])),
+                None,
+            )),
+            Arc::new(Int8Array::from(vec![None, None, None])),
+        ],
+        None,
+    ));
+    let input = RecordBatch::try_from_iter(vec![
+        ("k", Arc::new(Int64Array::from(vec![1, 2, 1])) as ArrayRef),
+        ("rt", Arc::new(Int64Array::from(vec![0, 0, 0])) as ArrayRef),
+        ("v", payload),
+    ])
+    .unwrap();
+    let mut operator = KeepLastDeduplicator::new(vec![0], 1, true, false, false);
+    let first = operator.push(&input.slice(0, 2), 0).unwrap();
+    assert_eq!(first.column(2).data_type(), input.column(2).data_type());
+    assert_eq!(
+        first.column(2).as_ref(),
+        input.column(2).slice(0, 2).as_ref()
+    );
+    let snapshot = operator.snapshot();
+    let mut restored =
+        KeepLastDeduplicator::restore(vec![0], vec![-1], 1, true, false, false, &snapshot, 0);
+    let expected = arrow::compute::concat(&[
+        input.column(2).slice(0, 1).as_ref(),
+        input.column(2).slice(2, 1).as_ref(),
+    ])
+    .unwrap();
+    for state in [&mut operator, &mut restored] {
+        let output = state.push(&input.slice(2, 1), 1).unwrap();
+        assert_eq!(output.column(2).data_type(), input.column(2).data_type());
+        assert_eq!(output.column(2).as_ref(), expected.as_ref());
+        assert_eq!(
+            output
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .unwrap()
+                .values()
+                .to_vec(),
+            vec![1, 2]
+        );
+    }
+}
