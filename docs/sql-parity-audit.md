@@ -344,9 +344,11 @@ exercise this message-independent failure contract.
 
 Aggregate errors raised while a mini-batch bundle is flushed are classified as row evaluation,
 including global SINGLE_VALUE merge failures delivered through the collect client. The
-originating `finishBundle` frame identifies the data-processing phase even when no
-`processElement` or `endInput` frame survives the asynchronous error transport. Collection
+originating stock `finishBundle` or native `flushBundle` frame identifies the data-processing
+phase even when no `processElement` or `endInput` frame survives the asynchronous error transport. Collection
 remains the observed phase only when an originating operator frame cannot establish one.
+Native bundle flushes triggered by watermarks, pre-barrier checkpoints, and operator finish
+retain that evaluation phase; initialization failures keep their distinct classification.
 Repeated-recovery SINGLE_VALUE checks retain the exact released message and native routing.
 
 The grouped-value and floating aggregate regression suites pass 170 checks on Flink 2.2;
