@@ -3775,6 +3775,7 @@ SF_BENCHMARK=true mvn -B -ntp -pl streamfusion-runtime -am test -Pbench \
 
 Add `flink-1.18` to the Maven profiles for the other supported line. Complete-job
 trials and their engine order are retained in the JSON result record.
+
 ## Integer ROUND with a literal position
 
 Measured on 2026-10-28 against canonical main `d89e03b5`: Apple M4 Pro, macOS aarch64,

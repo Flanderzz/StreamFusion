@@ -468,14 +468,23 @@ if [[ "${SUITE_MODE}" == "prepare" ]]; then
     test_runtime_surefire_version=3.0.0-M5
     test_runtime_platform_version=1.9.1
   fi
+  test_runtime_artifacts=(
+    --artifact "org.apache.maven.surefire:surefire-junit-platform:${test_runtime_surefire_version}"
+    --artifact "org.junit.platform:junit-platform-launcher:${test_runtime_platform_version}"
+    --artifact "org.apache.httpcomponents:httpclient:4.4.1"
+  )
+  if [[ "${FLINK_LINE}" == "2.2" ]]; then
+    test_runtime_artifacts+=(
+      --artifact "org.apache.maven.surefire:surefire-junit-platform:3.2.5"
+      --artifact "org.junit.platform:junit-platform-launcher:1.13.3"
+    )
+  fi
   (
     cd "${FLINK_ROOT}" &&
       MAVEN_USER_HOME="${SUITE_MAVEN_USER_HOME}" python3 "${REPO_ROOT}/bin/ci-maven-dependencies.py" \
         --maven "${FLINK_ROOT}/mvnw" \
         --repository "${SUITE_MAVEN_REPO}" \
-        --artifact "org.apache.maven.surefire:surefire-junit-platform:${test_runtime_surefire_version}" \
-        --artifact "org.junit.platform:junit-platform-launcher:${test_runtime_platform_version}" \
-        --artifact "org.apache.httpcomponents:httpclient:4.4.1"
+        "${test_runtime_artifacts[@]}"
   ) || exit $?
   echo "Verifying the prepared upstream test runtime without downloads..."
   flink_mvn ${FLINK_TARGET_PROFILE:+-P${FLINK_TARGET_PROFILE}} -B -ntp -o -s "${MAVEN_SETTINGS}" \

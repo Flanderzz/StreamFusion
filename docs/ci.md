@@ -308,6 +308,8 @@ checks prevents Maven's failed-lookup cache from defeating the next setup attemp
 The upstream suite transfers its prepared pinned Maven distribution to its consumer runners
 and verifies that it starts with downloads blocked. See the
 [shared-build guide](upstream-flink-suite.md#shared-builds-and-runtime-shards).
+That preparation includes Kafka 5.0's distinct Surefire 3.2.5 provider and Platform
+1.13.3 launcher; resolving Flink's provider alone does not cover Kafka test startup.
 
 ## Doris connector
 
