@@ -867,6 +867,15 @@ check uses no injection agent, contributes no native-coverage evidence, and its 
 excluded from the shared artifact. Update these pins when upgrading the corresponding
 upstream Surefire or JUnit version.
 
+Preparation also resolves Kafka 5.0's separate Surefire 3.2.5 provider and Platform
+1.13.3 launcher on the Flink 2.2 line. Compiling its tests does not load that launcher,
+and Flink's Platform 1.11.4 runtime does not cover it. A connector job failed before
+any Kafka tests ran when Maven Central returned HTTP 502 for the 1.13.3 launcher
+descriptor. Preparing both original dependency graphs with the same bounded setup
+retries keeps this download out of test startup without changing Kafka's dependency
+versions or retrying its tests. The isolated loader regression also covers this
+Surefire/JUnit combination with Jupiter and Vintage tests running offline.
+
 The same setup stage resolves the original `httpclient:4.4.1` dependency graph required by
 Paimon 2.0's released Hive dependencies. Its remote-resource license plugin reads those
 original descriptors outside the host's dependency management: a CI consumer failed before

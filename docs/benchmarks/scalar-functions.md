@@ -3775,3 +3775,218 @@ SF_BENCHMARK=true mvn -B -ntp -pl streamfusion-runtime -am test -Pbench \
 
 Add `flink-1.18` to the Maven profiles for the other supported line. Complete-job
 trials and their engine order are retained in the JSON result record.
+
+## Integer ROUND with a literal position
+
+Measured on 2026-10-28 against canonical main `d89e03b5`: Apple M4 Pro, macOS aarch64,
+JDK 17.0.12, Rust 1.94.0 release without default features, system allocator with counting
+allocation wrapper. Released Flink 1.18.1 and 2.2.1 are measured independently. The query
+is `ROUND(v, literal_position)` on each signed integer width. No option is required for
+admitted positions in -38..38 or typed NULL; runtime/extreme positions stay generated.
+
+The shared `integral_rounding` example compares equal prepared logical values, widths,
+NULLs, signed minima and BIGINTs above 2^53. Stock uses the released generated expression
+over GenericRowData/BinaryRowData. Main and candidate start on Arrow in production Calc,
+with timers inside Rust. Main's actual encoding was independently checked on both lines:
+kind 17, one integer input, a matching primitive result code and the literal embedded in
+the generated expression. Its scalar JVM callback and intrinsic conversions remain timed;
+a whole-row evaluator is not substituted for that baseline. Setup, initial JNI entry,
+Arrow import/export and perimeter transposes are excluded. Full Arrow/schema equality
+precedes timing; every measured output contributes to matching wrapping checksums.
+
+All schemas are nullable; the NULL flag means actual NULLs every seventh row. Profiles
+include a native-width divisor (-1), a widened divisor (-19), shared-buffer identity (+2),
+1,024-row bulk and 16-row controls. Stock/main/candidate order rotates over 16 warmups
+and 11 measured trials of 65,536 rows per trial. Runs are sequential without concurrent
+builds or tests. Values are median [min, max] ns/row.
+
+| Flink / type / NULL values / stock format / rows / position | Stock ns/row | Main ns/row | Native ns/row | Stock/native | Main/native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1 / BIGINT / false / binary / 1024 / -1 | 20.295 [16.401, 34.218] | 63.417 [42.317, 97.714] | 1.054 [0.970, 1.186] | 19.25x | 60.16x |
+| 1.18.1 / BIGINT / true / generic / 1024 / -1 | 25.187 [15.237, 44.253] | 57.227 [40.222, 115.171] | 1.401 [1.374, 1.504] | 17.98x | 40.86x |
+| 1.18.1 / BIGINT / true / generic / 1024 / 2 | 21.570 [19.807, 38.154] | 48.349 [42.130, 79.212] | 0.776 [0.706, 0.835] | 27.79x | 62.28x |
+| 1.18.1 / BIGINT / true / binary / 1024 / -19 | 21.341 [19.769, 45.342] | 64.600 [48.355, 104.913] | 1.433 [1.362, 1.626] | 14.89x | 45.08x |
+| 1.18.1 / BIGINT / true / binary / 16 / -1 | 8.309 [8.127, 8.578] | 522.553 [509.412, 531.985] | 26.217 [25.069, 27.737] | 0.32x | 19.93x |
+| 1.18.1 / INT / false / binary / 1024 / -1 | 14.713 [11.123, 16.694] | 56.767 [51.779, 101.699] | 1.043 [0.915, 1.096] | 14.11x | 54.44x |
+| 1.18.1 / INT / true / generic / 1024 / -1 | 9.023 [8.751, 10.166] | 32.519 [29.354, 98.593] | 1.403 [1.362, 1.588] | 6.43x | 23.18x |
+| 1.18.1 / INT / true / generic / 1024 / 2 | 9.085 [8.963, 12.779] | 39.531 [34.158, 76.625] | 0.813 [0.800, 0.884] | 11.17x | 48.61x |
+| 1.18.1 / INT / true / binary / 1024 / -19 | 10.394 [9.523, 29.420] | 44.711 [41.842, 96.408] | 1.404 [1.354, 1.561] | 7.40x | 31.85x |
+| 1.18.1 / INT / true / binary / 16 / -1 | 8.261 [8.142, 12.412] | 506.146 [501.726, 549.752] | 23.167 [22.579, 23.507] | 0.36x | 21.85x |
+| 1.18.1 / SMALLINT / false / binary / 1024 / -1 | 12.840 [12.487, 34.390] | 50.510 [40.183, 100.056] | 1.024 [0.963, 1.071] | 12.54x | 49.31x |
+| 1.18.1 / SMALLINT / true / generic / 1024 / -1 | 10.525 [9.774, 28.827] | 32.763 [31.300, 39.398] | 1.408 [1.360, 1.470] | 7.48x | 23.28x |
+| 1.18.1 / SMALLINT / true / generic / 1024 / 2 | 14.768 [11.401, 28.476] | 47.838 [35.615, 119.448] | 0.830 [0.793, 0.968] | 17.79x | 57.61x |
+| 1.18.1 / SMALLINT / true / binary / 1024 / -19 | 19.641 [14.444, 36.503] | 37.951 [33.329, 54.068] | 1.392 [1.289, 1.594] | 14.11x | 27.27x |
+| 1.18.1 / SMALLINT / true / binary / 16 / -1 | 6.919 [6.827, 27.100] | 523.215 [515.179, 527.838] | 23.293 [22.640, 23.792] | 0.30x | 22.46x |
+| 1.18.1 / TINYINT / false / binary / 1024 / -1 | 11.786 [11.625, 12.552] | 51.721 [46.646, 98.059] | 1.037 [1.020, 1.140] | 11.37x | 49.88x |
+| 1.18.1 / TINYINT / true / generic / 1024 / -1 | 10.710 [9.556, 29.348] | 41.841 [31.691, 72.752] | 1.429 [1.249, 1.666] | 7.49x | 29.27x |
+| 1.18.1 / TINYINT / true / generic / 1024 / 2 | 16.310 [14.906, 31.041] | 38.218 [35.713, 56.314] | 0.826 [0.773, 0.844] | 19.75x | 46.27x |
+| 1.18.1 / TINYINT / true / binary / 1024 / -19 | 21.159 [15.428, 37.910] | 58.338 [39.677, 113.485] | 1.396 [1.350, 1.724] | 15.15x | 41.78x |
+| 1.18.1 / TINYINT / true / binary / 16 / -1 | 9.501 [8.812, 10.990] | 569.044 [549.186, 615.807] | 24.003 [23.064, 25.495] | 0.40x | 23.71x |
+| 2.2.1 / BIGINT / false / binary / 1024 / -1 | 17.445 [16.772, 31.464] | 38.129 [36.368, 54.123] | 1.046 [1.013, 1.104] | 16.68x | 36.46x |
+| 2.2.1 / BIGINT / true / generic / 1024 / -1 | 18.519 [18.015, 36.332] | 34.995 [32.736, 55.193] | 1.427 [1.368, 1.521] | 12.97x | 24.52x |
+| 2.2.1 / BIGINT / true / generic / 1024 / 2 | 34.648 [19.582, 43.114] | 65.889 [49.659, 140.938] | 0.837 [0.698, 1.000] | 41.38x | 78.69x |
+| 2.2.1 / BIGINT / true / binary / 1024 / -19 | 20.863 [20.085, 64.760] | 65.118 [54.057, 106.282] | 1.440 [1.410, 1.745] | 14.49x | 45.22x |
+| 2.2.1 / BIGINT / true / binary / 16 / -1 | 8.451 [7.376, 13.141] | 571.144 [539.469, 584.906] | 26.101 [22.622, 28.975] | 0.32x | 21.88x |
+| 2.2.1 / INT / false / binary / 1024 / -1 | 12.973 [10.591, 17.623] | 54.145 [47.759, 98.277] | 1.066 [0.959, 1.113] | 12.17x | 50.81x |
+| 2.2.1 / INT / true / generic / 1024 / -1 | 12.401 [9.130, 14.297] | 49.821 [34.920, 102.674] | 1.415 [1.298, 1.521] | 8.77x | 35.22x |
+| 2.2.1 / INT / true / generic / 1024 / 2 | 12.624 [10.127, 27.711] | 66.395 [42.700, 91.185] | 0.837 [0.818, 0.850] | 15.09x | 79.35x |
+| 2.2.1 / INT / true / binary / 1024 / -19 | 15.711 [9.849, 37.292] | 105.385 [38.283, 164.042] | 1.377 [1.354, 1.432] | 11.41x | 76.53x |
+| 2.2.1 / INT / true / binary / 16 / -1 | 8.342 [7.921, 8.502] | 516.578 [501.617, 538.036] | 23.314 [21.689, 25.815] | 0.36x | 22.16x |
+| 2.2.1 / SMALLINT / false / binary / 1024 / -1 | 14.891 [12.455, 33.859] | 60.584 [44.174, 101.692] | 1.100 [1.064, 1.170] | 13.54x | 55.08x |
+| 2.2.1 / SMALLINT / true / generic / 1024 / -1 | 13.615 [10.628, 30.334] | 55.721 [51.214, 106.354] | 1.415 [1.271, 1.623] | 9.62x | 39.39x |
+| 2.2.1 / SMALLINT / true / generic / 1024 / 2 | 13.747 [11.222, 32.217] | 49.999 [41.403, 97.153] | 0.832 [0.741, 0.855] | 16.53x | 60.12x |
+| 2.2.1 / SMALLINT / true / binary / 1024 / -19 | 14.741 [14.492, 31.559] | 35.318 [33.274, 53.660] | 1.404 [1.383, 1.635] | 10.50x | 25.16x |
+| 2.2.1 / SMALLINT / true / binary / 16 / -1 | 7.176 [6.625, 8.462] | 557.781 [533.161, 611.802] | 24.355 [22.543, 28.458] | 0.29x | 22.90x |
+| 2.2.1 / TINYINT / false / binary / 1024 / -1 | 24.363 [11.980, 32.704] | 57.568 [33.740, 84.532] | 1.095 [0.927, 1.188] | 22.25x | 52.58x |
+| 2.2.1 / TINYINT / true / generic / 1024 / -1 | 11.126 [9.336, 39.951] | 43.566 [31.790, 70.793] | 1.387 [1.241, 1.590] | 8.02x | 31.40x |
+| 2.2.1 / TINYINT / true / generic / 1024 / 2 | 18.447 [15.104, 29.708] | 68.672 [44.312, 97.975] | 0.820 [0.750, 0.860] | 22.51x | 83.80x |
+| 2.2.1 / TINYINT / true / binary / 1024 / -19 | 16.088 [15.526, 35.040] | 54.562 [38.261, 114.259] | 1.413 [1.254, 1.724] | 11.38x | 38.61x |
+| 2.2.1 / TINYINT / true / binary / 16 / -1 | 9.165 [8.950, 9.549] | 498.255 [490.307, 538.081] | 22.830 [22.391, 24.350] | 0.40x | 21.82x |
+
+The 1,024-row candidate improves 6.43-41.38x over stock and 23.18-83.80x over main.
+The 16-row candidate remains slower than stock (0.29-0.40x), while improving
+19.93-23.71x over main. Native-width remainder avoids per-element i128 division;
+large powers use widened comparisons and nonnegative positions share the input.
+A three-second native-only sample on the slower INT/16-row profile observes
+scalar-function argument/result setup and destruction, primitive-array allocation,
+Calc projection and checksum consumption. Overlapping sampled frames do not establish
+independent CPU percentages. The raw allocation probes distinguish shared output buffers
+from newly requested values buffers. These are bounded batch gains, not a universal
+small-batch or end-to-end claim.
+
+An independent complete job processes 1M INT rows using `ROUND(v,-1)`, parallelism one,
+a bounded Flink row source and a rowwise blackhole sink. Native plans retain both
+transposes and require positive consumed NativeCalc work. Main uses its actual encoder
+first on the classpath and requires the ROUND JVM route; candidate requires `jvm=[]`.
+Two warmups precede five measured jobs in each sequential engine JVM. Seconds are
+median [min, max]:
+
+| Stock | Main scalar callback | Candidate |
+| ---: | ---: | ---: |
+| 0.143764 [0.139465, 0.157385] | 0.164713 [0.157161, 0.173648] | 0.139733 [0.130734, 0.143993] |
+
+The candidate improves main on this job, with overlapping stock/candidate ranges.
+Startup, submission and JIT remain included; these short jobs do not establish sustained
+complete-job acceleration. [All raw trials, checksums, configuration and allocation probes](results/integral-round-positions-2026-10-28.json)
+remain available. Generic small-batch and perimeter work stays in
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+After building current Java test classes, set `JAVA_HOME`, `SF_NATIVE_BENCH_CLASSPATH`
+and `SF_NATIVE_LIB_DIR` to the release library directory. Build and run:
+
+```sh
+cargo build --manifest-path native/Cargo.toml -p streamfusion --release \
+  --no-default-features --lib --example integral_rounding
+SF_INTEGRAL_ROUNDING_FUNCTION=ROUND SF_INTEGRAL_ROUNDING_POSITION=-1 \
+  native/target/release/examples/integral_rounding INT true false 1024 64 16 11
+```
+
+Arguments are type, actual NULL flag, stock BinaryRowData flag, batch rows, loops,
+warmups and measured trials. Without the position environment variable the shared
+example retains its historical single-argument mode. Complete-job properties are
+`rounding.pipeline.function=ROUND`, `rounding.pipeline.position=-1` and
+`rounding.pipeline.engine=flink|previous|native`, enabled by `SF_BENCHMARK=true` and
+the `bench` profile. The previous mode requires the preceding encoder first on the
+classpath; relabeling the unchanged candidate is insufficient.
+
+Runtime parity covers every admitted position and all widths on both supported Flink
+lines and JDK 11/17. Witnesses consume 5,003 rows per width with no ROUND JVM route,
+check exact expected values/NULLs, and require positive native work and no fallback.
+Nested/widened expressions, scalar consumers, filters, empty batches, selected/unselected
+failures and extreme-position host errors are covered. The unchanged released upstream
+`ScalarFunctionsTest.testRound` passes on both lines; it supplies oracle evidence,
+while the runtime witnesses prove consumed native work. Full JVM/upstream suites remain CI checks.
+
+## Integer TRUNCATE with a literal position
+
+Measured independently on 2026-10-28 against canonical main `d89e03b5`, using the same
+Apple M4 Pro, JDK 17.0.12, Rust 1.94.0 release/no-default-features configuration,
+system/counting allocator and boundaries as [literal-position ROUND](#integer-round-with-a-literal-position).
+The query is `TRUNCATE(v, literal_position)` on INT/BIGINT. Direct narrow-integer
+signatures preserve released Flink's generated-compilation failure; explicit widening
+is supported. Admission covers INT literal positions -38..38 or typed NULL and verified
+producers only; runtime/extreme positions and other producers stay generated.
+
+Stock executes the released generated projection over prepared GenericRowData/BinaryRowData.
+Main's actual kind-17 scalar expression has one integer argument/result and embeds the
+literal position; its callback and intrinsic conversion stay inside the Rust timer.
+Candidate production Calc invokes the Arrow toward-zero kernel. Values, widths, NULLs,
+minima and BIGINTs above 2^53 match. Full output/schema equality precedes timing and all
+measured outputs contribute to matching checksums in their own runtime. Input/operator
+setup, JNI import/export and perimeter transposes are excluded only from this prepared
+functionality measurement. No concurrent tests/builds run during measurement.
+
+Every schema is nullable; actual NULLs appear every seventh row when the flag is true.
+Profiles cover -1, -19 and +2 positions, native-width/large divisors, shared-buffer
+identity and 1,024-/16-row batches. Each case rotates stock/main/candidate order for
+16 warmups and 11 measured trials of 65,536 rows. Values are median [min, max] ns/row.
+
+| Flink / type / NULL values / stock format / rows / position | Stock ns/row | Main ns/row | Native ns/row | Stock/native | Main/native |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1.18.1 / BIGINT / false / binary / 1024 / -1 | 82.793 [80.556, 96.215] | 105.433 [99.404, 160.713] | 1.088 [1.046, 1.149] | 76.06x | 96.86x |
+| 1.18.1 / BIGINT / true / generic / 1024 / -1 | 73.506 [70.045, 119.251] | 99.348 [92.960, 154.620] | 1.449 [1.300, 1.569] | 50.73x | 68.57x |
+| 1.18.1 / BIGINT / true / generic / 1024 / 2 | 79.189 [66.412, 109.428] | 96.375 [88.223, 119.227] | 0.942 [0.796, 0.998] | 84.04x | 102.28x |
+| 1.18.1 / BIGINT / true / binary / 1024 / -19 | 29.352 [28.196, 60.632] | 49.988 [47.063, 72.699] | 0.969 [0.942, 1.118] | 30.29x | 51.59x |
+| 1.18.1 / BIGINT / true / binary / 16 / -1 | 66.630 [63.771, 71.818] | 622.942 [606.855, 636.044] | 24.017 [22.496, 30.481] | 2.77x | 25.94x |
+| 1.18.1 / INT / false / binary / 1024 / -1 | 63.423 [61.859, 95.424] | 88.022 [80.719, 137.247] | 1.005 [0.931, 1.125] | 63.10x | 87.57x |
+| 1.18.1 / INT / true / generic / 1024 / -1 | 56.305 [54.621, 109.278] | 81.130 [74.706, 99.076] | 1.493 [1.376, 1.634] | 37.70x | 54.32x |
+| 1.18.1 / INT / true / generic / 1024 / 2 | 54.448 [52.867, 97.235] | 96.239 [73.837, 135.696] | 0.849 [0.821, 0.868] | 64.10x | 113.30x |
+| 1.18.1 / INT / true / binary / 1024 / -19 | 26.170 [24.514, 49.325] | 62.735 [46.422, 148.438] | 1.012 [0.946, 1.991] | 25.86x | 61.98x |
+| 1.18.1 / INT / true / binary / 16 / -1 | 52.738 [50.178, 59.952] | 595.444 [586.147, 614.468] | 24.014 [22.436, 26.831] | 2.20x | 24.80x |
+| 2.2.1 / BIGINT / false / binary / 1024 / -1 | 81.130 [77.929, 119.018] | 106.023 [100.971, 168.556] | 1.126 [1.043, 1.234] | 72.05x | 94.16x |
+| 2.2.1 / BIGINT / true / generic / 1024 / -1 | 71.206 [68.321, 89.049] | 93.903 [89.711, 114.658] | 1.430 [1.390, 1.520] | 49.80x | 65.67x |
+| 2.2.1 / BIGINT / true / generic / 1024 / 2 | 74.601 [61.907, 107.140] | 93.374 [87.193, 154.513] | 0.860 [0.745, 0.956] | 86.72x | 108.55x |
+| 2.2.1 / BIGINT / true / binary / 1024 / -19 | 29.249 [27.757, 61.291] | 66.074 [50.031, 106.862] | 1.003 [0.959, 1.086] | 29.17x | 65.90x |
+| 2.2.1 / BIGINT / true / binary / 16 / -1 | 66.425 [64.204, 75.006] | 623.986 [616.370, 649.518] | 24.160 [23.481, 25.192] | 2.75x | 25.83x |
+| 2.2.1 / INT / false / binary / 1024 / -1 | 63.797 [60.988, 116.205] | 88.085 [79.557, 121.353] | 1.036 [0.984, 1.175] | 61.60x | 85.05x |
+| 2.2.1 / INT / true / generic / 1024 / -1 | 55.975 [53.712, 95.767] | 82.354 [73.753, 118.947] | 1.420 [1.291, 1.466] | 39.41x | 57.98x |
+| 2.2.1 / INT / true / generic / 1024 / 2 | 65.570 [53.518, 104.253] | 85.697 [76.602, 140.537] | 0.852 [0.741, 0.964] | 76.96x | 100.59x |
+| 2.2.1 / INT / true / binary / 1024 / -19 | 25.875 [24.856, 50.336] | 51.790 [44.918, 96.118] | 0.957 [0.909, 1.131] | 27.04x | 54.13x |
+| 2.2.1 / INT / true / binary / 16 / -1 | 52.284 [50.070, 56.420] | 586.700 [566.703, 602.521] | 28.638 [27.205, 29.861] | 1.83x | 20.49x |
+
+At 1,024 rows the recorded candidate improves 25.86-86.72x over stock and 51.59-113.30x
+over main. At 16 rows it improves 1.83-2.77x over stock and 20.49-25.94x over main.
+The kernel avoids released Flink's DECIMAL(38,18) intermediate, uses native integer
+remainder for negative positions, writes zero when the divisor exceeds the input width,
+and shares buffers for nonnegative positions. There is no HALF_UP increment in TRUNCATE.
+Allocation probes in the raw record distinguish shared validity/identity buffers from
+new result values. These measurements do not imply that every Calc or workload accelerates.
+
+The independent complete job retains the bounded row source, both transposes and a
+rowwise blackhole sink: Flink 2.2.1, 1M INT rows, `TRUNCATE(v,-1)`, parallelism one,
+two warmups and five measured jobs per engine in sequential JVMs. The actual main
+encoder is loaded first for the previous control; route checks require its TRUNCATE
+JVM evaluator and candidate `jvm=[]`. Both native modes require consumed NativeCalc
+work and both transposes. Seconds are median [min, max]:
+
+| Stock | Main scalar callback | Candidate |
+| ---: | ---: | ---: |
+| 0.210510 [0.200087, 0.216174] | 0.215636 [0.205634, 0.227845] | 0.131335 [0.127314, 0.152458] |
+
+The recorded complete workload improves 1.60x over stock and 1.64x over main by median.
+Submission, startup, JIT and both transposes remain included; this does not establish
+sustained throughput or a universal gain. [All raw trials, checksums and allocation probes](results/integral-truncate-positions-2026-10-28.json)
+retain variability and the exact configuration. Generic Calc/perimeter costs remain in
+[#491](https://github.com/datafusion-contrib/StreamFusion/issues/491).
+
+Use the shared release example and complete-job fixture from ROUND, selecting
+`SF_INTEGRAL_ROUNDING_FUNCTION=TRUNCATE` / `rounding.pipeline.function=TRUNCATE`,
+with the corresponding position setting. Without a position setting the historical
+single-argument mode is unchanged. The previous mode requires its actual encoder
+first on the classpath.
+
+The final combined regression passes 396 JVM test invocations across 13 classes,
+Flink 1.18.1/2.2.1 and JDK 11/17, plus all 835 release Rust core tests. Fresh all-core
+production compilation targets Java 11 on both lines. TRUNCATE parity covers all 77
+positions, declared nullability, typed NULL positions, signed extrema, exact BIGINTs,
+scalar consumers, filters and ROUND/TRUNCATE nesting. INT/BIGINT witnesses verify exact
+outputs and consumed native work over 5,003 rows per type with no evaluator or fallback.
+Selected/unselected failures, empty batches, extreme-position Underflow and narrow-input
+compilation behavior remain checked. Unchanged released upstream `testRound` and
+`testTruncate` pass on both lines; those supply oracle evidence, while the focused
+witnesses establish execution of the native kernels. Full JVM/upstream suites remain CI checks.
+
+After sharing the ROUND/TRUNCATE input handling, independent ROUND INT/-1 and BIGINT/-19
+1,024-row controls recheck output/schema/checksums and timing against stock and actual main.
+Their full measured trials are included as `shared_round_kernel_rechecks` in the TRUNCATE
+raw record; the original 40-case ROUND matrix records the preceding ROUND-only implementation.

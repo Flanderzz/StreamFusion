@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -29,10 +30,12 @@ def api(method, path, data=None):
         return json.load(response)
 
 
-def pages(path):
+def pages(path, key=None):
     page = 1
     while True:
         values = api('GET', f'{path}{"&" if "?" in path else "?"}per_page=100&page={page}')
+        if key is not None:
+            values = values[key]
         yield from values
         if len(values) < 100:
             return
@@ -86,17 +89,20 @@ def mirror(repository, pr):
     if pr['state'] != 'open':
         return
     sha = pr['head']['sha']
-    checks = api('GET', f'repos/{repository}/commits/{sha}/check-runs?per_page=100')['check_runs']
+    checks = list(pages(f'repos/{repository}/commits/{sha}/check-runs?filter=all', 'check_runs'))
     for workflow, names in WORKFLOWS.items():
         result = payload(pr, workflow)
         for name in names:
-            # Only update checks owned by this GitHub Actions application.
+            external_id = f'streamfusion:fork-ci:v1:{pr["number"]}:{workflow}:{name}'
+            owned_result = {'external_id': external_id, **result}
+            # Ordinary workflow jobs use the same application and check names.
             check = next((check for check in checks
-                          if check['name'] == name and check['app']['slug'] == 'github-actions'), None)
+                          if check['name'] == name and check['app']['slug'] == 'github-actions'
+                          and check.get('external_id') == external_id), None)
             if check:
-                api('PATCH', f'repos/{repository}/check-runs/{check["id"]}', result)
+                api('PATCH', f'repos/{repository}/check-runs/{check["id"]}', owned_result)
             else:
-                api('POST', f'repos/{repository}/check-runs', {'name': name, 'head_sha': sha, **result})
+                api('POST', f'repos/{repository}/check-runs', {'name': name, 'head_sha': sha, **owned_result})
     print(f'Mirrored PR #{pr["number"]} at {sha}')
 
 
@@ -110,9 +116,22 @@ def main():
         numbers = [event['pull_request']['number']]
     else:
         numbers = [pr['number'] for pr in pages(f'repos/{repository}/pulls?state=open')]
+    errors = []
     for number in numbers:
         # Refresh the head: a scheduled update must not report on a superseded PR revision.
-        mirror(repository, api('GET', f'repos/{repository}/pulls/{number}'))
+        try:
+            mirror(repository, api('GET', f'repos/{repository}/pulls/{number}'))
+        except Exception as error:
+            location = f' ({error.filename})' if isinstance(error, HTTPError) else ''
+            message = f'PR #{number}: {error}{location}'
+            print(message, file=sys.stderr)
+            errors.append(message)
+    if errors:
+        summary = 'Fork CI refresh failed:\n' + '\n'.join(f'- {error}' for error in errors)
+        if os.environ.get('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as target:
+                target.write(summary + '\n')
+        raise SystemExit(summary)
 
 
 if __name__ == '__main__':
