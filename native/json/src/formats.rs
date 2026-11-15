@@ -1,5 +1,29 @@
 use crate::*;
 #[cfg(test)]
+pub(crate) fn new_canal_decoder(
+    schema: SchemaRef,
+    skip_errors: bool,
+    include: CanalIncludeFilter,
+) -> MessageDecoder {
+    MessageDecoder {
+        decoder: Box::new(
+            CdcJsonDecoder::new(
+                schema,
+                CdcDialect::Canal,
+                crate::json::JsonEnv {
+                    mode: flink_text::TimestampMode::default(),
+                    lenient: false,
+                    tree_duplicates: true,
+                },
+                skip_errors,
+                false,
+            )
+            .with_include(include),
+        ),
+        skip_errors,
+    }
+}
+#[cfg(test)]
 pub(crate) fn new_decoder(
     format: i32,
     schema: SchemaRef,
@@ -116,6 +140,8 @@ pub(crate) struct CdcJsonDecoder {
     /// fanning a message out KEEPS the rows emitted before it — Flink's deserializers accumulate
     /// into a list and collect whatever it holds after the catch.
     skip_errors: bool,
+    /// Canal's `database.include` / `table.include`, applied before any row conversion.
+    include: Option<CanalIncludeFilter>,
 }
 
 impl CdcJsonDecoder {
@@ -182,7 +208,42 @@ impl CdcJsonDecoder {
                 .collect(),
             dialect,
             skip_errors,
+            include: None,
         }
+    }
+
+    pub(crate) fn with_include(mut self, include: CanalIncludeFilter) -> CdcJsonDecoder {
+        self.include = Some(include);
+        self
+    }
+
+    /// Drops the messages Canal's include filters reject, before the envelope decode converts
+    /// anything: a rejected message never fails on bad data, as in Flink. A message the filter
+    /// cannot read is corrupt — the job fails, or it drops under `ignore-parse-errors`.
+    fn apply_include(&self, include: &CanalIncludeFilter, bodies: &RecordBatch) -> RecordBatch {
+        let column = bodies.column(0);
+        let mut kept: Vec<u32> = Vec::with_capacity(bodies.num_rows());
+        for (row, admission) in include.admit(column).into_iter().enumerate() {
+            match admission {
+                Admission::Keep => kept.push(row as u32),
+                Admission::Drop => {}
+                Admission::Corrupt if self.skip_errors => {}
+                Admission::Corrupt => panic!(
+                    "Corrupt {} JSON message '{}'.",
+                    self.dialect.name(),
+                    String::from_utf8_lossy(
+                        binary_body(column, row).expect("tombstones are stripped first")
+                    )
+                ),
+            }
+        }
+        if kept.len() == bodies.num_rows() {
+            return bodies.clone();
+        }
+        let indices = arrow::array::UInt32Array::from(kept);
+        let column = take(column, &indices, None).expect("failed to drop filtered messages");
+        RecordBatch::try_new(bodies.schema(), vec![column])
+            .expect("failed to rebuild the filtered body batch")
     }
 
     /// Emits one envelope row's — one message's — output rows. Any failure in here is the
@@ -412,6 +473,10 @@ impl CdcJsonDecoder {
     fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
         use arrow::array::ListArray;
         let bodies = &self.strip_tombstones(bodies);
+        let bodies = &match &self.include {
+            Some(include) => self.apply_include(include, bodies),
+            None => bodies.clone(),
+        };
         let envelope = self.envelope.decode(bodies);
         if envelope.num_rows() == 0 {
             return RecordBatch::new_empty(self.output.clone());
@@ -653,4 +718,59 @@ pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_creat
         skip_parse_errors,
         format_options,
     )
+}
+
+/// A Canal decoder applying `database.include` / `table.include`. `filter` is the JVM object
+/// that decides each distinct value with Flink's own regex and number semantics; the decoder holds
+/// it for its lifetime.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_createCanalDecoder<
+    'local,
+>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    schema_array_address: jlong,
+    schema_address: jlong,
+    skip_parse_errors: jboolean,
+    format_options: JString<'local>,
+    filter: jni::objects::JObject<'local>,
+    database: jboolean,
+    table: jboolean,
+) -> jlong {
+    streamfusion_bridge::jni_guard(env, move |env| {
+        let schema = import_record_batch(schema_array_address, schema_address).schema();
+        let format_options: String = env
+            .get_string(&format_options)
+            .map(Into::into)
+            .unwrap_or_default();
+        let options = parse_format_options(&format_options);
+        let verdicts = JvmIncludeVerdicts {
+            vm: env.get_java_vm().expect("failed to read the JavaVM"),
+            filter: env
+                .new_global_ref(&filter)
+                .expect("failed to retain the Canal include filter"),
+        };
+        let skip_errors = skip_parse_errors != 0;
+        let decoder = CdcJsonDecoder::new(
+            schema,
+            CdcDialect::Canal,
+            crate::json::JsonEnv {
+                mode: options.timestamp_mode,
+                lenient: false,
+                tree_duplicates: true,
+            },
+            skip_errors,
+            options.json_reject_array_roots,
+        )
+        .with_include(CanalIncludeFilter::new(
+            database != 0,
+            table != 0,
+            Box::new(verdicts),
+        ));
+        into_handle(MessageDecoder {
+            decoder: Box::new(decoder),
+            skip_errors,
+        })
+    })
 }

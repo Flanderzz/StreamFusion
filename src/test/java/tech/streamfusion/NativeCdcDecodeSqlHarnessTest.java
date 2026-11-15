@@ -1,5 +1,7 @@
 package tech.streamfusion;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Properties;
@@ -15,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.testcontainers.containers.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
+import tech.streamfusion.planner.NativePlanner;
 
 /**
  * End-to-end tests for the CDC native-decode path (Phase 3): a {@code CREATE TABLE ...
@@ -216,6 +219,89 @@ class NativeCdcDecodeSqlHarnessTest {
     }
   }
 
+  /**
+   * One Canal topic carries several tables plus TiCDC's watermark and DDL events, and one job reads
+   * it through two differently filtered tables. Each scan keeps exactly the messages Flink's include
+   * patterns keep: a rejected message never fails on its content, and a DDL event a filter admits
+   * is corrupt in both engines — skipped here under ignore-parse-errors.
+   */
+  @Test
+  void canalIncludeFiltersSplitOneTopicWithParity() throws Exception {
+    try (KafkaContainer kafka =
+        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))) {
+      kafka.start();
+      String brokers = kafka.getBootstrapServers();
+      produce(
+          brokers,
+          "cdc-canal-tables",
+          List.of(
+              "{\"data\":[{\"id\":\"1\",\"name\":\"a\",\"score\":\"1.5\"}],\"database\":\"shop\","
+                  + "\"table\":\"orders\",\"type\":\"INSERT\"}",
+              "{\"data\":[{\"id\":\"7\",\"name\":\"u\",\"score\":\"0.5\"}],\"database\":\"shop\","
+                  + "\"table\":\"users\",\"type\":\"INSERT\"}",
+              "{\"data\":[{\"id\":\"2\",\"name\":\"b\",\"score\":\"2.5\"}],\"database\":\"shop\","
+                  + "\"table\":\"orders_2024\",\"type\":\"INSERT\"}",
+              "{\"data\":[{\"id\":\"3\",\"name\":\"x\",\"score\":\"not a double\"}],"
+                  + "\"database\":\"crm\",\"table\":\"orders\",\"type\":\"INSERT\"}",
+              "{\"id\":0,\"database\":\"\",\"table\":\"\",\"pkNames\":null,\"isDdl\":false,"
+                  + "\"type\":\"TIDB_WATERMARK\",\"es\":1640007049196,\"ts\":1640007050284,"
+                  + "\"sql\":\"\",\"sqlType\":null,\"mysqlType\":null,\"data\":null,\"old\":null,"
+                  + "\"_tidb\":{\"watermarkTs\":429918007904436226}}",
+              "{\"id\":0,\"database\":\"shop\",\"table\":\"orders\",\"pkNames\":null,"
+                  + "\"isDdl\":true,\"type\":\"QUERY\",\"es\":1640007049196,"
+                  + "\"ts\":1640007050284,\"sql\":\"ALTER TABLE orders ADD COLUMN c INT\","
+                  + "\"sqlType\":null,\"mysqlType\":null,\"data\":null,\"old\":null}",
+              "{\"data\":[{\"id\":\"1\",\"name\":\"a2\",\"score\":\"1.5\"}],"
+                  + "\"old\":[{\"name\":\"a\"}],\"database\":\"shop\",\"table\":\"orders\","
+                  + "\"type\":\"UPDATE\"}",
+              "{\"data\":[{\"id\":\"7\",\"name\":\"u\",\"score\":\"0.5\"}],\"database\":\"shop\","
+                  + "\"table\":\"users\",\"type\":\"DELETE\"}"));
+      Supplier<TableEnvironment> environment =
+          () -> {
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setParallelism(1);
+            StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+            tEnv.executeSql(
+                cdcTable(
+                    "orders",
+                    brokers,
+                    "cdc-canal-tables",
+                    "canal-json",
+                    SCALAR_COLUMNS,
+                    ", 'canal-json.database.include' = 'shop',"
+                        + " 'canal-json.table.include' = 'orders(_\\d+)?',"
+                        + " 'canal-json.ignore-parse-errors' = 'true'"));
+            tEnv.executeSql(
+                cdcTable(
+                    "users",
+                    brokers,
+                    "cdc-canal-tables",
+                    "canal-json",
+                    SCALAR_COLUMNS,
+                    ", 'canal-json.table.include' = 'users'"));
+            return tEnv;
+          };
+      String sql = "SELECT * FROM orders UNION ALL SELECT * FROM users";
+
+      String plan = NativePlanner.explain(environment.get(), sql);
+      assertTrue(
+          plan.contains("NativeKafkaDecode(table=[[default_catalog, default_database, orders]]")
+              && plan.contains(
+                  "NativeKafkaDecode(table=[[default_catalog, default_database, users]]"),
+          "both filtered scans should decode natively:\n" + plan);
+      NativeParity.assertKindedParity(
+          environment,
+          sql,
+          List.of(
+              List.of("+I", 1L, "a", 1.5),
+              List.of("+I", 7L, "u", 0.5),
+              List.of("+I", 2L, "b", 2.5),
+              List.of("-U", 1L, "a", 1.5),
+              List.of("+U", 1L, "a2", 1.5),
+              List.of("-D", 7L, "u", 0.5)));
+    }
+  }
+
   private static void assertParity(
       String brokers, String topic, String format, List<String> messages) throws Exception {
     assertParity(brokers, topic, format, SCALAR_COLUMNS, messages);
@@ -241,14 +327,21 @@ class NativeCdcDecodeSqlHarnessTest {
       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
       env.setParallelism(1);
       StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
-      tEnv.executeSql(cdcTable(brokers, topic, format, columns, extraOptions));
+      tEnv.executeSql(cdcTable("cdc", brokers, topic, format, columns, extraOptions));
       return tEnv;
     };
   }
 
   private static String cdcTable(
-      String brokers, String topic, String format, String columns, String extraOptions) {
-    return "CREATE TABLE cdc ("
+      String name,
+      String brokers,
+      String topic,
+      String format,
+      String columns,
+      String extraOptions) {
+    return "CREATE TABLE "
+        + name
+        + " ("
         + columns
         + ") WITH ("
         + "'connector' = 'kafka', "

@@ -89,6 +89,9 @@ class KafkaSourceBenchmark {
   static {
     register(new NestedCdc("nested-maxwell", "maxwell-json"));
     register(new NestedCdc("nested-canal", "canal-json"));
+    register(new CanalTables("canal-one-of-ten-tables", 10, "t0"));
+    register(new CanalTables("canal-all-ten-tables", 10, "t\\d"));
+    register(new CanalTables("canal-sharded-tables", 1_000_000, "t\\d*0"));
   }
 
   private static void register(Workload workload) {
@@ -347,7 +350,8 @@ class KafkaSourceBenchmark {
     }
   }
 
-  private static String bounded(String brokers, String topic, String format) {
+  private static String bounded(
+      String brokers, String topic, String format, String extraOptions) {
     return " WITH ('connector' = 'kafka', 'topic' = '"
         + topic
         + "', 'properties.bootstrap.servers' = '"
@@ -355,7 +359,9 @@ class KafkaSourceBenchmark {
         + "', 'properties.max.poll.records' = '8192', 'scan.startup.mode' = 'earliest-offset',"
         + " 'scan.bounded.mode' = 'latest-offset', 'format' = '"
         + format
-        + "')";
+        + "'"
+        + extraOptions
+        + ")";
   }
 
   /**
@@ -384,7 +390,7 @@ class KafkaSourceBenchmark {
       return "CREATE TABLE cdc (id BIGINT, tenant STRING, name STRING, amount BIGINT,"
           + " info ROW<name STRING, score BIGINT, tags ARRAY<STRING>>,"
           + " attrs MAP<STRING, BIGINT>, items ARRAY<ROW<sku STRING, qty INT>>)"
-          + bounded(brokers, topic, format);
+          + bounded(brokers, topic, format, "");
     }
 
     @Override
@@ -450,6 +456,64 @@ class KafkaSourceBenchmark {
           + ",\"tags\":[\"a\",\"b" + round + "\"]},\"attrs\":{\"a\":" + (key % 5) + ",\"b\":"
           + round + "},\"items\":[{\"sku\":\"s" + (key % 11) + "\",\"qty\":" + (round + 1)
           + "}]";
+    }
+  }
+
+  /**
+   * A Canal topic multiplexing one database's tables, the shape Canal's include filters exist for:
+   * messages rotate through {@code tables} tables with Canal's own envelope fields and string
+   * values, and the measured table admits {@code pattern}'s share, spread over every partition.
+   * A million sharded tables make nearly every value distinct, so the native verdict cache misses.
+   */
+  private static final class CanalTables implements Workload {
+    private final String id;
+    private final long tables;
+    private final String pattern;
+
+    CanalTables(String id, long tables, String pattern) {
+      this.id = id;
+      this.tables = tables;
+      this.pattern = pattern;
+    }
+
+    @Override
+    public String id() {
+      return id;
+    }
+
+    @Override
+    public String ddl(String brokers, String topic) {
+      return "CREATE TABLE cdc (id BIGINT, tenant STRING, name STRING, amount BIGINT)"
+          + bounded(
+              brokers,
+              topic,
+              "canal-json",
+              ", 'canal-json.database.include' = 'shop', 'canal-json.table.include' = '"
+                  + pattern
+                  + "'");
+    }
+
+    @Override
+    public String query() {
+      return "SELECT tenant, COUNT(*) AS changes, SUM(amount) AS amount FROM cdc GROUP BY tenant";
+    }
+
+    @Override
+    public ProducerRecord<byte[], byte[]> record(String topic, long index, long records) {
+      String value =
+          "{\"data\":[{\"id\":\"" + index + "\",\"tenant\":\"t" + (index % 64)
+              + "\",\"name\":\"n" + index + "\",\"amount\":\"" + (index % 1000) + "\"}],"
+              + "\"database\":\"shop\",\"es\":1589373560000,\"id\":" + index
+              + ",\"isDdl\":false,\"mysqlType\":{\"id\":\"bigint(20)\","
+              + "\"tenant\":\"varchar(16)\",\"name\":\"varchar(64)\",\"amount\":\"bigint(20)\"},"
+              + "\"old\":null,\"pkNames\":[\"id\"],\"sql\":\"\",\"sqlType\":{\"id\":-5,"
+              + "\"tenant\":12,\"name\":12,\"amount\":-5},\"table\":\"t" + (index % tables)
+              + "\",\"ts\":1589373560798,\"type\":\"INSERT\"}";
+      return new ProducerRecord<>(
+          topic,
+          (int) ((index / 10) % PARTITIONS),
+          Long.toString(index).getBytes(StandardCharsets.UTF_8),
+          value.getBytes(StandardCharsets.UTF_8));
     }
   }
 }
