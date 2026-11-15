@@ -15,6 +15,7 @@ streamfusion_format_support::format_jni_facade!(
     Java_tech_streamfusion_format_json_NativeJsonFormat_isLoaded,
     Java_tech_streamfusion_format_json_NativeJsonFormat_nativeBuildVersion,
     Java_tech_streamfusion_format_json_NativeJsonFormat_decodeInto,
+    Java_tech_streamfusion_format_json_NativeJsonFormat_decodeRecordsInto,
     Java_tech_streamfusion_format_json_NativeJsonFormat_closeDecoder
 );
 mod json;

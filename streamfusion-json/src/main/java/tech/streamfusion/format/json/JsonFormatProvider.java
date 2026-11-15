@@ -75,6 +75,11 @@ public final class JsonFormatProvider implements NativeFormatProvider {
   }
 
   @Override
+  public boolean composesKafkaMetadata() {
+    return true;
+  }
+
+  @Override
   public boolean honorsProjection() {
     return true;
   }
@@ -166,6 +171,11 @@ public final class JsonFormatProvider implements NativeFormatProvider {
     }
 
     @Override
+    public boolean composesKafkaMetadata() {
+      return true;
+    }
+
+    @Override
     public boolean honorsProjection() {
       return false;
     }
@@ -247,6 +257,20 @@ public final class JsonFormatProvider implements NativeFormatProvider {
     @Override
     public void decodeInto(long inArray, long inSchema, long outArray, long outSchema) {
       NativeJsonFormat.decodeInto(handle, inArray, inSchema, outArray, outSchema);
+    }
+
+    @Override
+    public void decodeRecordsInto(
+        long slabAddress,
+        long slabLength,
+        long[] layout,
+        int count,
+        String topic,
+        int partition,
+        long outArray,
+        long outSchema) {
+      NativeJsonFormat.decodeRecordsInto(
+          handle, slabAddress, slabLength, layout, count, topic, partition, outArray, outSchema);
     }
 
     @Override

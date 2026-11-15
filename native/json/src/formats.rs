@@ -93,16 +93,22 @@ pub(crate) fn build_decoder(
 }
 
 impl Decoder for JsonDecoder {
-    fn decode(&self, body: &RecordBatch) -> RecordBatch {
-        self.decode(body)
+    fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
+        self.decode_traced(body)
+    }
+    fn output_may_alias_input(&self) -> bool {
+        false
     }
     fn output_schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 }
 impl Decoder for CdcJsonDecoder {
-    fn decode(&self, body: &RecordBatch) -> RecordBatch {
-        self.decode(body)
+    fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
+        self.decode_traced(body)
+    }
+    fn output_may_alias_input(&self) -> bool {
+        false
     }
     fn output_schema(&self) -> SchemaRef {
         self.output.clone()
@@ -220,7 +226,11 @@ impl CdcJsonDecoder {
     /// Drops the messages Canal's include filters reject, before the envelope decode converts
     /// anything: a rejected message never fails on bad data, as in Flink. A message the filter
     /// cannot read is corrupt — the job fails, or it drops under `ignore-parse-errors`.
-    fn apply_include(&self, include: &CanalIncludeFilter, bodies: &RecordBatch) -> RecordBatch {
+    fn apply_include(
+        &self,
+        include: &CanalIncludeFilter,
+        bodies: &RecordBatch,
+    ) -> (RecordBatch, Sources) {
         let column = bodies.column(0);
         let mut kept: Vec<u32> = Vec::with_capacity(bodies.num_rows());
         for (row, admission) in include.admit(column).into_iter().enumerate() {
@@ -238,12 +248,13 @@ impl CdcJsonDecoder {
             }
         }
         if kept.len() == bodies.num_rows() {
-            return bodies.clone();
+            return (bodies.clone(), Sources::Identity);
         }
-        let indices = arrow::array::UInt32Array::from(kept);
+        let indices = arrow::array::UInt32Array::from(kept.clone());
         let column = take(column, &indices, None).expect("failed to drop filtered messages");
-        RecordBatch::try_new(bodies.schema(), vec![column])
-            .expect("failed to rebuild the filtered body batch")
+        let batch = RecordBatch::try_new(bodies.schema(), vec![column])
+            .expect("failed to rebuild the filtered body batch");
+        (batch, Sources::Rows(kept))
     }
 
     /// Emits one envelope row's — one message's — output rows. Any failure in here is the
@@ -333,7 +344,7 @@ impl CdcJsonDecoder {
     /// message (job failure in default mode, a whole-message drop under `ignore-parse-errors`).
     /// The plain JSON decode underneath has its own whitespace rule (it drops such a body without
     /// error, per its Flink parity), so the CDC granularity is applied here, never inherited.
-    fn strip_tombstones(&self, bodies: &RecordBatch) -> RecordBatch {
+    fn strip_tombstones(&self, bodies: &RecordBatch) -> (RecordBatch, Sources) {
         let column = bodies.column(0);
         let mut kept: Vec<u32> = Vec::with_capacity(bodies.num_rows());
         for row in 0..bodies.num_rows() {
@@ -352,30 +363,13 @@ impl CdcJsonDecoder {
             }
         }
         if kept.len() == bodies.num_rows() {
-            return bodies.clone();
+            return (bodies.clone(), Sources::Identity);
         }
-        let indices = arrow::array::UInt32Array::from(kept);
+        let indices = arrow::array::UInt32Array::from(kept.clone());
         let column = take(column, &indices, None).expect("failed to drop CDC tombstones");
-        RecordBatch::try_new(bodies.schema(), vec![column])
-            .expect("failed to rebuild the CDC body batch")
-    }
-
-    /// Which body each envelope row decoded from, or `None` when they pair in order. An envelope
-    /// decodes at most one row per body, so equal counts pair them; fewer rows means skip mode
-    /// dropped bodies, and decoding each body alone finds the ones that survived.
-    fn enveloped_bodies(&self, bodies: &RecordBatch, envelope_rows: usize) -> Option<Vec<usize>> {
-        if envelope_rows == bodies.num_rows() {
-            return None;
-        }
-        let kept: Vec<usize> = (0..bodies.num_rows())
-            .filter(|&row| self.envelope.decode(&bodies.slice(row, 1)).num_rows() > 0)
-            .collect();
-        assert_eq!(
-            kept.len(),
-            envelope_rows,
-            "CDC envelope rows don't match their bodies"
-        );
-        Some(kept)
+        let batch = RecordBatch::try_new(bodies.schema(), vec![column])
+            .expect("failed to rebuild the CDC body batch");
+        (batch, Sources::Rows(kept))
     }
 
     /// The `DataOld` presence scan: per envelope row, the set of physical field keys Flink's
@@ -470,16 +464,20 @@ impl CdcJsonDecoder {
         }
     }
 
-    fn decode(&self, bodies: &RecordBatch) -> RecordBatch {
+    fn decode_traced(&self, bodies: &RecordBatch) -> (RecordBatch, Sources) {
         use arrow::array::ListArray;
-        let bodies = &self.strip_tombstones(bodies);
-        let bodies = &match &self.include {
-            Some(include) => self.apply_include(include, bodies),
-            None => bodies.clone(),
+        let (bodies, stripped) = self.strip_tombstones(bodies);
+        let (bodies, included) = match &self.include {
+            Some(include) => self.apply_include(include, &bodies),
+            None => (bodies, Sources::Identity),
         };
-        let envelope = self.envelope.decode(bodies);
+        let bodies = &bodies;
+        let (envelope, enveloped) = self.envelope.decode_traced(bodies);
         if envelope.num_rows() == 0 {
-            return RecordBatch::new_empty(self.output.clone());
+            return (
+                RecordBatch::new_empty(self.output.clone()),
+                Sources::Rows(Vec::new()),
+            );
         }
 
         let spec = self.dialect.spec();
@@ -518,11 +516,10 @@ impl CdcJsonDecoder {
 
         // The DataOld dialects need per-message key presence in `old` (Flink's findValue rule).
         let presence = if spec.shape == CdcShape::DataOld {
-            let enveloped = self.enveloped_bodies(bodies, envelope.num_rows());
             self.old_key_presence(
                 bodies,
                 envelope.num_rows(),
-                |row| enveloped.as_ref().map_or(row, |rows| rows[row]),
+                |row| enveloped.message(row),
                 |row| {
                     ops.is_valid(row)
                         && matches!(
@@ -539,6 +536,7 @@ impl CdcJsonDecoder {
         // rows to read in the pre/post-image struct arrays, and which image to read each column from.
         let mut out_rows: Vec<(i8, usize, usize, RowSource)> =
             Vec::with_capacity(envelope.num_rows());
+        let mut sources = SourceRecorder::with_capacity(envelope.num_rows());
         for row in 0..envelope.num_rows() {
             if self.skip_errors {
                 // Flink's skip keeps whatever a message emitted before its failure: the
@@ -554,63 +552,24 @@ impl CdcJsonDecoder {
             } else {
                 self.emit_message(row, &spec, &envelope, before, after, &mut out_rows);
             }
+            sources.message_done(row, out_rows.len());
         }
 
-        gather_cdc_batch(
+        let batch = gather_cdc_batch(
             &out_rows,
             before,
             after,
             self.arity,
             &self.output,
             &presence,
-        )
+        );
+        let sources = sources
+            .finish(envelope.num_rows())
+            .after(&enveloped)
+            .after(&included)
+            .after(&stripped);
+        (batch, sources)
     }
-}
-
-/// Builds a binary input column over a contiguous values region. `copy_values` is used for keyed
-/// raw columns because a raw decode may legally pass those buffers through to the exported output;
-/// JSON bodies are consumed synchronously into fresh Arrow builders and can borrow the JVM slab.
-fn contiguous_binary_array(
-    address: usize,
-    values_len: usize,
-    lengths: impl Iterator<Item = i32>,
-    copy_values: bool,
-) -> BinaryArray {
-    let mut offsets = Vec::new();
-    let mut nulls = NullBufferBuilder::new(0);
-    offsets.push(0_i32);
-    let mut offset = 0_i32;
-    for length in lengths {
-        if length < 0 {
-            nulls.append_null();
-        } else {
-            nulls.append_non_null();
-            offset = offset
-                .checked_add(length)
-                .expect("contiguous Kafka byte batch exceeds Arrow binary offsets");
-        }
-        offsets.push(offset);
-    }
-    assert_eq!(
-        offset as usize, values_len,
-        "Kafka byte slab length mismatch"
-    );
-    let values = if copy_values {
-        let bytes = unsafe { std::slice::from_raw_parts(address as *const u8, values_len) };
-        arrow::buffer::Buffer::from(bytes)
-    } else {
-        let pointer =
-            std::ptr::NonNull::new(address as *mut u8).unwrap_or_else(std::ptr::NonNull::dangling);
-        // The Java ArrowBuf owns this memory for the duration of the JNI call. JSON decode consumes
-        // it synchronously and never exposes it in the output batch; the custom owner intentionally
-        // performs no deallocation when this temporary input array drops.
-        unsafe { arrow::buffer::Buffer::from_custom_allocation(pointer, values_len, Arc::new(())) }
-    };
-    BinaryArray::new(
-        OffsetBuffer::new(ScalarBuffer::from(offsets)),
-        values,
-        nulls.finish(),
-    )
 }
 
 /// JSON-source fast boundary: the JVM copies polled Kafka records once into `[keys][values]` and
@@ -744,7 +703,6 @@ pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_creat
             .get_string(&format_options)
             .map(Into::into)
             .unwrap_or_default();
-        let options = parse_format_options(&format_options);
         let verdicts = JvmIncludeVerdicts {
             vm: env.get_java_vm().expect("failed to read the JavaVM"),
             filter: env
@@ -752,25 +710,33 @@ pub extern "system" fn Java_tech_streamfusion_format_json_NativeJsonFormat_creat
                 .expect("failed to retain the Canal include filter"),
         };
         let skip_errors = skip_parse_errors != 0;
-        let decoder = CdcJsonDecoder::new(
+        into_handle(compose_metadata(
+            FORMAT_CANAL_JSON,
             schema,
-            CdcDialect::Canal,
-            crate::json::JsonEnv {
-                mode: options.timestamp_mode,
-                lenient: false,
-                tree_duplicates: true,
+            &format_options,
+            |schema, format_options| {
+                let options = parse_format_options(format_options);
+                let decoder = CdcJsonDecoder::new(
+                    schema,
+                    CdcDialect::Canal,
+                    crate::json::JsonEnv {
+                        mode: options.timestamp_mode,
+                        lenient: false,
+                        tree_duplicates: true,
+                    },
+                    skip_errors,
+                    options.json_reject_array_roots,
+                )
+                .with_include(CanalIncludeFilter::new(
+                    database != 0,
+                    table != 0,
+                    Box::new(verdicts),
+                ));
+                MessageDecoder {
+                    decoder: Box::new(decoder),
+                    skip_errors,
+                }
             },
-            skip_errors,
-            options.json_reject_array_roots,
-        )
-        .with_include(CanalIncludeFilter::new(
-            database != 0,
-            table != 0,
-            Box::new(verdicts),
-        ));
-        into_handle(MessageDecoder {
-            decoder: Box::new(decoder),
-            skip_errors,
-        })
+        ))
     })
 }
