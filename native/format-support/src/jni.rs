@@ -92,14 +92,21 @@ fn create_value_decoder(
 ) -> MessageDecoder {
     let options = parse_format_options(format_options);
     if let Some(keyed) = options.keyed.clone() {
-        // A keyed table: build the value decoder against the physical schema projected to the
-        // value positions (the keyed option lines stripped so the recursion is plain), and the
-        // raw key decoder against the key column; the wrapper owns per-record composition.
-        let value_options: String = format_options
+        // A keyed table: the value decoder sees the physical schema projected to the value
+        // positions (the keyed option lines stripped so the recursion is plain), the key decoder
+        // the key fields under the names the key format reads, and the wrapper owns the per-record
+        // composition. The key format is raw or the value's own, so this library decodes both; an
+        // Avro key's schemas ride its option lines.
+        let mut value_options: String = format_options
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with("keyed."))
             .map(|line| format!("{line}\n"))
             .collect();
+        // A strict JSON value reports the null rows Flink's merge fails on beside a key row (see
+        // KeyedDecoder); one that skips errors drops such an element alone (divergences/21).
+        if format == FORMAT_JSON && !skip_errors {
+            value_options.push_str("json.null-rows=true\n");
+        }
         let value_schema: SchemaRef = Arc::new(Schema::new(
             keyed
                 .value_positions
@@ -117,15 +124,51 @@ fn create_value_decoder(
             skip_errors,
             &value_options,
         ));
-        let key_schema: SchemaRef = Arc::new(Schema::new(vec![output_schema
-            .field(keyed.key_position)
-            .clone()]));
+        let key_schema: SchemaRef = Arc::new(Schema::new(
+            keyed
+                .key_positions
+                .iter()
+                .map(|position| {
+                    let field = output_schema.field(*position);
+                    let name = field
+                        .name()
+                        .strip_prefix(keyed.key_prefix.as_str())
+                        .expect("a key field carries the key prefix");
+                    field.as_ref().clone().with_name(name)
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let key_options = parse_format_options(&keyed.key_options);
+        // A JSON key reports the null rows Flink's merge trips over (see KeyedDecoder).
+        let key_option_lines = if keyed.key_format == FORMAT_JSON {
+            format!("{}json.null-rows=true\n", keyed.key_options)
+        } else {
+            keyed.key_options.clone()
+        };
+        let key = Box::new(if keyed.key_format == FORMAT_RAW {
+            MessageDecoder {
+                decoder: Box::new(RawDecoder::new(key_schema, key_options.raw_little_endian)),
+                skip_errors: false,
+            }
+        } else {
+            create_message_decoder(
+                factory,
+                keyed.key_format,
+                key_schema,
+                &key_options.avro_writer_schema,
+                &key_options.avro_reader_schema,
+                0,
+                keyed.key_skip_errors,
+                &key_option_lines,
+            )
+        });
         return MessageDecoder {
             decoder: Box::new(KeyedDecoder {
                 value,
-                key: RawDecoder::new(key_schema, keyed.key_little_endian),
-                key_position: keyed.key_position,
+                key,
+                key_positions: keyed.key_positions,
                 value_positions: keyed.value_positions,
+                value_skips_errors: skip_errors,
                 output: output_schema,
             }),
             skip_errors: false,
@@ -216,6 +259,25 @@ pub fn register_avro_schema<'local>(
     })
 }
 
+/// [`register_avro_schema`] for a keyed table's Confluent-Avro key, whose writer schemas the JVM
+/// fetches through the key format's own registry options.
+pub fn register_avro_key_schema<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    schema_id: jint,
+    schema: JString<'local>,
+) {
+    crate::bridge::jni_guard(env, move |env| {
+        let decoder = unsafe { &mut *(handle as *mut MessageDecoder) };
+        let schema: String = env
+            .get_string(&schema)
+            .expect("failed to read avro schema")
+            .into();
+        decoder.register_key_writer_schema(schema_id as u32, &schema);
+    })
+}
+
 /// Decodes one body batch into a typed batch, exporting it into the consumer-allocated C structs.
 /// A decode failure (bad data outside skip mode) surfaces as a Java `RuntimeException` — the task
 /// fails the way Flink's own deserializer failure does — rather than unwinding across the JNI
@@ -280,8 +342,8 @@ pub fn decode_records_into<'local>(
         let length = usize::try_from(slab_length).expect("negative Kafka record buffer length");
         let decoder = unsafe { &*(handle as *mut MessageDecoder) };
         let slab = unsafe { RecordSlab::new(slab_address as usize, length, regions, count) };
-        let bodies = slab.bodies(decoder.output_may_alias_input());
-        let batch = decoder.decode_records(&bodies, &slab.metadata(&topic, partition));
+        let input = slab.records(decoder.output_may_alias_input());
+        let batch = decoder.decode_records(&input, &slab.metadata(&topic, partition));
         export_record_batch(batch, out_array_address, out_schema_address);
     }));
     match decoded {

@@ -33,6 +33,16 @@ public interface NativeFormatProvider {
     return false;
   }
 
+  /**
+   * The option lines that build a keyed table's key decoder in native code, called on the key
+   * format's provider with a context of the key fields under the key format's own options; null
+   * when this artifact can't decode that key. The key decodes in the value format's native
+   * library, so the planner asks only the value's own format and raw, which every library carries.
+   */
+  default String keyDecoderOptions(NativeFormatContext context) {
+    return supports(context) ? NativeFormatOptions.encode(context.options()) : null;
+  }
+
   /** Runtime encoder entry point owned by this provider, independent of its planning inputs. */
   default NativeMessageEncoderFactory encoderFactory() {
     return null;

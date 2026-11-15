@@ -68,10 +68,28 @@ impl SourceRecorder {
     }
 }
 
+/// The messages whose decode collected a null row, each with the rows it produced first, in
+/// message order. Flink 2.x's JSON format collects a null for a `null` top-level array element;
+/// only a decoder built to report them does, for a composition whose Flink counterpart trips over
+/// them.
+pub type NullRows = Vec<(u32, u32)>;
+
+/// Records `message`'s first null row, after the `rows` it produced before it.
+pub fn record_null_row(null_rows: &mut NullRows, message: usize, rows: usize) {
+    if null_rows.last().map(|&(last, _)| last as usize) != Some(message) {
+        null_rows.push((message as u32, rows as u32));
+    }
+}
+
 /// A decoder is constructed and called only inside its owning native library.
 pub trait Decoder {
     /// Decodes one batch of messages, reporting the message each output row came from.
     fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources);
+    /// [`Decoder::decode_traced`], plus the messages whose decode collected a null row.
+    fn decode_traced_null_rows(&self, body: &RecordBatch) -> (RecordBatch, Sources, NullRows) {
+        let (batch, sources) = self.decode_traced(body);
+        (batch, sources, NullRows::new())
+    }
     fn decode(&self, body: &RecordBatch) -> RecordBatch {
         self.decode_traced(body).0
     }
@@ -80,6 +98,10 @@ pub trait Decoder {
     }
     fn register_writer_schema(&mut self, _id: u32, _schema: &str) {
         panic!("registerAvroSchema on a non-Confluent-Avro decoder")
+    }
+    /// Registers a writer schema with a keyed table's Confluent-Avro key decoder.
+    fn register_key_writer_schema(&mut self, _id: u32, _schema: &str) {
+        panic!("registerKeyWriterSchema on a decoder without a Confluent-Avro key")
     }
     /// Whether a decoded batch may share buffers with the input bodies (a pass-through decode),
     /// so input borrowed from the JVM must be copied first.
@@ -101,18 +123,32 @@ impl MessageDecoder {
     pub fn register_writer_schema(&mut self, id: u32, schema: &str) {
         self.decoder.register_writer_schema(id, schema);
     }
+    pub fn register_key_writer_schema(&mut self, id: u32, schema: &str) {
+        self.decoder.register_key_writer_schema(id, schema);
+    }
     pub fn output_may_alias_input(&self) -> bool {
         self.decoder.output_may_alias_input()
     }
-    /// Decodes whole Kafka records: the bodies with their records' connector metadata.
-    pub fn decode_records(&self, bodies: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
+    /// Decodes whole Kafka records: the bodies (a keyed table's keys too) with their records'
+    /// connector metadata.
+    pub fn decode_records(&self, records: &RecordBatch, metadata: &RecordMetadata) -> RecordBatch {
         self.decoder
             .metadata_decoder()
             .expect("this table's decode reads no Kafka metadata")
-            .decode_records(bodies, metadata)
+            .decode_records(records, metadata)
     }
     pub fn decode(&self, body: &RecordBatch) -> RecordBatch {
         self.decode_traced(body).0
+    }
+
+    /// The decode with its null rows; a skip-mode retry wrapper never reports any (only the JSON
+    /// decoder collects them, and it skips errors itself).
+    pub fn decode_traced_null_rows(&self, body: &RecordBatch) -> (RecordBatch, Sources, NullRows) {
+        if self.skip_errors {
+            let (batch, sources) = self.decode_traced(body);
+            return (batch, sources, NullRows::new());
+        }
+        self.decoder.decode_traced_null_rows(body)
     }
 
     pub fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
@@ -194,5 +230,15 @@ pub fn silence_expected_decode_panics<R>(work: impl FnOnce() -> R) -> R {
 impl Decoder for KeyedDecoder {
     fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
         self.decode_traced(body)
+    }
+    /// A slab batch's keys are always copied, so only its values can alias the JVM's buffer.
+    fn output_may_alias_input(&self) -> bool {
+        self.value.output_may_alias_input()
+    }
+    fn register_writer_schema(&mut self, id: u32, schema: &str) {
+        self.value.register_writer_schema(id, schema);
+    }
+    fn register_key_writer_schema(&mut self, id: u32, schema: &str) {
+        self.key.register_writer_schema(id, schema);
     }
 }

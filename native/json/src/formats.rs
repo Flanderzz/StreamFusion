@@ -57,19 +57,22 @@ pub(crate) fn build_decoder(
     let decoder: Box<dyn Decoder> = match format {
         FORMAT_JSON => {
             return MessageDecoder {
-                decoder: Box::new(JsonDecoder::plain(
-                    output_schema,
-                    crate::json::JsonEnv {
-                        mode: options.timestamp_mode,
-                        lenient: skip_errors,
-                        tree_duplicates: false,
-                    },
-                    if options.json_reject_array_roots {
-                        ArrayRootPolicy::Corrupt
-                    } else {
-                        ArrayRootPolicy::FanOut
-                    },
-                )),
+                decoder: Box::new(
+                    JsonDecoder::plain(
+                        output_schema,
+                        crate::json::JsonEnv {
+                            mode: options.timestamp_mode,
+                            lenient: skip_errors,
+                            tree_duplicates: false,
+                        },
+                        if options.json_reject_array_roots {
+                            ArrayRootPolicy::Corrupt
+                        } else {
+                            ArrayRootPolicy::FanOut
+                        },
+                    )
+                    .collecting_null_rows(options.json_null_rows),
+                ),
                 skip_errors: false,
             }
         }
@@ -95,6 +98,9 @@ pub(crate) fn build_decoder(
 impl Decoder for JsonDecoder {
     fn decode_traced(&self, body: &RecordBatch) -> (RecordBatch, Sources) {
         self.decode_traced(body)
+    }
+    fn decode_traced_null_rows(&self, body: &RecordBatch) -> (RecordBatch, Sources, NullRows) {
+        self.decode_traced_null_rows(body)
     }
     fn output_may_alias_input(&self) -> bool {
         false

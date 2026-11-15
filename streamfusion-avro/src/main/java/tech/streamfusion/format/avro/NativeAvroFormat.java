@@ -34,13 +34,16 @@ public final class NativeAvroFormat {
   /**
    * {@code schemaArrayAddress}/{@code schemaAddress} export the boundary Arrow schema (an empty
    * batch of the output row type); the native decode reconciles each arrow-avro batch onto it.
+   * {@code formatOptions} are the table's encoded option lines: the connector metadata columns and
+   * a keyed table's key composition.
    */
   public static native long createDecoder(
       boolean confluent,
       String writerSchema,
       String readerSchema,
       long schemaArrayAddress,
-      long schemaAddress);
+      long schemaAddress,
+      String formatOptions);
 
   /**
    * The {@code debezium-avro-confluent} decoder: a registry-driven envelope decode against {@code
@@ -48,9 +51,12 @@ public final class NativeAvroFormat {
    * physical boundary schema plus {@code $row_kind$}.
    */
   public static native long createDebeziumDecoder(
-      String readerSchema, long schemaArrayAddress, long schemaAddress);
+      String readerSchema, long schemaArrayAddress, long schemaAddress, String formatOptions);
 
   public static native void registerWriterSchema(long handle, int schemaId, String schema);
+
+  /** Registers a writer schema with a keyed table's Confluent-framed key decoder. */
+  public static native void registerKeyWriterSchema(long handle, int schemaId, String schema);
 
   public static native void decodeInto(
       long handle,
